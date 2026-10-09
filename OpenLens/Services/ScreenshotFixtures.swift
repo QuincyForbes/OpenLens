@@ -382,6 +382,20 @@ enum ScreenshotFixtures {
         isEnabled && ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("SCREENSHOT_CONDITIONAL_FORM=") }
     }
 
+    static var opensInbox: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_INBOX")
+    }
+
+    static var opensGlobalFormSheet: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_GLOBAL_FORM_SHEET")
+    }
+
+    private static var globalFormScenario: String? {
+        guard isEnabled else { return nil }
+        return ProcessInfo.processInfo.arguments.first { $0.hasPrefix("SCREENSHOT_GLOBAL_FORM=") }?
+            .split(separator: "=").last.map(String.init)
+    }
+
     static var opensFormSheet: Bool {
         let processInfo = ProcessInfo.processInfo
         return processInfo.arguments.contains(formSheetArgument) || processInfo.environment[formSheetEnvironmentKey] == "1"
@@ -550,7 +564,28 @@ enum ScreenshotFixtures {
         disabledProviders: nil
     )
 
-    static let inboxSnapshot = InboxSnapshot(
+    static var inboxSnapshot: InboxSnapshot {
+        guard let scenario = globalFormScenario else { return standardInboxSnapshot }
+        let extraField = scenario == "unsupported"
+            ? #",{"key":"future","type":"server-control","title":"Integration control"}"#
+            : scenario == "external"
+                ? #",{"key":"login","type":"external","title":"Open the integration","url":"https://opencode.ai/docs/mcp-servers/","description":"Complete the action, then acknowledge it below."}"#
+                : ""
+        let wire = """
+        {"id":"frm-global-screenshot","sessionID":"global","title":"Confirm the MCP workspace","fields":[
+          {"key":"workspace","type":"string","title":"Workspace name","required":true,"default":"OpenLens"},
+          {"key":"approved","type":"boolean","title":"Allow workspace access","required":true,"default":false}
+          \(extraField)
+        ]}
+        """
+        guard let global = try? JSONDecoder().decode(OCFormRequest.self, from: Data(wire.utf8)) else {
+            preconditionFailure("Global screenshot form must decode.")
+        }
+        return InboxSnapshot(permissions: [], questions: [],
+            forms: [global.recovered(at: "/workspace/OpenLens"), standardScreenshotForm])
+    }
+
+    private static let standardInboxSnapshot = InboxSnapshot(
         permissions: [
             OCPermissionRequest(
                 id: "perm-screenshot-1",

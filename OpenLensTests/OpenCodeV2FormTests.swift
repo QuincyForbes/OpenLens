@@ -6,6 +6,232 @@ import UIKit
 
 @Suite(.serialized)
 struct OpenCodeV2FormTests {
+    @MainActor @Test(arguments: [
+        #"{"key":"future","type":"server-control","title":"Future control"}"#,
+        #"{"key":"future","type":"string","when":[{"key":"ok","op":"future","value":true}]}"#,
+    ])
+    func unsupportedGlobalFormsKeepTheFallbackAndCanStillBeCancelled(field: String) async throws {
+        let wire = Data("""
+        {"location":{"directory":"/workspace/mcp"},"data":[
+          {"id":"frm_global","sessionID":"global","title":"MCP","fields":[
+            {"key":"ok","type":"boolean"},\(field)
+          ]}
+        ]}
+        """.utf8)
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: wire), .init(statusCode: 204, body: Data()),
+        ])
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        let form = try #require(try await client.listPendingForms().first)
+        #expect(form.hasUnsupportedFields)
+        #expect(form.owner == .global(directory: "/workspace/mcp"))
+        await #expect(throws: OpenCodeError.self) { try await inbox.respondToForm(form, answer: ["ok": .boolean(true)]) }
+        #expect(transport.recordedRequests().count == 2)
+        try await inbox.cancelForm(form)
+        let cancellation = try #require(transport.recordedRequests().last)
+        #expect(cancellation.method == "DELETE")
+        #expect(cancellation.path == "/api/session/global/form/frm_global")
+        #expect(cancellation.queryItems == ["location[directory]": "/workspace/mcp"])
+    }
+
+    @MainActor @Test func unboundGlobalOwnersAndUnsafeRouteTokensNeverReachTransport() async throws {
+        let transport = V2FormTransport(responses: [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)])
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        // A location embedded in an untrusted event/form cannot override recovery.
+        let unbound = try JSONDecoder().decode(OCFormRequest.self, from: Data(#"""
+        {"id":"frm_global","sessionID":"global","globalDirectory":"/forged",
+         "title":"MCP","fields":[{"key":"ok","type":"boolean"}]}
+        """#.utf8))
+        #expect(unbound.owner == .global(directory: nil))
+        let inbox = InboxService(connection: connection)
+        await #expect(throws: OpenCodeError.self) { try await inbox.respondToForm(unbound, answer: ["ok": .boolean(true)]) }
+        await #expect(throws: OpenCodeError.self) { try await inbox.cancelForm(unbound) }
+        for directory in ["", "relative/path", "/bad\0path", "/" + String(repeating: "x", count: 4_096)] {
+            await #expect(throws: OpenCodeError.self) {
+                try await client.replyToForm(owner: .global(directory: directory), formID: "frm_global", answer: [:])
+            }
+            await #expect(throws: OpenCodeError.self) {
+                try await client.cancelForm(owner: .global(directory: directory), formID: "frm_global")
+            }
+        }
+        for id in ["../escape", "frm/other", "frm?owner=global"] {
+            await #expect(throws: OpenCodeError.self) {
+                try await client.cancelForm(owner: .global(directory: "/workspace/mcp"), formID: id)
+            }
+        }
+        await #expect(throws: OpenCodeError.self) { try await client.replyToForm(sessionID: "global", formID: "frm_global", answer: [:]) }
+        await #expect(throws: OpenCodeError.self) { try await client.cancelForm(sessionID: "global", formID: "frm_global") }
+        #expect(transport.recordedRequests().map(\.path) == ["/api/info"])
+    }
+
+    @MainActor @Test func v1InboxStillRecoversLegacyInteractionsWithoutAnyGlobalFormRoutes() async throws {
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 404, body: Data())],
+            "GET /global/health": [.init(statusCode: 200, body: OpenCodeContractFixtures.v1HealthResponse)],
+            "GET /permission": [.init(statusCode: 200, body: Data("[]".utf8))],
+            "GET /question": [.init(statusCode: 200, body: Data("[]".utf8))],
+        ])
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let snapshot = try await InboxService(connection: connection).loadInbox()
+        #expect(snapshot.warning == nil)
+        #expect(snapshot.forms.isEmpty)
+        #expect(snapshot.pendingRequestCount == 0)
+        await #expect(throws: OpenCodeError.self) {
+            try await client.replyToForm(owner: .global(directory: "/workspace/mcp"), formID: "frm_global", answer: [:])
+        }
+        await #expect(throws: OpenCodeError.self) {
+            try await client.cancelForm(owner: .global(directory: "/workspace/mcp"), formID: "frm_global")
+        }
+        #expect(Set(transport.recordedRequests().map(\.path)) == ["/api/info", "/global/health", "/permission", "/question"])
+    }
+
+    @MainActor @Test func inboxSeparatesGlobalFormsAndRecoversAfterLoadReplyAndCancelFailures() async throws {
+        let located = Data(#"""
+        {"location":{"directory":"/canonical/mcp"},"data":[
+          {"id":"frm_global","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]},
+          {"id":"frm_session","sessionID":"ses_owner","title":"Session","fields":[{"key":"ok","type":"boolean"}]}
+        ]}
+        """#.utf8)
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request": Array(repeating: .init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/canonical/mcp"},"data":[]}"#.utf8)), count: 3),
+            "GET /api/form": [.init(statusCode: 503, body: Data()),
+                .init(statusCode: 200, body: located), .init(statusCode: 200, body: located)],
+            "POST /api/session/global/form/frm_global/reply": [
+                .init(statusCode: 503, body: Data()), .init(statusCode: 204, body: Data())],
+            "DELETE /api/session/global/form/frm_global": [
+                .init(statusCode: 503, body: Data()), .init(statusCode: 204, body: Data())],
+        ])
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!,
+            contextDirectory: "/requested/mcp", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        let failed = try await inbox.loadInbox()
+        #expect(failed.forms.isEmpty)
+        #expect(failed.warning != nil)
+        let recovered = try await inbox.loadInbox()
+        #expect(recovered.warning == nil)
+        #expect(recovered.globalForms.map(\.id) == ["frm_global"])
+        #expect(recovered.sessionForms.map(\.id) == ["frm_session"])
+        #expect(recovered.pendingRequestCount == 2)
+        let global = try #require(recovered.globalForms.first)
+        #expect(global.owner == .global(directory: "/canonical/mcp"))
+        await client.updateContextDirectory("/another/chat")
+        await #expect(throws: OpenCodeError.self) { try await inbox.respondToForm(global, answer: ["ok": .boolean(true)]) }
+        try await inbox.respondToForm(global, answer: ["ok": .boolean(false)])
+        let reopened = try await inbox.loadInbox()
+        let cancel = try #require(reopened.globalForms.first)
+        await #expect(throws: OpenCodeError.self) { try await inbox.cancelForm(cancel) }
+        try await inbox.cancelForm(cancel)
+        let operations = transport.recordedRequests().filter { $0.method != "GET" }
+        #expect(operations.count == 4)
+        #expect(operations.allSatisfy { $0.queryItems == ["location[directory]": "/canonical/mcp"] })
+        #expect(operations.map(\.method) == ["POST", "POST", "DELETE", "DELETE"])
+        #expect(!transport.recordedRequests().contains { $0.path.hasPrefix("/api/question") })
+    }
+
+    @MainActor @Test func chatRecoveryNeverTreatsGlobalAsASessionOwner() async throws {
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: Data(#"""
+            {"data":[
+              {"id":"frm_global","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]},
+              {"id":"frm_foreign","sessionID":"ses_foreign","title":"Foreign","fields":[{"key":"ok","type":"boolean"}]},
+              {"id":"frm_owner","title":"Owner","fields":[{"key":"ok","type":"boolean"}]}
+            ]}
+            """#.utf8)),
+        ])
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let questions = QuestionService(connection: connection)
+        let ordinary = try #require(try await questions.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(ordinary.id == "frm_owner")
+        #expect(ordinary.owner == .session("ses_owner"))
+        let global = OCFormRequest(id: "frm_global", sessionID: "global", title: "MCP", fields: ordinary.fields)
+        #expect(global.owner == .global(directory: nil))
+        let chat = ChatClient(demoMode: true)
+        let didPresent = chat.presentForm(global)
+        #expect(!didPresent)
+        #expect(try await questions.recoverPendingForm(sessionID: "global") == nil)
+        await #expect(throws: OpenCodeError.self) { _ = try await client.listPendingForms(sessionID: "global") }
+        await #expect(throws: OpenCodeError.self) { try await questions.respondToForm(global, answer: ["ok": .boolean(true)]) }
+        await #expect(throws: OpenCodeError.self) { try await questions.cancelForm(global) }
+        #expect(transport.recordedRequests().map(\.path) == ["/api/info", "/api/session/ses_owner/form"])
+    }
+
+    @MainActor @Test(arguments: ["", "ses_a", "ses_b"])
+    func globalEventsNeverPresentOrResolveAChatForm(selectedSession: String) throws {
+        let chat = ChatClient(demoMode: true)
+        if !selectedSession.isEmpty {
+            chat.currentSession = OCSession(id: selectedSession, title: "Another chat", time: .init(created: 0, updated: 0))
+        }
+        let handler = SSEEventHandler(haptics: HapticController(),
+            liveActivityTracker: LiveActivityTracker(liveActivity: TestLiveActivityProvider()))
+        handler.delegate = chat
+        let global = OCEvent(type: "form.created", properties: AnyCodable([
+            "form": ["id": "frm_shared", "sessionID": "global", "title": "MCP confirmation",
+                "fields": [["key": "approved", "type": "boolean"]]]
+        ]))
+        handler.handleInboundEvent(try #require(SSEInboundEvent.prepare(global)))
+        #expect(chat.pendingForm == nil)
+        #expect(!chat.showFormSheet)
+        // A global resolution cannot clear an ordinary form with the same ID,
+        // including before the user selects a chat.
+        let ordinary = try JSONDecoder().decode(OCFormRequest.self, from: Data("""
+        {"id":"frm_shared","sessionID":"\(selectedSession.isEmpty ? "ses_a" : selectedSession)",
+         "title":"Session confirmation","fields":[{"key":"approved","type":"boolean"}]}
+        """.utf8))
+        chat.pendingForm = ordinary
+        chat.showFormSheet = true
+        for type in ["form.replied", "form.cancelled"] {
+            handler.handleInboundEvent(try #require(SSEInboundEvent.prepare(OCEvent(type: type,
+                properties: AnyCodable(["id": "frm_shared", "sessionID": "global"])))))
+            #expect(chat.pendingForm?.sessionID == ordinary.sessionID)
+            #expect(chat.showFormSheet)
+        }
+    }
+
+    @MainActor @Test func inboxGlobalFormKeepsItsRecoveredLocationWhenAnotherChatChangesContext() async throws {
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: Data(#"""
+            {"location":{"directory":"/canonical/mcp"},"data":[
+              {"id":"frm_global","sessionID":"global","title":"MCP confirmation","fields":[
+                {"key":"approved","type":"boolean","required":true}
+              ]}
+            ]}
+            """#.utf8)),
+            .init(statusCode: 204, body: Data()),
+            .init(statusCode: 204, body: Data()),
+        ])
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!,
+            contextDirectory: "/requested/mcp", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let form = try #require(try await client.listPendingForms().first)
+        // Opening a chat may change the client's selected location. The recovered
+        // global interaction still belongs to the server-resolved MCP location.
+        await client.updateContextDirectory("/another/chat")
+        let inbox = InboxService(connection: connection)
+        try await inbox.respondToForm(form, answer: ["approved": .boolean(false)])
+        try await inbox.cancelForm(form)
+        let requests = transport.recordedRequests()
+        #expect(requests.map(\.path) == ["/api/info", "/api/form",
+            "/api/session/global/form/frm_global/reply", "/api/session/global/form/frm_global"])
+        #expect(requests[1].queryItems["location[directory]"] == "/requested/mcp")
+        #expect(requests[2].queryItems == ["location[directory]": "/canonical/mcp"])
+        #expect(requests[3].queryItems == ["location[directory]": "/canonical/mcp"])
+        #expect(requests[2].method == "POST")
+        #expect(requests[3].method == "DELETE")
+        let payload = try #require(try bodyObject(requests[2])["answer"] as? [String: Any])
+        #expect(payload["approved"] as? Bool == false)
+    }
+
     @Test func v2FormsUseTheOwningSessionForRecoveryRepliesAndCancellation() async throws {
         let transport = V2FormTransport(responses: [
             .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
@@ -684,10 +910,16 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
 
     private let lock = NSLock()
     private var responses: [Response]
+    private var pathResponses: [String: [Response]]?
     private var requests: [RecordedRequest] = []
 
     init(responses: [Response]) {
         self.responses = responses
+    }
+
+    init(pathResponses: [String: [Response]]) {
+        self.responses = []
+        self.pathResponses = pathResponses
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -705,6 +937,13 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
                 queryItems: queryItems,
                 body: request.httpBody
             ))
+            if pathResponses != nil {
+                let key = "\(request.httpMethod ?? "GET") \(url.path)"
+                guard var queued = pathResponses?[key], !queued.isEmpty else { throw MissingV2FormResponse() }
+                let response = queued.removeFirst()
+                pathResponses?[key] = queued
+                return response
+            }
             guard !responses.isEmpty else {
                 throw MissingV2FormResponse()
             }

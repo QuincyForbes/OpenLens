@@ -41,6 +41,9 @@ struct InboxRootView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await loadInbox()
+            if ScreenshotFixtures.opensGlobalFormSheet {
+                activeForm = snapshot.globalForms.first
+            }
         }
         .refreshable {
             await loadInbox(force: true)
@@ -105,6 +108,13 @@ struct InboxRootView: View {
                         errorCard(warning)
                     }
 
+                    if !snapshot.globalForms.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            sectionHeader(title: "Global MCP forms", count: snapshot.globalForms.count)
+                            formsCard(snapshot.globalForms)
+                        }
+                    }
+
                     VStack(alignment: .leading, spacing: 12) {
                         sectionHeader(title: "Permissions", count: snapshot.permissions.count)
                         permissionsCard
@@ -116,8 +126,8 @@ struct InboxRootView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 12) {
-                        sectionHeader(title: "Forms", count: snapshot.forms.count)
-                        formsCard
+                        sectionHeader(title: "Forms", count: snapshot.sessionForms.count)
+                        formsCard(snapshot.sessionForms)
                     }
                 }
                 .padding(.horizontal, InboxLayout.screenInset)
@@ -251,16 +261,16 @@ struct InboxRootView: View {
         }
     }
 
-    private var formsCard: some View {
+    private func formsCard(_ forms: [OCFormRequest]) -> some View {
         SurfaceCard(padding: 0) {
-            if snapshot.forms.isEmpty {
+            if forms.isEmpty {
                 emptyRow(symbol: "checkmark.circle", text: "No pending forms from the agent.")
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(snapshot.forms.enumerated()), id: \.element.id) { index, form in
+                    ForEach(Array(forms.enumerated()), id: \.element.id) { index, form in
                         VStack(alignment: .leading, spacing: 14) {
                             HStack(alignment: .top, spacing: 12) {
-                                itemBadge(title: "Form", tint: Color.appPrimary)
+                                itemBadge(title: form.isGlobal ? "MCP" : "Form", tint: Color.appPrimary)
 
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(form.title.nilIfBlank ?? "Agent form")
@@ -273,6 +283,18 @@ struct InboxRootView: View {
                                         .font(.system(size: 13))
                                         .foregroundStyle(Color.appSecondary)
                                         .lineLimit(3)
+
+                                    if form.isGlobal {
+                                        Text("Workspace interaction · no chat owner")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Color.appSecondary)
+                                        if let directory = form.globalDirectory {
+                                            Text(directory)
+                                                .font(.system(size: 12, design: .monospaced))
+                                                .foregroundStyle(Color.appSecondary)
+                                                .lineLimit(2)
+                                        }
+                                    }
                                 }
                             }
 
@@ -290,7 +312,7 @@ struct InboxRootView: View {
                         .padding(.horizontal, InboxLayout.rowPaddingHorizontal)
                         .padding(.vertical, InboxLayout.rowPaddingVertical)
 
-                        if index < snapshot.forms.count - 1 {
+                        if index < forms.count - 1 {
                             SurfaceDivider()
                         }
                     }
@@ -438,7 +460,7 @@ struct InboxRootView: View {
 
         do {
             try await inboxService.respondToForm(form, answer: answer)
-            if chatClient.pendingForm?.id == form.id {
+            if chatClient.pendingForm?.id == form.id, chatClient.pendingForm?.owner == form.owner {
                 chatClient.pendingForm = nil
                 chatClient.showFormSheet = false
             }
@@ -456,7 +478,7 @@ struct InboxRootView: View {
 
         do {
             try await inboxService.cancelForm(form)
-            if chatClient.pendingForm?.id == form.id {
+            if chatClient.pendingForm?.id == form.id, chatClient.pendingForm?.owner == form.owner {
                 chatClient.pendingForm = nil
                 chatClient.showFormSheet = false
             }

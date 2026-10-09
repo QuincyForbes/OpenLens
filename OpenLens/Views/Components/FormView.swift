@@ -28,6 +28,18 @@ struct FormView: View {
                         .font(.title3.weight(.semibold))
                         .accessibilityAddTraits(.isHeader)
 
+                    if form.isGlobal {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("This MCP interaction belongs to the workspace and is available from Inbox.")
+                                .font(.subheadline)
+                            if let directory = form.globalDirectory {
+                                Text(directory)
+                                    .font(.caption.monospaced())
+                            }
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+
                     if form.hasUnsupportedFields {
                         unsupportedNotice
                     }
@@ -39,7 +51,7 @@ struct FormView: View {
                 .padding(20)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("Agent Form")
+            .navigationTitle(form.isGlobal ? "Global MCP Form" : "Agent Form")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

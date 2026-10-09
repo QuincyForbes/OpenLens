@@ -1123,13 +1123,13 @@ actor OpenCodeClient {
 
     /// Fetches pending v2 forms. Session-scoped reads preserve the owning
     /// session without accepting a caller-supplied location; inbox reads use
-    /// the active location and receive the server-owned session identities.
+    /// the active location and bind global MCP owners to the resolved location.
     func listPendingForms(sessionID: String? = nil) async throws -> [OCFormRequest] {
         guard usesV2 else { return [] }
 
         let forms: [OCFormRequest]
         if let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
-            guard InteractiveFormSafety.fitsIdentifier(sessionID) else {
+            guard sessionID != "global", InteractiveFormSafety.fitsIdentifier(sessionID) else {
                 throw OpenCodeError.invalidPayload("A valid session ID is required to recover v2 forms.")
             }
             let response: OCV2Envelope<[OCFormRequest]> = try await getV2(
@@ -1149,7 +1149,7 @@ actor OpenCodeClient {
             }
         } else {
             let response: OCV2Located<[OCFormRequest]> = try await getV2Located("/api/form")
-            forms = response.data
+            forms = response.data.map { $0.recovered(at: response.location.directory) }
         }
 
         var safeForms: [OCFormRequest] = []
@@ -1169,38 +1169,59 @@ actor OpenCodeClient {
         formID: String,
         answer: [String: OCFormValue]
     ) async throws {
+        try await replyToForm(owner: .session(sessionID), formID: formID, answer: answer)
+    }
+
+    func replyToForm(owner: OCFormOwner, formID: String, answer: [String: OCFormValue]) async throws {
         guard usesV2 else {
             throw OpenCodeError.invalidPayload("Form replies require a v2 server.")
         }
-        guard InteractiveFormSafety.fitsIdentifier(sessionID),
-              InteractiveFormSafety.fitsIdentifier(formID)
-        else {
-            throw OpenCodeError.invalidPayload("A valid session and form ID are required to reply to a v2 form.")
-        }
+        let queryItems = try formQueryItems(owner: owner, formID: formID)
 
         try await sendV2RequestDiscardingResponse(
             method: "POST",
-            path: "/api/session/\(sessionID)/form/\(formID)/reply",
+            path: "/api/session/\(owner.wireID)/form/\(formID)/reply",
             body: OCV2FormReplyInput(answer: answer),
+            queryItems: queryItems,
             includesLocation: false
         )
     }
 
     func cancelForm(sessionID: String, formID: String) async throws {
+        try await cancelForm(owner: .session(sessionID), formID: formID)
+    }
+
+    func cancelForm(owner: OCFormOwner, formID: String) async throws {
         guard usesV2 else {
             throw OpenCodeError.invalidPayload("Form cancellation requires a v2 server.")
         }
-        guard InteractiveFormSafety.fitsIdentifier(sessionID),
-              InteractiveFormSafety.fitsIdentifier(formID)
-        else {
-            throw OpenCodeError.invalidPayload("A valid session and form ID are required to cancel a v2 form.")
-        }
+        let queryItems = try formQueryItems(owner: owner, formID: formID)
 
         try await sendV2RequestDiscardingResponse(
             method: "DELETE",
-            path: "/api/session/\(sessionID)/form/\(formID)",
+            path: "/api/session/\(owner.wireID)/form/\(formID)",
+            queryItems: queryItems,
             includesLocation: false
         )
+    }
+
+    private func formQueryItems(owner: OCFormOwner, formID: String) throws -> [URLQueryItem] {
+        guard InteractiveFormSafety.fitsIdentifier(formID) else {
+            throw OpenCodeError.invalidPayload("A valid form ID is required.")
+        }
+        switch owner {
+        case .session(let id):
+            guard id != "global", InteractiveFormSafety.fitsIdentifier(id) else {
+                throw OpenCodeError.invalidPayload("A valid session owner is required.")
+            }
+            return []
+        case .global(let directory):
+            guard let directory, directory.hasPrefix("/"), directory.utf8.count <= 4_096,
+                  !directory.contains("\0") else {
+                throw OpenCodeError.invalidPayload("Refresh Inbox to recover the global form's location.")
+            }
+            return [URLQueryItem(name: "location[directory]", value: directory)]
+        }
     }
 
     // MARK: - Session actions
@@ -1328,11 +1349,13 @@ actor OpenCodeClient {
         method: String,
         path: String,
         pathParameter: String? = nil,
+        queryItems: [URLQueryItem] = [],
         includesLocation: Bool = true
     ) async throws {
         var request = makeV2Request(
             path: path,
             pathParameter: pathParameter,
+            queryItems: queryItems,
             includesLocation: includesLocation
         )
         request.httpMethod = method
@@ -1346,6 +1369,7 @@ actor OpenCodeClient {
         path: String,
         pathParameter: String? = nil,
         body: B,
+        queryItems: [URLQueryItem] = [],
         includesLocation: Bool = true
     ) async throws {
         _ = try await sendV2RequestData(
@@ -1353,6 +1377,7 @@ actor OpenCodeClient {
             path: path,
             pathParameter: pathParameter,
             body: body,
+            queryItems: queryItems,
             includesLocation: includesLocation
         )
     }
@@ -1362,11 +1387,13 @@ actor OpenCodeClient {
         path: String,
         pathParameter: String? = nil,
         body: B?,
+        queryItems: [URLQueryItem] = [],
         includesLocation: Bool = true
     ) async throws -> Data {
         var request = makeV2Request(
             path: path,
             pathParameter: pathParameter,
+            queryItems: queryItems,
             includesLocation: includesLocation
         )
         request.httpMethod = method

@@ -4,6 +4,9 @@ struct InboxSnapshot: Sendable {
     let permissions: [OCPermissionRequest]
     let questions: [OCQuestionRequest]
     let forms: [OCFormRequest]
+    var globalForms: [OCFormRequest] { forms.filter(\.isGlobal) }
+    var sessionForms: [OCFormRequest] { forms.filter { !$0.isGlobal } }
+    var pendingRequestCount: Int { permissions.count + questions.count + forms.count }
     /// A partial-load warning. Successful inbox sections remain actionable
     /// instead of being replaced with an all-or-nothing error state.
     let warning: String?
@@ -144,7 +147,7 @@ final class InboxService {
             throw OpenCodeError.notConnected
         }
 
-        try await client.replyToForm(sessionID: form.sessionID, formID: form.id, answer: answer)
+        try await client.replyToForm(owner: form.owner, formID: form.id, answer: answer)
     }
 
     func cancelForm(_ form: OCFormRequest) async throws {
@@ -156,7 +159,7 @@ final class InboxService {
             throw OpenCodeError.notConnected
         }
 
-        try await client.cancelForm(sessionID: form.sessionID, formID: form.id)
+        try await client.cancelForm(owner: form.owner, formID: form.id)
     }
 }
 

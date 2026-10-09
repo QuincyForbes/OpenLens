@@ -1332,6 +1332,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     @discardableResult
     func presentForm(_ form: OCFormRequest) -> Bool {
+        guard !form.isGlobal else { return false }
         guard pendingQuestion == nil else { return false }
 
         if pendingForm?.id == form.id {

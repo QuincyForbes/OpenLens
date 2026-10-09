@@ -712,6 +712,9 @@ final class SSEEventHandler {
         guard let delegate else { return }
 
         let sessionID = incoming.sessionID ?? incoming.form?.sessionID
+        // MCP elicitation is recovered through Inbox with its location. Chat
+        // must neither present nor auto-cancel it, even without a selected chat.
+        guard sessionID != "global" else { return }
         guard sessionBelongsToCurrentConversation(sessionID, delegate: delegate) else {
             return
         }
@@ -740,6 +743,7 @@ final class SSEEventHandler {
 
     private func handleFormResolved(_ incoming: SSEFormResolved) {
         guard let delegate,
+              incoming.sessionID != "global",
               sessionBelongsToCurrentConversation(incoming.sessionID, delegate: delegate)
         else {
             return

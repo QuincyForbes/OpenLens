@@ -1759,27 +1759,49 @@ nonisolated struct OCQuestionRequest: Codable, Identifiable, Sendable {
 
 // MARK: - Forms
 
-/// A server-driven v2 form. Unlike legacy questions, forms carry typed fields
-/// and must retain their session identity for their session-scoped operations.
+/// Only MCP forms may use the wire sentinel "global". They belong to a
+/// location, not a session; recovery binds that location before any operation.
+nonisolated enum OCFormOwner: Equatable, Sendable {
+    case session(String)
+    case global(directory: String?)
+
+    var wireID: String {
+        switch self {
+        case .session(let id): id
+        case .global: "global"
+        }
+    }
+}
+
+/// A server-driven v2 form retaining its wire identity and recovered ownership.
 nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
     let id: String
     let sessionID: String
     let title: String
     let fields: [OCFormField]
     let state: OCFormState
+    let globalDirectory: String?
+
+    var owner: OCFormOwner {
+        sessionID == "global" ? .global(directory: globalDirectory) : .session(sessionID)
+    }
+
+    var isGlobal: Bool { sessionID == "global" }
 
     init(
         id: String,
         sessionID: String,
         title: String,
         fields: [OCFormField],
-        state: OCFormState = .pending
+        state: OCFormState = .pending,
+        globalDirectory: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
         self.title = title
         self.fields = fields
         self.state = state
+        self.globalDirectory = globalDirectory
     }
 
     var hasUnsupportedFields: Bool {
@@ -1797,6 +1819,14 @@ nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
         fields = try container.decodeIfPresent([OCFormField].self, forKey: .fields) ?? []
         state = try container.decodeIfPresent(OCFormState.self, forKey: .state) ?? .pending
+        // A field inside the form cannot choose a location. Only the enclosing
+        // located recovery response may bind a global interaction.
+        globalDirectory = nil
+    }
+
+    func recovered(at directory: String) -> OCFormRequest {
+        OCFormRequest(id: id, sessionID: sessionID, title: title, fields: fields,
+            state: state, globalDirectory: isGlobal ? directory : nil)
     }
 }
 

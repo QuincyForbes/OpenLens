@@ -25,6 +25,7 @@ final class QuestionService {
 
     /// Recovers a pending v2 form after a stream gap or foreground return.
     func recoverPendingForm(sessionID: String) async throws -> OCFormRequest? {
+        guard sessionID != "global" else { return nil }
         guard let client = connection.client else {
             throw OpenCodeError.notConnected
         }
