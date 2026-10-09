@@ -225,11 +225,12 @@ AFK verification repair for ticket 17: rapid visible V2 completions are acknowle
 
 ## 18: Complete conditional V2 forms on the phone
 
-Commit: `05833e2`, including the ticket's done status and screenshots.
+Commits: `05833e2`, including the ticket's done status and screenshots, corrected after review in `691f698`.
 
 - You can complete supported conditional V2 forms in the native phone form from Chat or Inbox. Fields appear and disappear as earlier string, numeric, Boolean or multiselect answers change.
+- An optional Boolean without a default visibly starts **Not answered**. Choose **No** or **Yes** to activate its matching branch, or clear it back to unanswered. The submitted answer matches that choice.
 - Switching branches keeps your local draft for when you return. Inactive required fields do not block Submit, and their previous answers never travel in the reply or activate another hidden branch.
 - Active fields keep their input constraints and external-action acknowledgements. Recovery and retries use the form's owning session, even when the selected location differs.
-- Unknown or malformed predicates, invalid references and future field types show the OpenCode fallback and disable Submit.
+- Unknown or malformed predicates, invalid references (including static hidden-field dependencies) and future field types show the OpenCode fallback and disable Submit.
 
-Verified with **658 passing tests in 63 suites on 2026-10-09**, including 16 form tests with service/transport, native-event admission and hosted SwiftUI coverage. Screenshots show the [release branch](screenshots/18-conditional-active.png), [waiting branch](screenshots/18-conditional-waiting.png) and [unsupported fallback](screenshots/18-conditional-unsupported.png). Remote was removed in `77b72ac`; this ticket follows the current direct-connection scope. Live V2 server, physical-device, iPad and enlarged Dynamic Type verification remain unperformed.
+Verified after review with **660 passing tests in 63 suites on 2026-10-09**, including 18 form tests with service/transport, native-event admission and hosted SwiftUI coverage. Screenshots show the [release branch](screenshots/18-conditional-active.png), [waiting branch](screenshots/18-conditional-waiting.png) [unsupported fallback](screenshots/18-conditional-unsupported.png), and [the explicit unanswered Boolean](screenshots/18-boolean-unanswered.png). The hosted regressions poll for actual UI updates and exercise the real Submit action and exact reply payloads. Conditional external fields remain unsupported because the pinned V2 schema has no external `when` and the server requires unconditional acknowledgement; the ticket records the contract evidence and service coverage. Final result log: `build/afk-logs/20261009-202133-tests-1.log`. Remote was removed in `77b72ac`; this ticket follows the current direct-connection scope. Live V2 server, physical-device, iPad and enlarged Dynamic Type verification remain unperformed.
