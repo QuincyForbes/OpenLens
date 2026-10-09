@@ -74,6 +74,101 @@ struct V2CompactionTests {
         #expect(await server.compactRequests.count == 1)
     }
 
+    @Test func completedLocalRequestDoesNotOverrideLaterAutomaticCompaction() async throws {
+        let server = CompactionTransport()
+        let chat = try await openChat(server)
+        await chat.requestCompaction()
+        let id = try #require(chat.queuedPrompts.first?.messageID)
+        await server.finish(id: id, outcome: "completed")
+        await chat.refreshCompactionState()
+        #expect(chat.compactionState == .completed)
+        try await server.appendCompaction(id: "msg_auto", reason: "auto")
+        await chat.refreshCompactionState()
+        #expect(chat.contextEntries.last?.id == "msg_auto")
+        #expect(chat.compactionState == .completed)
+        #expect(chat.canRequestCompaction)
+        #expect(chat.queuedPrompts.isEmpty)
+        #expect(await server.compactRequests.count == 1)
+    }
+
+    @Test func resolvedUncertainRequestUsesANewIdentityAfterLaterCompaction() async throws {
+        let server = CompactionTransport()
+        await server.setMode("uncertain")
+        let chat = try await openChat(server)
+        await chat.requestCompaction()
+        let first = try #require(await server.compactRequests.first)
+        let original = try #require(try JSONSerialization.jsonObject(with: first.httpBody!) as? [String: String])
+        await server.finish(id: try #require(original["id"]), outcome: "completed")
+        await chat.refreshCompactionState()
+        #expect(chat.compactionState == .completed)
+        try await server.appendCompaction(id: "msg_other_client")
+        await chat.refreshCompactionState()
+        #expect(chat.compactionState == .completed)
+        #expect(chat.canRequestCompaction)
+        #expect(await server.compactRequests.count == 1)
+        await server.setMode("normal")
+        await chat.requestCompaction()
+        let requests = await server.compactRequests
+        #expect(requests.count == 2)
+        let lastBody = try #require(requests.last?.httpBody)
+        let last = try #require(try JSONSerialization.jsonObject(with: lastBody) as? [String: String])
+        #expect(last["id"] != original["id"])
+        #expect(chat.queuedPrompts.first?.messageID == last["id"])
+    }
+
+    @Test(arguments: ["rejected", "uncertain"])
+    func laterOtherClientCompactionReplacesUnresolvedLocalFailure(_ mode: String) async throws {
+        let server = CompactionTransport()
+        // An older successful result must not resolve a new local failure.
+        await server.finish(id: "msg_prior", outcome: "completed")
+        await server.setMode(mode)
+        let chat = try await openChat(server)
+        await chat.requestCompaction()
+        if mode == "uncertain" { #expect(chat.compactionState == .uncertain) }
+        else if case .failed = chat.compactionState {} else { Issue.record("Expected the local rejection") }
+        try await server.appendCompaction(id: "msg_other_client")
+        await chat.refreshCompactionState()
+        #expect(chat.compactionState == .completed)
+        #expect(chat.canRequestCompaction)
+        #expect(await server.compactRequests.count == 1)
+    }
+
+    @Test(arguments: ["cancelled", "reverted"])
+    func synchronizedRemovalDoesNotLeaveLocalCompactionPending(_ removal: String) async throws {
+        let server = CompactionTransport()
+        let chat = try await openChat(server)
+        await chat.requestCompaction()
+        let id = try #require(chat.queuedPrompts.first?.messageID)
+        if removal == "reverted" {
+            await server.finish(id: id, outcome: "completed")
+            await server.setRevert(id)
+        } else { await server.cancelCompaction() }
+        await chat.refreshCompactionState()
+        #expect(chat.isStreamSynchronized)
+        #expect(chat.compactionState == .ready)
+        #expect(chat.canRequestCompaction)
+        #expect(chat.queuedPrompts.isEmpty)
+        #expect(chat.contextEntries.isEmpty)
+        #expect(await server.compactRequests.count == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func retryPreflightFindsCompletedIdentityBeforeTheLatestCompaction(_ reverted: Bool) async throws {
+        let server = CompactionTransport()
+        await server.setMode("uncertain")
+        let chat = try await openChat(server)
+        await chat.requestCompaction()
+        let request = try #require(await server.compactRequests.first)
+        let input = try #require(try JSONSerialization.jsonObject(with: request.httpBody!) as? [String: String])
+        await server.finish(id: try #require(input["id"]), outcome: "completed")
+        try await server.appendCompaction(id: "msg_auto", reason: "auto")
+        if reverted { await server.setRevert(try #require(input["id"])) }
+        await chat.requestCompaction()
+        #expect(chat.compactionState == (reverted ? .ready : .completed))
+        #expect(chat.canRequestCompaction)
+        #expect(await server.compactRequests.count == 1)
+    }
+
     @Test(arguments: [404, 405, 501])
     func unsupportedEndpointDisablesTheControlWithoutRetrying(_ status: Int) async throws {
         let server = CompactionTransport()
@@ -182,7 +277,8 @@ struct V2CompactionTests {
         #expect(await server.compactRequests.count == 1)
     }
 
-    @Test func failedRecoveryKeepsAcceptedWorkAndBlocksANewRequestUntilRecovery() async throws {
+    @Test(arguments: [false, true])
+    func failedRecoveryKeepsAcceptedWorkUntilAnAuthoritativeRead(_ remainsQueued: Bool) async throws {
         let server = CompactionTransport()
         let chat = try await openChat(server)
         await server.setMode("unreadable")
@@ -193,10 +289,13 @@ struct V2CompactionTests {
         #expect(!chat.isStreamSynchronized)
         #expect(!chat.canRequestCompaction)
         await chat.requestCompaction()
+        if !remainsQueued { await server.cancelCompaction() }
         await server.setFailsInbox(false)
         await chat.refreshCompactionState()
         #expect(chat.isStreamSynchronized)
-        #expect(chat.queuedPrompts.count == 1)
+        #expect(chat.queuedPrompts.count == (remainsQueued ? 1 : 0))
+        #expect(chat.compactionState == (remainsQueued ? .pending : .ready))
+        #expect(chat.canRequestCompaction == !remainsQueued)
         #expect(await server.compactRequests.count == 1)
     }
 
@@ -220,6 +319,9 @@ struct V2CompactionTests {
         _ = try await api.probeCapabilities()
         #expect(try await api.requestCompaction(sessionID: "ses_1", messageID: "msg_legacy") == nil)
         #expect(await server.compactRequests.isEmpty)
+        let legacyChat = try await openChat(server)
+        #expect(legacyChat.compactionState == .unavailable)
+        #expect(!legacyChat.canRequestCompaction)
         await server.setMode("missing-session")
         let chat = try await openChat(server)
         await chat.requestCompaction()
@@ -258,7 +360,7 @@ struct V2CompactionTests {
         connection?.disconnect()
         await server.releaseCompaction()
         await request.value
-        #expect(chat.compactionState == .unavailable)
+        #expect(chat.compactionState == .ready)
         #expect(!chat.canRequestCompaction)
         #expect(chat.queuedPrompts.isEmpty)
         let reconnected = try await openChat(server)
@@ -267,16 +369,28 @@ struct V2CompactionTests {
         #expect(await server.compactRequests.count == 1)
     }
 
+    @Test func unnegotiatedConnectionRequiresReconnectInsteadOfClaimingUnsupported() async {
+        let chat = makeChat(connection: ConnectionManager())
+        #expect(chat.compactionState == .ready)
+        #expect(!chat.canRequestCompaction)
+        await chat.requestCompaction()
+        #expect(chat.queuedPrompts.isEmpty)
+    }
+
     private func openChat(_ server: CompactionTransport, onConnection: ((ConnectionManager) -> Void)? = nil) async throws -> ChatClient {
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: server)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
         onConnection?(connection)
-        let chat = ChatClient(connection: connection, liveActivity: TestLiveActivityProvider(),
+        let chat = makeChat(connection: connection)
+        await chat.loadSession(OCSession(id: "ses_1", title: "Context", time: .init(created: 0, updated: 0)))
+        return chat
+    }
+
+    private func makeChat(connection: ConnectionManager) -> ChatClient {
+        ChatClient(connection: connection, liveActivity: TestLiveActivityProvider(),
             sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
             providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
             savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore())
-        await chat.loadSession(OCSession(id: "ses_1", title: "Context", time: .init(created: 0, updated: 0)))
-        return chat
     }
 
     private func waitUntil(_ condition: @MainActor () async -> Bool) async throws {
@@ -292,6 +406,15 @@ private actor CompactionTransport: OpenCodeTransport {
     var compactRequests: [URLRequest] = []
     var history = "[]"
     private var inbox = "[]"
+    private var revertID: String?
+    func setRevert(_ id: String) { revertID = id }
+    func cancelCompaction() { inbox = "[]" }
+    func appendCompaction(id: String, reason: String = "manual") throws {
+        var records = try JSONSerialization.jsonObject(with: Data(history.utf8)) as! [[String: Any]]
+        records.append(["id": id, "type": "compaction", "status": "completed", "reason": reason,
+                        "summary": "A later summary", "recent": "More recent context"])
+        history = String(decoding: try JSONSerialization.data(withJSONObject: records), as: UTF8.self)
+    }
     private var holdsCompaction = false
     private var compactionWaiter: CheckedContinuation<Void, Never>?
     var isHoldingCompaction: Bool { compactionWaiter != nil }
@@ -346,7 +469,8 @@ private actor CompactionTransport: OpenCodeTransport {
             body = mode == "unreadable" ? "unreadable" : #"{"data":\#(entry)}"#
         case "/api/session/active": body = #"{"data":{}}"#
         case "/api/session/ses_1", "/api/session/ses_2":
-            body = #"{"data":{"id":"\#(url.lastPathComponent)","title":"Context","time":{"created":0,"updated":0}}}"#
+            let revert = url.lastPathComponent == "ses_1" ? revertID.map { #", "revert":{"messageID":"\#($0)"}"# } ?? "" : ""
+            body = #"{"data":{"id":"\#(url.lastPathComponent)","title":"Context","time":{"created":0,"updated":0}\#(revert)}}"#
         case "/api/session/ses_1/inbox":
             if failsInbox { throw URLError(.networkConnectionLost) }
             body = #"{"data":\#(inbox)}"#

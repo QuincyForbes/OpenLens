@@ -38,6 +38,15 @@ enum ScreenshotFixtures {
         }
     }
 
+    @MainActor static var canRequestCompaction: Bool? {
+        guard let state = compactionState else { return nil }
+        if compactionScenario == "disconnected" { return false }
+        switch state {
+        case .ready, .completed, .failed, .interrupted, .uncertain: return true
+        default: return false
+        }
+    }
+
     @MainActor private static func compactionProjection() throws -> SessionTranscript {
         var records: [[String: Any]] = []
         if ["running", "completed", "failed", "interrupted"].contains(compactionScenario) {

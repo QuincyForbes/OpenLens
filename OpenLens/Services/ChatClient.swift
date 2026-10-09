@@ -1860,6 +1860,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             let transcript = try await messagesService!.loadTranscript(sessionID: session.id)
             let loaded = transcript.messages
             guard isCurrent() else { return false }
+            resolveCompactionFromTranscript(transcript, sessionID: session.id)
             let loadedIDs = Set(transcript.entryOrder)
             queuedPrompts.removeAll { prompt in
                 prompt.state == .queued && loadedIDs.contains(prompt.messageID)
@@ -2212,6 +2213,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         turnFileDetailCacheOrder.removeAll()
         pendingAssistantMessage = nil
         contextEntries = []
+        canonicalCompactionIDs = []
         transcriptEntryOrder = []
         messages = []
         contentVersion &+= 1
@@ -3677,6 +3679,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     private struct CompactionAttempt {
         let client: OpenCodeClient
         let id: String
+        let priorCompactionIDs: Set<String>
+        var inboxReadSequence: UInt
+        var isReconcilingRetry = false
         var state: CompactionState
     }
 
@@ -3684,15 +3689,33 @@ final class ChatClient: SSEEventHandlerDelegate {
     // inbox and transcript remain authoritative after an app-state reset.
     private var compactionAttempts: [String: CompactionAttempt] = [:]
     private var compactionUnavailableClient: OpenCodeClient?
+    @ObservationIgnored private var canonicalCompactionIDs: Set<String> = []
+
+    private func resolveCompactionFromTranscript(_ transcript: SessionTranscript, sessionID: String) {
+        canonicalCompactionIDs = Set(transcript.contextEntries.filter { $0.kind == .compaction }.map(\.id))
+        guard let attempt = compactionAttempts[sessionID], attempt.client === connection?.client else { return }
+        // Read the whole canonical transcript before filtering a staged revert.
+        // A request stays resolved even when a later result replaces it or the
+        // original result is no longer visible in Chat.
+        let observed = transcript.entryOrder.contains(attempt.id) || transcript.contextEntries.contains { $0.id == attempt.id }
+        let superseded = !canonicalCompactionIDs.isSubset(of: attempt.priorCompactionIDs)
+        let canSupersede: Bool
+        switch attempt.state {
+        case .failed, .uncertain: canSupersede = true
+        default: canSupersede = attempt.isReconcilingRetry
+        }
+        if observed || (superseded && canSupersede) { compactionAttempts.removeValue(forKey: sessionID) }
+    }
 
     var compactionState: CompactionState {
-        guard usesV2SessionAPI, let sessionID = currentSession?.id, let client = connection?.client else { return .unavailable }
+        guard let client = connection?.client, let capabilities = connection?.serverCapabilities else { return .ready }
+        guard capabilities.protocolVersion == .v2 else { return .unavailable }
+        guard let sessionID = currentSession?.id else { return .ready }
         if compactionUnavailableClient === client { return .unavailable }
         if let attempt = compactionAttempts[sessionID], attempt.client === client, attempt.state == .submitting { return .submitting }
         if queuedPrompts.contains(where: { $0.kind == .compaction }) { return .pending }
-        let attempt = compactionAttempts[sessionID].flatMap { $0.client === client ? $0 : nil }
+        if let attempt = compactionAttempts[sessionID], attempt.client === client { return attempt.state }
         let result = contextEntries.last(where: { $0.kind == .compaction })
-        if let attempt, result?.id != attempt.id { return attempt.state }
         guard let result else { return .ready }
         switch result.compactionStatus {
         case "running": return .running
@@ -3711,7 +3734,8 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     var canRequestCompaction: Bool {
-        guard canCompose, isStreamSynchronized, !isDemoMode, !isRecordedReplayMode, !isOfflinePreviewMode else { return false }
+        guard usesV2SessionAPI, connection?.client != nil, currentSession != nil,
+              canCompose, isStreamSynchronized, !isDemoMode, !isRecordedReplayMode, !isOfflinePreviewMode else { return false }
         switch compactionState {
         case .ready, .completed, .interrupted, .failed: return true
         case .uncertain:
@@ -3729,9 +3753,11 @@ final class ChatClient: SSEEventHandlerDelegate {
            let attempt = compactionAttempts[sessionID], attempt.client === client {
             // Reconcile first: a late admission/result withdraws the retry.
             compactionAttempts[sessionID]?.state = .submitting
+            compactionAttempts[sessionID]?.isReconcilingRetry = true
             await refreshCompactionState()
             guard compactionAttempts[sessionID]?.client === client, compactionAttempts[sessionID]?.id == attempt.id else { return }
             compactionAttempts[sessionID]?.state = .uncertain
+            compactionAttempts[sessionID]?.isReconcilingRetry = false
             guard currentSession?.id == sessionID, connection?.client === client,
                   canRequestCompaction, compactionState == .uncertain else { return }
             retryID = attempt.id
@@ -3741,11 +3767,13 @@ final class ChatClient: SSEEventHandlerDelegate {
             retryID = nil
         }
         let id = retryID ?? "msg_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        compactionAttempts[sessionID] = .init(client: client, id: id, state: .submitting)
+        compactionAttempts[sessionID] = .init(client: client, id: id, priorCompactionIDs: canonicalCompactionIDs,
+                                            inboxReadSequence: inboxReadSequence, state: .submitting)
         do {
             let entry = try await messagesService.requestCompaction(sessionID: sessionID, messageID: id)
             guard compactionAttempts[sessionID]?.client === client, compactionAttempts[sessionID]?.id == id else { return }
             compactionAttempts[sessionID]?.state = entry == nil ? .unavailable : .pending
+            compactionAttempts[sessionID]?.inboxReadSequence = inboxReadSequence
             if entry == nil, connection?.client === client { compactionUnavailableClient = client }
             guard currentSession?.id == sessionID, connection?.client === client else { return }
             if let entry {
@@ -3883,6 +3911,13 @@ final class ChatClient: SSEEventHandlerDelegate {
             appliedInboxReadSequence = sequence
             sessionInbox = entries
             locallyAdmittedInbox.removeAll { $0.readSequence < sequence }
+            if let attempt = compactionAttempts[sessionID], attempt.client === connection?.client,
+               entries.contains(where: { $0.id == attempt.id }) || (attempt.state == .pending && sequence > attempt.inboxReadSequence) {
+                // Once admitted, the shared inbox owns pending/cancelled state.
+                // Only a read started after acknowledgement can withdraw local
+                // pending work when the entry has already disappeared.
+                compactionAttempts.removeValue(forKey: sessionID)
+            }
             confirmUncertainSubmissions(admittedIDs: Set(entries.map(\.id)))
             projectSessionInbox()
             return .current
@@ -5396,6 +5431,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         streamingMessageIDRemaps.removeAll()
         pendingAssistantMessage = nil
         contextEntries = []
+        canonicalCompactionIDs = []
         transcriptEntryOrder = []
         messages = []
         displayLimit = pageSize

@@ -11,13 +11,7 @@ struct SessionCompactionControls: View {
     }
     private var isRetro: Bool { chatEasterEgg.visualMode.isRetro }
     private var canRequest: Bool {
-        if ScreenshotFixtures.showsCompaction {
-            switch state {
-            case .ready, .completed, .failed, .interrupted, .uncertain: return true
-            default: return false
-            }
-        }
-        return chatClient.canRequestCompaction
+        ScreenshotFixtures.canRequestCompaction ?? chatClient.canRequestCompaction
     }
 
     var body: some View {
