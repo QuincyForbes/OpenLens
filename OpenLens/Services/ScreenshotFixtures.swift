@@ -1,6 +1,46 @@
 import Foundation
 
 enum ScreenshotFixtures {
+    static var showsContextTimeline: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_CHANGES") || showsContextResults
+    }
+
+    static var showsContextResults: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_RESULTS")
+    }
+
+    static var expandsContextDetails: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_DETAILS")
+    }
+
+    /// Decode the same tagged records as history, then use the production
+    /// transcript projection. Variants fit all supported context kinds on screen.
+    static func applyContextTimeline(to chat: ChatClient) {
+        let records = showsContextResults ? #"""
+        [
+          {"id":"fixture-shell","type":"shell","time":{"created":1,"completed":2},"shellID":"shell_checks","command":"swift test","status":"completed","exit":0,"output":"All 24 checks passed."},
+          {"id":"fixture-compaction","type":"compaction","time":{"created":3},"status":"completed","reason":"manual","summary":"The feature is implemented and verified.","recent":"Keep the current branch for review."},
+          {"id":"fixture-reply","type":"assistant","time":{"created":4},"content":[{"type":"text","text":"The checks passed. Ready for review."}]},
+          {"id":"fixture-idle","type":"idle","time":{"created":5},"outcome":"succeeded"}
+        ]
+        """# : #"""
+        [
+          {"id":"fixture-user","type":"user","time":{"created":1},"text":"Continue with the feature work."},
+          {"id":"fixture-model","type":"model-switched","time":{"created":2},"model":{"providerID":"anthropic","id":"claude-sonnet-4","variant":"high"},"previous":{"providerID":"openai","id":"gpt-5"}},
+          {"id":"fixture-agent","type":"agent-switched","time":{"created":3},"agent":"build","previous":"plan"},
+          {"id":"fixture-location","type":"location-switched","time":{"created":4},"location":{"directory":"/workspace/OpenLens-feature"},"previous":{"location":{"directory":"/workspace/OpenLens"}}},
+          {"id":"fixture-system","type":"system","time":{"created":5},"description":"Repository instructions updated","text":"Use Swift Testing for new coverage."},
+          {"id":"fixture-skill","type":"skill","time":{"created":6},"skill":"skill_review","name":"code-review","text":"Review the changes against the project rules."}
+        ]
+        """#
+        guard let entries = try? JSONDecoder().decode([OCV2SessionMessage].self, from: Data(records.utf8)) else { return }
+        chat.replaceTranscript(SessionTranscript(
+            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map(MessagesService.convert),
+            contextEntries: entries.compactMap(\.contextEntry),
+            entryOrder: entries.map(\.id)
+        ))
+    }
+
     static var showsSubagentTools: Bool {
         ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_TOOLS")
     }

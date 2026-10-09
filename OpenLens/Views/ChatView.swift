@@ -2565,7 +2565,7 @@ private struct ChatMessagesListView: View {
                             Button {
                                 loadEarlierMessages(using: proxy)
                             } label: {
-                                Text("Load earlier messages")
+                                Text(chatClient.contextEntries.isEmpty ? "Load earlier messages" : "Load earlier history")
                                     .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 14, weight: .medium))
                                     .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : .secondary)
                                     .frame(maxWidth: .infinity)
@@ -2687,10 +2687,7 @@ private struct ChatMessagesListView: View {
     }
 
     private func rebuildTimeline() {
-        timelineItems = ChatTimeline.items(
-            from: chatClient.displayedMessages,
-            showsThinking: showThinking
-        )
+        timelineItems = chatClient.timelineItems(showsThinking: showThinking)
 #if DEBUG
         print(
             "CHAT_STRESS_TIMELINE_REBUILD displayed=\(chatClient.displayedMessages.count) "
@@ -2702,6 +2699,8 @@ private struct ChatMessagesListView: View {
     @ViewBuilder
     private func timelineRow(_ item: ChatTimelineItem) -> some View {
         switch item.content {
+        case .context(let entry):
+            SessionContextTimelineRow(entry: entry, initiallyExpanded: ScreenshotFixtures.expandsContextDetails)
         case .message(let message):
             MessageBubbleView(
                 message: message,

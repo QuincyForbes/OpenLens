@@ -22,6 +22,23 @@ final class MessagesService {
         return serverMessages.map { convertToChatMessage($0) }
     }
 
+    /// Fetch the ordered transcript in one read, keeping context outside chat roles.
+    func loadTranscript(sessionID: String) async throws -> SessionTranscript {
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let entries = try await client.listTranscript(sessionID: sessionID)
+        return SessionTranscript(
+            messages: entries.compactMap {
+                guard case .message(let message) = $0 else { return nil }
+                return Self.convert(message)
+            },
+            contextEntries: entries.compactMap {
+                guard case .context(let context) = $0 else { return nil }
+                return context
+            },
+            entryOrder: entries.map(\.id)
+        )
+    }
+
     // MARK: - Send Prompt (async/fire-and-forget via SSE)
 
     /// Send a prompt to the server. The response arrives via SSE, not as a return value.

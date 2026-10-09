@@ -4198,6 +4198,8 @@ struct ChatStreamBehaviorTests {
     private func visibleTranscriptRows(from messages: [ChatMessage]) -> [VisibleTranscriptRow] {
         ChatTimeline.items(from: messages, showsThinking: true).map { item in
             switch item.content {
+            case .context(let entry):
+                VisibleTranscriptRow(id: item.id, kind: "context", value: entry.summary)
             case .message(let message):
                 VisibleTranscriptRow(id: item.id, kind: "message", value: message.content)
             case .streamingAssistantText(_, let projection):

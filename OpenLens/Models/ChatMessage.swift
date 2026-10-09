@@ -2309,6 +2309,7 @@ final class ChatMessage: Identifiable {
 /// part as its own stable chat row.
 struct ChatTimelineItem: Identifiable {
     enum Content {
+        case context(SessionContextEntry)
         case message(ChatMessage)
         case assistantSegment(message: ChatMessage, segment: ChatMessage.AssistantSegment)
         case streamingAssistantText(
@@ -2339,7 +2340,9 @@ struct ChatTimelineItem: Identifiable {
 enum ChatTimeline {
     static func items(
         from messages: [ChatMessage],
-        showsThinking: Bool
+        showsThinking: Bool,
+        contextEntries: [SessionContextEntry] = [],
+        entryOrder: [String] = []
     ) -> [ChatTimelineItem] {
         let animatedSubagent = messages.reversed().lazy.compactMap { message -> (messageID: String, segmentID: String)? in
             guard let segment = message.assistantSegments.reversed().first(where: { segment in
@@ -2351,7 +2354,7 @@ enum ChatTimeline {
             return (message.id, segment.id)
         }.first
 
-        return messages.flatMap { message -> [ChatTimelineItem] in
+        let chatItems = messages.flatMap { message -> [ChatTimelineItem] in
             guard message.role == .assistant else {
                 return [
                     ChatTimelineItem(
@@ -2402,6 +2405,23 @@ enum ChatTimeline {
             }
 
             return items
+        }
+        guard !contextEntries.isEmpty else { return chatItems }
+        let chatByID = Dictionary(grouping: chatItems) { item in
+            switch item.content {
+            case .context(let entry): entry.id
+            case .message(let message), .assistantSegment(let message, _),
+                 .streamingAssistantText(let message, _), .turnFileChanges(let message): message.id
+            }
+        }
+        let contextByID = Dictionary(contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        var seen = Set<String>()
+        return (entryOrder + messages.map(\.id) + contextEntries.map(\.id)).flatMap { id -> [ChatTimelineItem] in
+            guard seen.insert(id).inserted else { return [] }
+            if let entry = contextByID[id] {
+                return [ChatTimelineItem(id: "context-\(id)", content: .context(entry))]
+            }
+            return chatByID[id] ?? []
         }
     }
 }

@@ -85,6 +85,8 @@ nonisolated struct SSESessionUpdate {
     let presentFields: Set<String>
     let update: OCSession?
     let title: String?
+    /// Only native V2 selection events also add a canonical history record.
+    let refreshesTranscript: Bool
 
     init?(event: OCEvent) {
         guard let properties = event.properties?.value as? [String: Any],
@@ -96,6 +98,7 @@ nonisolated struct SSESessionUpdate {
         }
 
         self.sessionID = sessionID
+        self.refreshesTranscript = info["v2ContextChanged"] as? Bool ?? false
         self.presentFields = Set(info.keys).intersection(Set([
             "projectID", "directory", "parentID", "title", "version", "time", "share", "revert",
             "agent", "model", "outcome",

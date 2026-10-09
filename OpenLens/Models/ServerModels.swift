@@ -450,7 +450,7 @@ nonisolated struct OCMessage: Codable, Identifiable, Sendable {
     let name: String?
     let data: OCAPIErrorData?
 
-    var message: String? { data?.message }
+    nonisolated var message: String? { data?.message }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -2227,6 +2227,7 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
         }
     }
 
+    let contextEntry: SessionContextEntry?
     let id: String
     let type: String
     let time: OCMessageTime?
@@ -2246,8 +2247,28 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
         type = try container.decode(String.self, forKey: .type)
+        if type == "user" || type == "assistant" {
+            id = try container.decode(String.self, forKey: .id)
+        } else {
+            id = (try? container.decode(String.self, forKey: .id)) ?? ""
+        }
+        contextEntry = try? SessionContextEntry(from: decoder)
+        // An unknown non-chat entry must not fail the page because it carries
+        // fields whose future shapes differ from today's chat schema.
+        guard type == "user" || type == "assistant" else {
+            time = nil
+            text = nil
+            files = []
+            agent = nil
+            model = nil
+            content = []
+            cost = nil
+            tokens = nil
+            finish = nil
+            error = nil
+            return
+        }
         time = try? container.decodeIfPresent(OCMessageTime.self, forKey: .time)
         text = try container.decodeIfPresent(String.self, forKey: .text)
         files = (try? container.decodeIfPresent([OptionalFile].self, forKey: .files))?

@@ -303,18 +303,46 @@ actor OpenCodeClient {
     // MARK: - Messages
 
     func listMessages(sessionID: String, limit: Int? = nil) async throws -> [OCMessageWithParts] {
+        try await listTranscript(sessionID: sessionID, limit: limit).compactMap { entry in
+            guard case .message(let message) = entry else { return nil }
+            return message
+        }
+    }
+
+    func listTranscript(sessionID: String, limit: Int? = nil) async throws -> [OCTranscriptEntry] {
         if usesV2 {
-            let messages: [OCV2SessionMessage] = try await getAllV2Pages(
+            let entries: [OCV2SessionMessage] = try await getAllV2Pages(
                 endpoint: "/api/session/\(sessionID)/message",
                 limit: limit ?? Self.v2PageSize,
                 order: "asc",
                 includesLocation: false
             )
-            return messages.compactMap { $0.asMessage(sessionID: sessionID) }
+            var result: [OCTranscriptEntry] = []
+            var positions: [String: Int] = [:]
+            for entry in entries {
+                let projected: OCTranscriptEntry
+                if let message = entry.asMessage(sessionID: sessionID) {
+                    projected = .message(message)
+                } else if let context = entry.contextEntry {
+                    projected = .context(context)
+                } else {
+                    continue
+                }
+                if let position = positions[projected.id] {
+                    // A continuation may overlap a mutable entry. Its newest
+                    // value replaces the record at the original ordered slot.
+                    result[position] = projected
+                } else {
+                    positions[projected.id] = result.count
+                    result.append(projected)
+                }
+            }
+            return result
         }
         var path = "/session/\(sessionID)/message"
         if let limit { path += "?limit=\(limit)" }
-        return try await get(path)
+        let messages: [OCMessageWithParts] = try await get(path)
+        return messages.map(OCTranscriptEntry.message)
     }
 
     func getMessage(sessionID: String, messageID: String) async throws -> OCMessageWithParts {

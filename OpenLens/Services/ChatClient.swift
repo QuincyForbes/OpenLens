@@ -136,6 +136,24 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         }
     }
+    private(set) var contextEntries: [SessionContextEntry] = []
+    private(set) var transcriptEntryOrder: [String] = []
+    private(set) var displayedContextEntries: [SessionContextEntry] = []
+    private(set) var displayedEntryOrder: [String] = []
+
+    /// Install one canonical snapshot atomically with respect to presentation.
+    /// Live assistant reconciliation still runs through the existing message setter.
+    func replaceTranscript(_ transcript: SessionTranscript) {
+        contextEntries = transcript.contextEntries
+        transcriptEntryOrder = transcript.entryOrder
+        messages = transcript.messages
+    }
+
+    func timelineItems(showsThinking: Bool) -> [ChatTimelineItem] {
+        ChatTimeline.items(from: displayedMessages, showsThinking: showsThinking,
+                           contextEntries: displayedContextEntries, entryOrder: displayedEntryOrder)
+    }
+
     var inputText: String = ""
     private(set) var composerAttachments: [PromptAttachment] = []
     private(set) var isPreparingComposerImage = false
@@ -801,7 +819,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     var displayedMessages: [ChatMessage] = []
 
     var hasEarlierMessages: Bool {
-        messages.count > displayLimit
+        messages.count + contextEntries.count > displayLimit
     }
 
     func loadEarlierMessages() {
@@ -810,10 +828,19 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     private func rebuildDisplayedMessages() {
         var result: [ChatMessage]
-        if messages.count <= displayLimit {
-            result = messages
+        if contextEntries.isEmpty {
+            result = messages.count <= displayLimit ? messages : Array(messages.suffix(displayLimit))
+            displayedContextEntries = []
+            displayedEntryOrder = []
         } else {
-            result = Array(messages.suffix(displayLimit))
+            let availableIDs = Set(messages.map(\.id) + contextEntries.map(\.id))
+            var seen = Set<String>()
+            let orderedIDs = (transcriptEntryOrder + messages.map(\.id) + contextEntries.map(\.id))
+                .filter { availableIDs.contains($0) && seen.insert($0).inserted }
+            displayedEntryOrder = Array(orderedIDs.suffix(displayLimit))
+            let visibleIDs = Set(displayedEntryOrder)
+            result = messages.filter { visibleIDs.contains($0.id) }
+            displayedContextEntries = contextEntries.filter { visibleIDs.contains($0.id) }
         }
         // Append the in-flight streaming message so it's visible in the chat.
         if let pending = pendingAssistantMessage {
@@ -1471,6 +1498,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             // Auto-start demo playback after session is ready
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsContextTimeline {
+                ScreenshotFixtures.applyContextTimeline(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentTools {
                 ScreenshotFixtures.applySubagentTools(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
@@ -1524,6 +1553,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = nil
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsContextTimeline {
+                ScreenshotFixtures.applyContextTimeline(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentTools {
                 ScreenshotFixtures.applySubagentTools(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
@@ -1738,7 +1769,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         do {
             inboxRecovered = await recoverSessionInbox() == .current
             guard isCurrent() else { return false }
-            let loaded = try await messagesService!.loadMessages(sessionID: session.id)
+            let transcript = try await messagesService!.loadTranscript(sessionID: session.id)
+            let loaded = transcript.messages
             guard isCurrent() else { return false }
             let loadedIDs = Set(loaded.map(\.id))
             queuedPrompts.removeAll { prompt in
@@ -1748,10 +1780,24 @@ final class ChatClient: SSEEventHandlerDelegate {
             let revert = currentSession?.id == session.id
                 ? currentSession?.revert
                 : session.revert
-            let visibleMessages = Self.messagesBeforeRevert(mergedMessages, revert: revert)
+            let visibleOrder: [String]
+            let visibleMessages: [ChatMessage]
+            if let revert, let boundary = transcript.entryOrder.firstIndex(of: revert.messageID) {
+                visibleOrder = Array(transcript.entryOrder[..<boundary])
+                let visibleIDs = Set(visibleOrder)
+                visibleMessages = mergedMessages.filter { visibleIDs.contains($0.id) }
+            } else {
+                visibleOrder = transcript.entryOrder.filter { id in
+                    revert.map { id < $0.messageID } ?? true
+                }
+                visibleMessages = Self.messagesBeforeRevert(mergedMessages, revert: revert)
+            }
             prepareTurnDiffRefresh(for: visibleMessages)
             preserveTurnFileChanges(in: visibleMessages)
-            self.messages = visibleMessages
+            let visibleIDs = Set(visibleOrder)
+            replaceTranscript(SessionTranscript(messages: visibleMessages,
+                contextEntries: transcript.contextEntries.filter { visibleIDs.contains($0.id) },
+                entryOrder: visibleOrder))
             projectSessionInbox()
             // v2 sessions carry their canonical selection; transcript history
             // and saved defaults must not override it.
@@ -2077,6 +2123,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         turnFileDetailCache.removeAll()
         turnFileDetailCacheOrder.removeAll()
         pendingAssistantMessage = nil
+        contextEntries = []
+        transcriptEntryOrder = []
         messages = []
         contentVersion &+= 1
         timelineVersion &+= 1
@@ -4164,6 +4212,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             recordIncomingEvent(rawEvent)
         }
         sseHandler?.handleInboundEvent(inboundEvent)
+        if usesV2SessionAPI, case .cold(.sessionUpdated(let update), _) = inboundEvent,
+           let update, update.sessionID == currentSession?.id, update.refreshesTranscript {
+            synchronizeCurrentSessionFromServer()
+        }
     }
 
     // MARK: - Stream Recording
@@ -5142,6 +5194,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         discardAllBufferedStreamingUpdates()
         streamingMessageIDRemaps.removeAll()
         pendingAssistantMessage = nil
+        contextEntries = []
+        transcriptEntryOrder = []
         messages = []
         displayLimit = pageSize
         currentActivity = nil

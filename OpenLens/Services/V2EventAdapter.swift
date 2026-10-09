@@ -65,7 +65,10 @@ nonisolated struct V2EventAdapter {
         case "permission.replied", "session.inbox.delivered",
              "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
              "session.revert.committed", "session.revert.staged", "session.revert.cleared",
-             "session.message.content.updated", "session.deleted", "session.idle":
+             "session.message.content.updated", "session.deleted", "session.idle",
+             "session.instructions.updated", "session.skill.activated",
+             "session.shell.started", "session.shell.ended",
+             "session.compaction.started", "session.compaction.ended", "session.compaction.failed":
             return reconcile()
         case "session.execution.started":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }
@@ -74,17 +77,17 @@ nonisolated struct V2EventAdapter {
             guard let sessionID = data["sessionID"] as? String, let title = data["title"] as? String else { return reconcile() }
             return make("session.updated", ["info": ["id": sessionID, "title": title]])
         // Explicit switches from any client change the session's canonical
-        // selection. Merge just that field so the chat follows it without a
-        // full transcript reconcile.
+        // selection. Merge that field immediately; the chat then refreshes
+        // history to retrieve the switch record's canonical identity/order.
         case "session.model.selected":
             guard let sessionID = data["sessionID"] as? String,
                   let model = data["model"] as? [String: Any],
                   model["id"] is String, model["providerID"] is String else { return reconcile() }
-            return make("session.updated", ["info": ["id": sessionID, "model": model]])
+            return make("session.updated", ["info": ["id": sessionID, "model": model, "v2ContextChanged": true]])
         case "session.agent.selected":
             guard let sessionID = data["sessionID"] as? String,
                   let agent = data["agent"] as? String else { return reconcile() }
-            return make("session.updated", ["info": ["id": sessionID, "agent": agent]])
+            return make("session.updated", ["info": ["id": sessionID, "agent": agent, "v2ContextChanged": true]])
         case "location.shutdown", "location.disposed", "location.reloaded":
             tools.removeAll()
             return make("session.reconcile", [:])
