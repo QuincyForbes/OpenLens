@@ -58,6 +58,18 @@ Commits: `c345d35`, corrected after review in `78e5e40`, including the ticket's 
 
 Verified after review with 525 passing tests in 56 suites on the dedicated AFK simulator on 2026-10-09. Screenshots show [session outcomes](screenshots/06-session-outcomes.png), [a freshly recovered result](screenshots/06-refreshed-session-outcomes.png), [a failed result read](screenshots/06-failed-outcome-refresh.png), [successful execution](screenshots/06-chat-succeeded.png), [failed execution](screenshots/06-chat-failed.png), [interruption](screenshots/06-chat-interrupted.png), [active work](screenshots/06-chat-working.png), [permission waiting](screenshots/06-chat-permission.png), [form waiting](screenshots/06-chat-form.png), and [unavailable outcome evidence](screenshots/06-chat-unknown.png). Remote was removed in `77b72ac`; this ticket follows the current direct-connection scope. A live two-client V2 server session, physical-device Live Activity run, and manual iPad selection exercise remain unverified; the selection recovery is covered at the service boundary.
 
+## 07: Mark newly completed V2 session results as unread
+
+Commits: `dc47a29`, including the ticket's done status.
+
+- Completed V2 results show an Unread badge until the server confirms that completion was viewed. Active work keeps its working indicator; changing a title does not make a result unread.
+- Opening a synchronized chat in the foreground acknowledges only the completion captured for that visit. A newer completion arriving during viewing stays unread until a later visit, foreground viewing or explicit retry.
+- A lost response is checked against canonical server state. If viewing cannot be confirmed, the result stays unread and the chat offers Try Again. Confirmed retry or later confirmation clears the error.
+- Refreshing or returning to the list restores shared desktop/phone read markers. While the V2 list stays visible, inactive rows also refresh every 30 seconds. A delayed acknowledgement cannot replace a newer result or change a different chat.
+- V1 behavior and chat tab bar hiding are preserved.
+
+Verified with **572 passing tests in 59 suites** on the dedicated AFK simulator on 2026-10-09. Ticket 07 adds 16 Swift Testing tests, including hosted foreground and completion-race checks. Screenshots show [unread results](screenshots/07-unread-results.png), [viewed results](screenshots/07-viewed-results.png), and [unconfirmed viewing with retry](screenshots/07-view-acknowledgement-failed.png). Live two-client server/device behavior and manual iPad/poll-timer interaction remain unverified; transport and foreground chat behavior are covered with injected fixtures. Remote and its gateway were removed in `77b72ac`.
+
 ## 08: Rebind an open V2 session after its location changes
 
 Commits: `8fee5d0`, corrected after AFK review in `2dba41c`, with post-commit cancellation and queued-command recovery fixed in `b3ac488`, including the ticket's done status.
