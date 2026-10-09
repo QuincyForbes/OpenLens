@@ -4,6 +4,40 @@ import Testing
 
 @MainActor
 struct V2SessionLocationTests {
+    @Test(arguments: ["refresh", "status", "open"], ["/api/location", "/api/vcs", "/api/model"])
+    func retryAfterACommittedRebindRestoresProjectMetadataAndModels(path: String, heldPath: String) async throws {
+        let server = LocationServer()
+        let (chat, connection, api) = try await makeChat(server)
+        await chat.loadSession(session())
+        await server.move(to: "/workspace/New")
+        // The first location request authorizes the move. Hold the next one
+        // so cancellation can occur after commit, before metadata is restored.
+        await server.hold(heldPath, directory: "/workspace/New", skip: heldPath == "/api/location" ? 1 : 0)
+        if path == "status" { chat.beginExternalResponse() }
+        let recovery = Task {
+            switch path {
+            case "open": await chat.loadSession(session())
+            case "status": _ = await chat.refreshCurrentSessionStatus()
+            default: _ = await chat.refreshCurrentSessionFromServer()
+            }
+        }
+        try await waitUntil { await server.isWaiting }
+        #expect(connection.selectedProjectDirectory == "/workspace/New")
+        #expect(await api.currentContextDirectory() == "/workspace/New")
+        recovery.cancel()
+        await server.release()
+        await recovery.value
+        #expect(chat.sessionLocationError != nil)
+        #expect(!chat.canCompose)
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(chat.sessionLocationState == .ready)
+        #expect(connection.branch == "New")
+        #expect(connection.projectName == "New")
+        #expect(connection.currentProject?.id == "New")
+        #expect(chat.availableModels.map(\.modelID) == ["New-model"])
+    }
+
     @Test func movingBackDuringCatalogRecoveryRestoresTheOriginalLocationsModels() async throws {
         let server = LocationServer()
         let (chat, connection, _) = try await makeChat(server)
@@ -81,8 +115,10 @@ struct V2SessionLocationTests {
     @Test(arguments: ["prompt", "queue", "steer", "command", "queued-command"], [false, true])
     func workWaitingForSettingsIsRestoredSafelyWhenTheSessionMoves(delivery: String, refused: Bool) async throws {
         let server = LocationServer()
-        let (chat, _, _) = try await makeChat(server)
+        let activity = LocationActivityProvider()
+        let (chat, _, _) = try await makeChat(server, activity: activity)
         await chat.loadSession(session())
+        if ["queue", "steer", "queued-command"].contains(delivery) { await server.setSessionActive(true) }
         await server.hold("/api/session/ses_move/model", directory: "/workspace/Old")
         chat.selectModel(try #require(chat.availableModels.first))
         try await waitUntil { await server.isWaiting }
@@ -110,6 +146,12 @@ struct V2SessionLocationTests {
         #expect(!chat.composerAttachments.contains { if case .serverFile = $0 { true } else { false } })
         #expect(chat.composerAttachments.map(\.promptFile.name) == ["note.txt"])
         #expect(await server.mutations == ["/api/session/ses_move/model"])
+        if delivery == "queue" || delivery == "queued-command" {
+            #expect(chat.isLoading)
+            #expect(chat.responseState == .generating)
+            #expect(activity.phases.isEmpty)
+            #expect(activity.dismissCount == 0)
+        }
     }
 
     @Test(arguments: ["refresh", "status", "open"])
@@ -497,11 +539,12 @@ struct V2SessionLocationTests {
         OCSession(id: "ses_move", directory: "/workspace/Old", title: "Moved chat", time: .init(created: 0, updated: 0))
     }
 
-    private func makeChat(_ server: LocationServer, stream: SSEClient? = nil) async throws -> (ChatClient, ConnectionManager, OpenCodeClient) {
+    private func makeChat(_ server: LocationServer, stream: SSEClient? = nil,
+                          activity: any LiveActivityProviding = TestLiveActivityProvider()) async throws -> (ChatClient, ConnectionManager, OpenCodeClient) {
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/workspace/Old", transport: server)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities(), testSSEClient: stream)
         let chat = ChatClient(
-            connection: connection, liveActivity: TestLiveActivityProvider(),
+            connection: connection, liveActivity: activity,
             sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
             providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
             savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore()
@@ -523,15 +566,17 @@ private actor LocationServer: OpenCodeTransport {
     var directory = "/workspace/Old"
     var refusal: Int?
     var canonicalReadsFail = false
+    var sessionActive = false
+    func setSessionActive(_ active: Bool) { sessionActive = active }
     func failCanonicalReads(_ fail: Bool) { canonicalReadsFail = fail }
     var mutations: [String] = []
     var ordinaryWorkspaceDirectories: [String] = []
     var promptRequests: [URLRequest] = []
     func clearWorkspaceReads() { ordinaryWorkspaceDirectories = [] }
-    var heldRequest: (path: String, directory: String, fails: Bool)?
+    var heldRequest: (path: String, directory: String, fails: Bool, skip: Int)?
     var waiter: CheckedContinuation<Void, Never>?
     var isWaiting: Bool { waiter != nil }
-    func hold(_ path: String, directory: String, fails: Bool = false) { heldRequest = (path, directory, fails) }
+    func hold(_ path: String, directory: String, fails: Bool = false, skip: Int = 0) { heldRequest = (path, directory, fails, skip) }
     func release() { waiter?.resume(); waiter = nil }
     func refuseNewLocation(_ status: Int?) { refusal = status }
     func move(to directory: String) { self.directory = directory }
@@ -568,7 +613,7 @@ private actor LocationServer: OpenCodeTransport {
         case "/api/agent": body = #"{"location":\#(location),"data":[{"name":"\#(name)-agent"}]}"#
         case "/api/skill": body = #"{"location":\#(location),"data":[{"id":"\#(name)-skill","name":"\#(name) skill"}]}"#
         case "/api/fs/list": body = #"{"location":\#(location),"data":[{"path":"\#(name).swift","type":"file"}]}"#
-        case "/api/session/active": body = #"{"data":{}}"#
+        case "/api/session/active": body = sessionActive ? #"{"data":{"ses_move":{"type":"running"}}}"# : #"{"data":{}}"#
         case "/api/session/ses_move/model": body = ""
         case "/api/session/ses_move/message": body = #"{"data":[{"id":"msg_existing","type":"user","time":{"created":1},"text":"Preserve this conversation"}],"cursor":{"next":null}}"#
         case "/api/session/ses_move/prompt":
@@ -579,6 +624,10 @@ private actor LocationServer: OpenCodeTransport {
         default: throw URLError(.unsupportedURL)
         }
         if heldRequest?.path == url.path, heldRequest?.directory == selected {
+            if let skip = heldRequest?.skip, skip > 0 {
+                heldRequest?.skip = skip - 1
+                return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
             let fails = heldRequest?.fails == true
             heldRequest = nil
             await withCheckedContinuation { waiter = $0 }
@@ -594,6 +643,17 @@ private actor LocationServer: OpenCodeTransport {
 
 private final class LocationUnusedStream: OpenCodeEventStream, @unchecked Sendable {
     func start() {}; func suspend() {}; func resume() {}; func cancel() {}
+}
+
+private final class LocationActivityProvider: LiveActivityProviding {
+    var isActive: Bool { true }
+    var phases: [OpenLensActivityAttributes.Phase] = []
+    var dismissCount = 0
+    func startActivity(sessionID: String?, directory: String?) {}
+    func update(pendingUserResponse: OpenLensActivityAttributes.PendingUserResponse?) {}
+    func endActivity(phase: OpenLensActivityAttributes.Phase) { phases.append(phase) }
+    func dismissImmediately() { dismissCount += 1 }
+    func previewLiveActivity() {}
 }
 
 nonisolated private final class LocationStreamingTransport: OpenCodeTransport, @unchecked Sendable {

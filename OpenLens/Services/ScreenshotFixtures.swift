@@ -6,7 +6,11 @@ enum ScreenshotFixtures {
     }
 
     static var interruptsMoveSend: Bool {
-        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE_INTERRUPTED_SEND")
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE_INTERRUPTED_SEND") || interruptsQueuedMoveCommand
+    }
+
+    static var interruptsQueuedMoveCommand: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE_QUEUED_COMMAND")
     }
 
     static var failsSessionRebind: Bool {

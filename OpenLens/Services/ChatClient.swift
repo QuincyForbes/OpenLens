@@ -1606,7 +1606,12 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = message
             isStreamSynchronized = false
         } else if ScreenshotFixtures.interruptsMoveSend {
-            inputText = "Keep this unsent draft"
+            if ScreenshotFixtures.interruptsQueuedMoveCommand {
+                beginExternalResponse()
+                inputText = "/feature-test keep arguments"
+            } else {
+                inputText = "Keep this unsent draft"
+            }
             if let file = try? PromptTextFileAttachment(data: Data("Phone note".utf8), name: "note.txt") {
                 composerAttachments = [.textFile(file)]
             }
@@ -1663,6 +1668,11 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         guard isCurrent() else { throw CancellationError() }
         if restoredWorkspaceRevision != connection?.projectContextRevision {
+            // A cancelled caller may have committed the context before its
+            // metadata load finished. Retrying that revision must restore
+            // project/branch metadata as well as the model catalog.
+            await connection?.refreshProjectMetadata()
+            guard isCurrent() else { throw CancellationError() }
             // Relative server references and cached working-copy diffs belonged
             // to the previous location. Keep inline phone files and the draft.
             composerAttachments.removeAll { if case .serverFile = $0 { true } else { false } }
@@ -3757,7 +3767,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             if error is SessionMovedBeforeSend {
                 restoreComposer(text, attachments: [], context: context)
                 errorMessage = error.localizedDescription
-                if responseState == .generating { markResponseFailed(error.localizedDescription) }
+                if delivery != .queue, responseState == .generating {
+                    markResponseFailed(error.localizedDescription)
+                }
                 return
             }
             if delivery == .queue {

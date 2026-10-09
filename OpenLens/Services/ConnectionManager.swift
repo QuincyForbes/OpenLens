@@ -338,7 +338,9 @@ final class ConnectionManager: ConnectionProviding {
         await setProjectContext(directory: normalized)
     }
 
-    private func refreshProjectMetadata() async {
+    /// Recovery can retry a cancelled metadata load. For an already committed
+    /// directory this preserves the context revision and SSE binding.
+    func refreshProjectMetadata() async {
         guard let client else {
             currentProject = nil
             projectName = nil
