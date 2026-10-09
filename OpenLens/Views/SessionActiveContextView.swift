@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// A read-only inspection of the server projection. Loading and disclosure
+/// Inspection and compaction of the server projection. Loading and disclosure
 /// state belong to this sheet; the shared chat service owns scoped IO.
 struct SessionActiveContextView: View {
     @Bindable var chatClient: ChatClient
@@ -53,13 +53,15 @@ struct SessionActiveContextView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(isRetro ? RetroChatStyle.paper : Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
+                    SessionCompactionControls()
+                        .environment(chatClient)
                     content
                 }
                 .font(isRetro ? RetroChatStyle.bodyFont : .subheadline)
                 .padding(16)
             }
             .background(isRetro ? RetroChatStyle.screenBottom : Color(.systemGroupedBackground))
-            .refreshable { await load(scope: chatClient.activeContextScope) }
+            .refreshable { await refreshContext() }
             .navigationTitle("Active Context")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -67,7 +69,7 @@ struct SessionActiveContextView: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Refresh", systemImage: "arrow.clockwise") { refresh &+= 1 }
+                    Button("Refresh", systemImage: "arrow.clockwise") { Task { await refreshContext() } }
                         .accessibilityIdentifier("active-context-refresh")
                 }
             }
@@ -117,6 +119,13 @@ struct SessionActiveContextView: View {
             .accessibilityIdentifier("active-context-loading")
     }
 
+    private func refreshContext() async {
+        let sessionID = chatClient.currentSession?.id
+        if !ScreenshotFixtures.showsActiveContextButton { await chatClient.refreshCompactionState() }
+        guard !Task.isCancelled, chatClient.currentSession?.id == sessionID else { return }
+        await load(scope: chatClient.activeContextScope)
+    }
+
     private func load(scope: ChatClient.ActiveContextScope) async {
         let token = UUID()
         requestToken = token
@@ -164,7 +173,7 @@ private struct ActiveContextEntries: View {
                 .font(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.headerFont : .headline)
             ForEach(transcript.entryOrder, id: \.self) { id in
                 if let context = contextByID[id] {
-                    SessionContextTimelineRow(entry: context, initiallyExpanded: ScreenshotFixtures.opensActiveContext)
+                    SessionContextTimelineRow(entry: context, initiallyExpanded: context.compactionStatus == "completed" || ScreenshotFixtures.opensActiveContext)
                 } else if let message = messagesByID[id] {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(message.role == .user ? "You" : "Assistant")

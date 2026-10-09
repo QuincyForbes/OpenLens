@@ -121,6 +121,11 @@ final class MessagesService {
         )
     }
 
+    func requestCompaction(sessionID: String, messageID: String) async throws -> OCV2InboxEntry? {
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        return try await client.requestCompaction(sessionID: sessionID, messageID: messageID)
+    }
+
     /// Durable work admitted to the v2 session and not yet delivered.
     func listSessionInbox(sessionID: String) async throws -> [OCV2InboxEntry] {
         guard let client = connection.client else {

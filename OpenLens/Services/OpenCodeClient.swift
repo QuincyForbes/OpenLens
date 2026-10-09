@@ -517,6 +517,28 @@ actor OpenCodeClient {
         }
     }
 
+    /// Admission only: completion arrives through the shared inbox/timeline.
+    /// A successful but unreadable acknowledgement must never invite a new ID.
+    func requestCompaction(sessionID: String, messageID: String) async throws -> OCV2InboxEntry? {
+        guard usesV2 else { return nil }
+        let data: Data
+        do {
+            data = try await sendV2RequestData(
+                method: "POST", path: "/api/session/\(sessionID)/compact",
+                body: ["id": messageID, "delivery": "steer"], includesLocation: false
+            )
+        } catch {
+            if case OpenCodeError.httpError(let status) = error, [404, 405, 501].contains(status) { return nil }
+            throw error
+        }
+        if let response = try? decode(data) as OCV2Envelope<OCV2InboxEntry>,
+           response.data.id == messageID, response.data.sessionID == sessionID,
+           response.data.type == "compaction" {
+            return response.data
+        }
+        return OCV2InboxEntry(id: messageID, sessionID: sessionID, type: "compaction", delivery: .steer, text: nil)
+    }
+
     // MARK: - V2 Inbox
 
     /// Durable work admitted to a v2 session and not yet delivered.

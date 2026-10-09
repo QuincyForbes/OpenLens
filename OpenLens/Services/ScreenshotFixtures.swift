@@ -14,8 +14,68 @@ enum ScreenshotFixtures {
             .split(separator: "=").last.map(String.init) ?? "loaded"
     }
 
+    static var showsCompaction: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_COMPACTION")
+    }
+
+    private static var compactionScenario: String {
+        ProcessInfo.processInfo.arguments.first { $0.hasPrefix("SCREENSHOT_COMPACTION_STATE=") }?
+            .split(separator: "=").last.map(String.init) ?? "ready"
+    }
+
+    @MainActor static var compactionState: ChatClient.CompactionState? {
+        guard showsCompaction else { return nil }
+        switch compactionScenario {
+        case "submitting": return .submitting
+        case "pending": return .pending
+        case "running": return .running
+        case "completed": return .completed
+        case "failed": return .failed("The provider is offline. Try compaction again when it is available.")
+        case "interrupted": return .interrupted
+        case "uncertain": return .uncertain
+        case "unavailable": return .unavailable
+        default: return .ready
+        }
+    }
+
+    @MainActor private static func compactionProjection() throws -> SessionTranscript {
+        var records: [[String: Any]] = []
+        if ["running", "completed", "failed", "interrupted"].contains(compactionScenario) {
+            let failed = compactionScenario == "failed" || compactionScenario == "interrupted"
+            var entry: [String: Any] = ["id": "msg_fixture_compact", "type": "compaction", "reason": "manual",
+                "status": failed ? "failed" : compactionScenario]
+            if failed {
+                entry["error"] = ["type": "unknown", "message": compactionScenario == "interrupted"
+                    ? "Execution was interrupted." : "The provider is offline."]
+            } else {
+                entry["summary"] = "Model selection is saved on the server. The tests pass. Keep the current branch for review."
+                entry["recent"] = "Inspect the resulting summary on the phone."
+            }
+            records.append(entry)
+            if compactionScenario == "interrupted" {
+                records.append(["id": "msg_fixture_idle", "type": "idle", "outcome": "interrupted"])
+            }
+        } else {
+            records.append(["id": "msg_fixture_user", "type": "user", "text": "Keep the conversation focused on the current task."])
+        }
+        let data = try JSONSerialization.data(withJSONObject: records)
+        let entries = try JSONDecoder().decode([OCV2SessionMessage].self, from: data)
+        return MessagesService.transcript(from: OCTranscriptEntry.projectV2(entries, sessionID: defaultSession.id))
+    }
+
+    @MainActor static func applyCompaction(to chat: ChatClient) {
+        guard let transcript = try? compactionProjection() else { return }
+        chat.replaceTranscript(transcript)
+        if compactionScenario == "pending" {
+            let entry = OCV2InboxEntry(id: "msg_fixture_compact", sessionID: defaultSession.id,
+                                      type: "compaction", delivery: .steer, text: nil)
+            if let pending = chat.queuedPrompt(for: entry) { chat.queuedPrompts = [pending] }
+        }
+    }
+
     /// Uses the production tagged-entry decoder and message conversion.
     @MainActor static func activeContextProjection() throws -> SessionTranscript {
+        if showsCompaction { return try compactionProjection() }
         let wire = activeContextState == "empty" ? "[]" : #"""
         [
           {"id":"active-summary","type":"compaction","status":"completed","reason":"manual","summary":"Model selection is saved on the server. The tests pass. Keep the current branch for review."},

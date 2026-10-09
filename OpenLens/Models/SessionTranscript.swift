@@ -60,6 +60,8 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
     let details: String
     let resultPreview: String
     let subagentResult: SubagentResult?
+    let compactionStatus: String?
+    let idleOutcome: String?
 
     nonisolated struct SubagentResult: Equatable, Sendable {
         let childID: String?
@@ -117,6 +119,8 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
         let metadata = object(.metadata)
         subagentResult = kind == .synthetic ? SubagentResult(metadata: metadata) : nil
         let status = text(.status)
+        compactionStatus = kind == .compaction ? status : nil
+        idleOutcome = kind == .idle ? text(.outcome) : nil
         let fullDetails: String
         var outputWasTruncated = false
         switch kind {

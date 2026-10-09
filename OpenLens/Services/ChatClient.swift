@@ -1578,6 +1578,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             // Auto-start demo playback after session is ready
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.showsCompaction {
+                ScreenshotFixtures.applyCompaction(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentResults {
                 ScreenshotFixtures.applySubagentResults(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsContextTimeline {
@@ -1635,6 +1637,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = nil
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.showsCompaction {
+                ScreenshotFixtures.applyCompaction(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentResults {
                 ScreenshotFixtures.applySubagentResults(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsContextTimeline {
@@ -3661,6 +3665,109 @@ final class ChatClient: SSEEventHandlerDelegate {
                 dismissError()
             }
         }
+    }
+
+    // MARK: - V2 Compaction
+
+    enum CompactionState: Equatable {
+        case ready, submitting, pending, running, completed, interrupted, unavailable
+        case failed(String), uncertain
+    }
+
+    private struct CompactionAttempt {
+        let client: OpenCodeClient
+        let id: String
+        var state: CompactionState
+    }
+
+    // Keep admission uncertainty across sheet/session reopenings. The server
+    // inbox and transcript remain authoritative after an app-state reset.
+    private var compactionAttempts: [String: CompactionAttempt] = [:]
+    private var compactionUnavailableClient: OpenCodeClient?
+
+    var compactionState: CompactionState {
+        guard usesV2SessionAPI, let sessionID = currentSession?.id, let client = connection?.client else { return .unavailable }
+        if compactionUnavailableClient === client { return .unavailable }
+        if let attempt = compactionAttempts[sessionID], attempt.client === client, attempt.state == .submitting { return .submitting }
+        if queuedPrompts.contains(where: { $0.kind == .compaction }) { return .pending }
+        let attempt = compactionAttempts[sessionID].flatMap { $0.client === client ? $0 : nil }
+        let result = contextEntries.last(where: { $0.kind == .compaction })
+        if let attempt, result?.id != attempt.id { return attempt.state }
+        guard let result else { return .ready }
+        switch result.compactionStatus {
+        case "running": return .running
+        case "completed": return .completed
+        case "failed":
+            // Only an adjacent authoritative idle marker associates an
+            // interruption with this failed control; later turns cannot do so.
+            if let index = transcriptEntryOrder.firstIndex(of: result.id),
+               transcriptEntryOrder.indices.contains(index + 1),
+               contextEntries.contains(where: { $0.id == transcriptEntryOrder[index + 1] && $0.idleOutcome == "interrupted" }) {
+                return .interrupted
+            }
+            return .failed(result.details.isEmpty ? "The server could not compact this context." : result.details)
+        default: return .uncertain
+        }
+    }
+
+    var canRequestCompaction: Bool {
+        guard canCompose, isStreamSynchronized, !isDemoMode, !isRecordedReplayMode, !isOfflinePreviewMode else { return false }
+        switch compactionState {
+        case .ready, .completed, .interrupted, .failed: return true
+        case .uncertain:
+            guard let sessionID = currentSession?.id, let attempt = compactionAttempts[sessionID] else { return false }
+            return attempt.client === connection?.client && attempt.state == .uncertain
+        default: return false
+        }
+    }
+
+    func requestCompaction() async {
+        guard canRequestCompaction, let sessionID = currentSession?.id,
+              let client = connection?.client, let messagesService else { return }
+        let retryID: String?
+        if compactionState == .uncertain,
+           let attempt = compactionAttempts[sessionID], attempt.client === client {
+            // Reconcile first: a late admission/result withdraws the retry.
+            compactionAttempts[sessionID]?.state = .submitting
+            await refreshCompactionState()
+            guard compactionAttempts[sessionID]?.client === client, compactionAttempts[sessionID]?.id == attempt.id else { return }
+            compactionAttempts[sessionID]?.state = .uncertain
+            guard currentSession?.id == sessionID, connection?.client === client,
+                  canRequestCompaction, compactionState == .uncertain else { return }
+            retryID = attempt.id
+        } else {
+            // An unknown server result has no retry identity; refresh only.
+            guard compactionState != .uncertain else { return }
+            retryID = nil
+        }
+        let id = retryID ?? "msg_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        compactionAttempts[sessionID] = .init(client: client, id: id, state: .submitting)
+        do {
+            let entry = try await messagesService.requestCompaction(sessionID: sessionID, messageID: id)
+            guard compactionAttempts[sessionID]?.client === client, compactionAttempts[sessionID]?.id == id else { return }
+            compactionAttempts[sessionID]?.state = entry == nil ? .unavailable : .pending
+            if entry == nil, connection?.client === client { compactionUnavailableClient = client }
+            guard currentSession?.id == sessionID, connection?.client === client else { return }
+            if let entry {
+                locallyAdmittedInbox.append((entry, inboxReadSequence))
+                projectSessionInbox()
+            }
+        } catch {
+            guard compactionAttempts[sessionID]?.client === client, compactionAttempts[sessionID]?.id == id else { return }
+            let conflict: Bool
+            if case OpenCodeError.apiError(let status, _) = error { conflict = status == 409 }
+            else if case OpenCodeError.httpError(let status) = error { conflict = status == 409 }
+            else { conflict = false }
+            compactionAttempts[sessionID]?.state = OpenCodeClient.requestMayHaveReachedServer(error) || conflict
+                ? .uncertain : .failed(error.localizedDescription)
+        }
+        guard currentSession?.id == sessionID, connection?.client === client else { return }
+        await refreshCompactionState()
+    }
+
+    func refreshCompactionState() async {
+        synchronizeCurrentSessionFromServer()
+        await streamSynchronizationTask?.value
     }
 
     // MARK: - V2 Session Inbox
