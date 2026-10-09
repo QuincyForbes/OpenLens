@@ -1783,7 +1783,7 @@ nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
     }
 
     var hasUnsupportedFields: Bool {
-        fields.contains { !$0.isSupported }
+        fields.contains { !$0.isSupported } || !InteractiveFormSafety.supportsConditions(in: self)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1855,6 +1855,7 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
     let placeholder: String?
     let stringDefault: String?
     let options: [OCFormOption]
+    let hasDeclaredOptions: Bool
     let custom: Bool
     let numberMinimum: Double?
     let numberMaximum: Double?
@@ -1864,15 +1865,15 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
     let multiselectMaximum: Int?
     let multiselectDefault: [String]
     let externalURLString: String?
-    /// Conditions are part of the documented contract, but OpenLens does not
-    /// yet evaluate them. Treat them as unsupported instead of submitting
-    /// values for fields that may be inactive.
-    let hasConditionalRules: Bool
+    /// Nil retains malformed or future predicates as an explicit fallback.
+    let conditions: [OCFormCondition]?
+    var hasConditionalRules: Bool { conditions?.isEmpty != true }
 
     var id: String { key }
     var isSupported: Bool {
         kind != .unsupported
-            && !hasConditionalRules
+            && conditions?.allSatisfy({ ["eq", "neq"].contains($0.op) }) == true
+            && (kind != .external || !hasConditionalRules)
             && (kind != .string || stringFormat.map {
                 ["email", "uri", "date", "date-time"].contains($0)
             } ?? true)
@@ -1916,6 +1917,7 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
         stringMaximum = try container.decodeIfPresent(Int.self, forKey: .maxLength)
         stringPattern = try container.decodeIfPresent(String.self, forKey: .pattern)
         placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder)
+        hasDeclaredOptions = try container.contains(.options) && !container.decodeNil(forKey: .options)
         options = try container.decodeIfPresent([OCFormOption].self, forKey: .options) ?? []
         custom = try container.decodeIfPresent(Bool.self, forKey: .custom) ?? false
         numberMinimum = Self.finiteNumber(from: container, key: .minimum)
@@ -1923,18 +1925,9 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
         multiselectMinimum = try container.decodeIfPresent(Int.self, forKey: .minItems)
         multiselectMaximum = try container.decodeIfPresent(Int.self, forKey: .maxItems)
         externalURLString = try container.decodeIfPresent(String.self, forKey: .url)
-        if container.contains(.when) {
-            // An empty condition list has no effect. A malformed condition is
-            // treated as conditional so the field falls back safely instead
-            // of being submitted with guessed visibility semantics.
-            if let conditions = try? container.decode([OCFormCondition].self, forKey: .when) {
-                hasConditionalRules = !conditions.isEmpty
-            } else {
-                hasConditionalRules = true
-            }
-        } else {
-            hasConditionalRules = false
-        }
+        conditions = container.contains(.when)
+            ? try? container.decode([OCFormCondition].self, forKey: .when)
+            : []
 
         switch rawType {
         case "string":
@@ -2014,15 +2007,37 @@ nonisolated struct OCFormOption: Decodable, Identifiable, Sendable {
     }
 }
 
-/// Conditions are intentionally only decoded to decide whether a form field
-/// needs the unsupported fallback. OpenLens does not evaluate them yet.
-private nonisolated struct OCFormCondition: Decodable {
+/// Scalar, typed predicates from Form.When. Unknown syntax remains unsupported.
+nonisolated struct OCFormCondition: Decodable, Sendable {
     let key: String
     let op: String
-    let value: AnyCodable
+    let value: OCFormValue
 
-    private enum CodingKeys: String, CodingKey {
-        case key, op, value
+    private enum CodingKeys: String, CodingKey { case key, op, value }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(String.self, forKey: .key)
+        op = try container.decode(String.self, forKey: .op)
+        let scalar = try container.superDecoder(forKey: .value).singleValueContainer()
+        if let flag = try? scalar.decode(Bool.self) {
+            value = .boolean(flag)
+        } else if let number = try? scalar.decode(Double.self), number.isFinite {
+            value = .number(number)
+        } else {
+            value = .string(try scalar.decode(String.self))
+        }
+    }
+
+    func matches(_ answer: OCFormValue?) -> Bool {
+        guard let answer else { return false }
+        let hit: Bool
+        if case .strings(let selections) = answer, case .string(let option) = value {
+            hit = selections.contains(option)
+        } else {
+            hit = answer == value
+        }
+        return op == "eq" ? hit : !hit
     }
 }
 

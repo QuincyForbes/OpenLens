@@ -1,7 +1,10 @@
 import Foundation
 import Testing
+import SwiftUI
+import UIKit
 @testable import OpenLens
 
+@Suite(.serialized)
 struct OpenCodeV2FormTests {
     @Test func v2FormsUseTheOwningSessionForRecoveryRepliesAndCancellation() async throws {
         let transport = V2FormTransport(responses: [
@@ -111,7 +114,7 @@ struct OpenCodeV2FormTests {
         #expect(InteractiveFormSafety.sanitize(unsafe) == nil)
     }
 
-    @Test func formReplySafetyValidatesBoundsAndSafelyFallsBackForConditionalFields() throws {
+    @Test func formReplySafetyValidatesBoundsAndSupportsConditionalFields() throws {
         let form = try JSONDecoder().decode(OCFormRequest.self, from: Data(#"""
         {
           "id": "frm_constraints",
@@ -167,7 +170,7 @@ struct OpenCodeV2FormTests {
           ]
         }
         """#.utf8))
-        #expect(InteractiveFormSafety.sanitize(conditional)?.hasUnsupportedFields == true)
+        #expect(InteractiveFormSafety.sanitize(conditional)?.hasUnsupportedFields == false)
     }
 
     @Test func formIdentifiersCannotEscapeSessionScopedRoutes() {
@@ -197,6 +200,313 @@ struct OpenCodeV2FormTests {
             answer: ["confirmed": .boolean(false), "targets": .strings(["ios"])],
             for: form
         ))
+    }
+
+    @MainActor @Test func conditionalReplyDropsInactiveRequiredAnswersThroughBothServices() async throws {
+        let wire = Data(#"""
+        {"data":[{"id":"frm_branch","title":"Release","fields":[
+          {"key":"enabled","type":"boolean","required":true,"default":false},
+          {"key":"details","type":"string","required":true,"minLength":3,
+           "when":[{"key":"enabled","op":"eq","value":true}]},
+          {"key":"followup","type":"integer","required":true,"minimum":1,"maximum":5,
+           "when":[{"key":"details","op":"neq","value":"skip"}]}
+        ]}]}
+        """#.utf8)
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: wire),
+            .init(statusCode: 204, body: Data()),
+            .init(statusCode: 204, body: Data()),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!,
+            contextDirectory: "/different/location", transport: transport)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let questions = QuestionService(connection: connection)
+        let form = try #require(try await questions.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(!form.hasUnsupportedFields)
+        // A previous branch's invalid/stale answers cannot travel in either reply.
+        let answer: [String: OCFormValue] = ["enabled": .boolean(false),
+            "details": .string("x"), "followup": .number(99)]
+        try await questions.respondToForm(form, answer: answer)
+        try await InboxService(connection: connection).respondToForm(form, answer: answer)
+        let requests = transport.recordedRequests()
+        for request in requests.suffix(2) {
+            #expect(request.path == "/api/session/ses_owner/form/frm_branch/reply")
+            #expect(request.queryItems.isEmpty)
+            let payload = try #require(try bodyObject(request)["answer"] as? [String: Any])
+            #expect(Set(payload.keys) == ["enabled"])
+            #expect(payload["enabled"] as? Bool == false)
+        }
+        await #expect(throws: OpenCodeError.self) {
+            try await questions.respondToForm(form, answer: ["enabled": .boolean(true)])
+        }
+        #expect(transport.recordedRequests().count == 4)
+    }
+
+    @MainActor @Test func conditionalBranchesUpdateWithTypedPredicatesAndPreserveValidation() async throws {
+        let wire = #"""
+        {"data":[{"id":"frm_matrix","sessionID":"ses_owner","title":"Branches","fields":[
+          {"key":"mode","type":"string","default":"ship","options":[{"value":"ship","label":"Ship"},{"value":"hold","label":"Hold"}]},
+          {"key":"amount","type":"number","default":2.5,"minimum":0,"maximum":5},
+          {"key":"targets","type":"multiselect","default":["ios"],"minItems":1,"maxItems":2,"options":[{"value":"ios","label":"iOS"},{"value":"macos","label":"macOS"}]},
+          {"key":"ready","type":"boolean","default":false,"required":true},
+          {"key":"label","type":"string","required":true,"default":"go","minLength":2,"maxLength":4,"pattern":"^[a-z]+$",
+           "when":[{"key":"mode","op":"eq","value":"ship"},{"key":"amount","op":"eq","value":2.5},{"key":"targets","op":"eq","value":"ios"},{"key":"ready","op":"eq","value":false}]},
+          {"key":"other","type":"integer","required":true,"minimum":1,"maximum":3,
+           "when":[{"key":"targets","op":"neq","value":"ios"}]},
+          {"key":"docs","type":"external","url":"https://example.com/checklist"}
+        ]}]}
+        """#
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: Data(wire.utf8)),
+            .init(statusCode: 204, body: Data()),
+            .init(statusCode: 204, body: Data()),
+            .init(statusCode: 204, body: Data()),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let service = QuestionService(connection: ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        let form = try #require(try await service.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(!form.hasUnsupportedFields)
+        var answer: [String: OCFormValue] = ["mode": .string("ship"), "amount": .number(2.5),
+            "targets": .strings(["ios"]), "ready": .boolean(false), "label": .string("go"), "docs": .boolean(true)]
+        #expect(InteractiveFormSafety.activeFields(for: form, answer: answer).map(\.key) == ["mode", "amount", "targets", "ready", "label", "docs"])
+        try await service.respondToForm(form, answer: answer)
+        // AND and unanswered neq: deleting a target hides both selection branches.
+        answer.removeValue(forKey: "targets")
+        #expect(InteractiveFormSafety.activeFields(for: form, answer: answer).map(\.key) == ["mode", "amount", "targets", "ready", "docs"])
+        try await service.respondToForm(form, answer: answer)
+        answer["targets"] = .strings(["macos"])
+        await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: answer) }
+        answer["other"] = .number(3)
+        try await service.respondToForm(form, answer: answer)
+        let replies = transport.recordedRequests().suffix(3)
+        let payloads = try replies.map { try #require(try bodyObject($0)["answer"] as? [String: Any]) }
+        #expect(payloads[0]["label"] as? String == "go")
+        #expect(payloads[1]["label"] == nil && payloads[1]["other"] == nil)
+        #expect(payloads[2]["label"] == nil && payloads[2]["other"] as? Double == 3)
+        // Retain active scalar, option, number/integer, multiselect and external constraints.
+        let invalidAnswers: [[String: OCFormValue]] = [
+            ["label": .string("")], ["label": .string("x")], ["label": .string("ABCDE")],
+            ["mode": .string("guess")], ["amount": .number(6)], ["amount": .number(.infinity)],
+            ["ready": .string("false")], ["targets": .strings(["macos", "macos"])],
+            ["targets": .strings(["watchos"])], ["docs": .boolean(false)],
+        ]
+        let original: [String: OCFormValue] = ["mode": .string("ship"), "amount": .number(2.5),
+            "targets": .strings(["ios"]), "ready": .boolean(false), "label": .string("go"), "docs": .boolean(true)]
+        for change in invalidAnswers {
+            let candidate = original.merging(change) { _, new in new }
+            await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: candidate) }
+        }
+        answer["other"] = .number(1.5)
+        await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: answer) }
+        #expect(transport.recordedRequests().count == 5)
+    }
+
+    @MainActor @Test(arguments: [
+        #"[{"key":"enabled","op":"future","value":true}]"#,
+        #"[{"key":"enabled","op":"eq","value":"true"}]"#,
+        #"[{"key":"missing","op":"eq","value":true}]"#,
+        #"[{"key":"details","op":"eq","value":"self"}]"#,
+        #"[{"key":"later","op":"eq","value":true}]"#,
+        #"[{"key":"enabled","op":"eq","value":[true]}]"#,
+        #"[{"key":"enabled","op":"eq","value":null}]"#,
+        #"[{"key":"enabled","op":"eq"}]"#,
+        #"{"key":"enabled","op":"eq","value":true}"#,
+        "null",
+    ]) func unsupportedPredicatesRecoverExplicitlyAndCannotReachTransport(predicate: String) async throws {
+        let wire = """
+        {"data":[{"id":"frm_unsupported","title":"Future rules","fields":[
+          {"key":"enabled","type":"boolean","default":false},
+          {"key":"details","type":"string","when":\(predicate)},
+          {"key":"later","type":"boolean"}
+        ]}]}
+        """
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: Data(wire.utf8)),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let questions = QuestionService(connection: connection)
+        let form = try #require(try await questions.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(form.hasUnsupportedFields)
+        await #expect(throws: OpenCodeError.self) {
+            try await questions.respondToForm(form, answer: ["enabled": .boolean(false)])
+        }
+        await #expect(throws: OpenCodeError.self) {
+            try await InboxService(connection: connection).respondToForm(form, answer: ["enabled": .boolean(false)])
+        }
+        #expect(transport.recordedRequests().count == 2)
+    }
+
+    @MainActor @Test func nativeFormUpdatesVisibleInputsWhenBooleanAnswerChanges() async throws {
+        let form = try JSONDecoder().decode(OCFormRequest.self, from: Data(#"""
+        {"id":"frm_native","sessionID":"ses_owner","title":"Native branches","fields":[
+          {"key":"enabled","type":"boolean","required":true,"default":false},
+          {"key":"details","type":"string","required":true,"default":"Ready to ship",
+           "when":[{"key":"enabled","op":"eq","value":true}]}
+        ]}
+        """#.utf8))
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: FormView(form: form,
+            onSubmit: { _ in }, onCancel: {}, isSubmitting: false))
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await Task.sleep(for: .milliseconds(300))
+        let toggle = try #require(descendants(window).compactMap { $0 as? UISwitch }.first)
+        #expect(descendants(window).compactMap { $0 as? UITextField }.isEmpty)
+        toggle.setOn(true, animated: false)
+        toggle.sendActions(for: .valueChanged)
+        try await Task.sleep(for: .milliseconds(150))
+        let input = try #require(descendants(window).compactMap { $0 as? UITextField }.first)
+        #expect(input.text == "Ready to ship")
+        input.text = "Edited release"
+        input.sendActions(for: .editingChanged)
+        try await Task.sleep(for: .milliseconds(150))
+        toggle.setOn(false, animated: false)
+        toggle.sendActions(for: .valueChanged)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(descendants(window).compactMap { $0 as? UITextField }.isEmpty)
+        toggle.setOn(true, animated: false)
+        toggle.sendActions(for: .valueChanged)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(descendants(window).compactMap { $0 as? UITextField }.first?.text == "Edited release")
+    }
+
+    @MainActor private func descendants(_ view: UIView) -> [UIView] {
+        [view] + view.subviews.flatMap { descendants($0) }
+    }
+
+    @MainActor @Test func requiredEmptyValuesAndUnknownAnswersCannotSubmit() async throws {
+        let form = try JSONDecoder().decode(OCFormRequest.self, from: Data(#"""
+        {"id":"frm_empty","sessionID":"ses_owner","title":"Required values","fields":[
+          {"key":"name","type":"string","required":true},
+          {"key":"targets","type":"multiselect","required":true,"options":[{"value":"ios","label":"iOS"}]}
+        ]}
+        """#.utf8))
+        let transport = V2FormTransport(responses: [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let service = QuestionService(connection: ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        for answer: [String: OCFormValue] in [
+            ["name": .string(""), "targets": .strings(["ios"])],
+            ["name": .string("Release"), "targets": .strings([])],
+            ["name": .string("Release"), "targets": .strings(["ios"]), "unknown": .boolean(true)],
+        ] {
+            await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: answer) }
+        }
+        #expect(transport.recordedRequests().count == 1)
+    }
+
+    @MainActor @Test func failedRecoveryAndReplyCanRetryWithoutChangingFormOwnership() async throws {
+        let wire = Data(#"""
+        {"data":[{"id":"frm_retry","title":"Retry","fields":[
+          {"key":"enabled","type":"boolean","default":true,"required":true,"when":[]},
+          {"key":"count","type":"integer","default":1,"minimum":1,"maximum":3,"required":true,
+           "when":[{"key":"enabled","op":"eq","value":true}]}
+        ]}]}
+        """#.utf8)
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 500, body: Data()),
+            .init(statusCode: 200, body: wire),
+            .init(statusCode: 500, body: Data()),
+            .init(statusCode: 204, body: Data()),
+            .init(statusCode: 204, body: Data()),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/new/location", transport: transport)
+        let service = QuestionService(connection: ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        await #expect(throws: OpenCodeError.self) { try await service.recoverPendingForm(sessionID: "ses_owner") }
+        let form = try #require(try await service.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(form.fields[0].booleanDefault == true)
+        #expect(form.fields[1].numberDefault == 1)
+        // A default is initial UI input, never a substitute for a missing caller answer.
+        await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: ["enabled": .boolean(true)]) }
+        let answer: [String: OCFormValue] = ["enabled": .boolean(true), "count": .number(1)]
+        await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: answer) }
+        try await service.respondToForm(form, answer: answer)
+        try await service.cancelForm(form)
+        #expect(transport.recordedRequests().map(\.path) == ["/api/info",
+            "/api/session/ses_owner/form", "/api/session/ses_owner/form",
+            "/api/session/ses_owner/form/frm_retry/reply", "/api/session/ses_owner/form/frm_retry/reply",
+            "/api/session/ses_owner/form/frm_retry"])
+        #expect(transport.recordedRequests().dropFirst().allSatisfy { $0.queryItems.isEmpty })
+    }
+
+    @Test(arguments: [12, 13]) func conditionalBudgetsApplyToRecoveryAndNativeEvents(count: Int) async throws {
+        let predicates = Array(repeating: ["key": "name", "op": "eq", "value": "release"], count: count)
+        let raw: [String: Any] = ["id": "frm_budget", "sessionID": "ses_owner", "title": "Budget", "fields": [
+            ["key": "name", "type": "string"], ["key": "details", "type": "string", "when": predicates],
+        ]]
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: ["data": [raw]])),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        _ = try await api.probeCapabilities()
+        let forms = try await api.listPendingForms(sessionID: "ses_owner")
+        let prepared = try #require(SSEFormCreated(event: OCEvent(type: "form.created", properties: AnyCodable(["form": raw]))))
+        #expect(forms.count == (count == 12 ? 1 : 0))
+        #expect((prepared.form != nil) == (count == 12))
+        #expect(prepared.rejectedFormID == (count == 12 ? nil : "frm_budget"))
+    }
+
+    @Test(arguments: [2400, 2401]) func conditionalScalarBudgetDoesNotTruncatePredicateValues(bytes: Int) async throws {
+        let raw: [String: Any] = ["id": "frm_scalar", "sessionID": "ses_owner", "title": "Budget", "fields": [
+            ["key": "name", "type": "string"], ["key": "details", "type": "string", "when": [
+                ["key": "name", "op": "eq", "value": String(repeating: "x", count: bytes)]
+            ]],
+        ]]
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: ["data": [raw]])),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        _ = try await api.probeCapabilities()
+        let forms = try await api.listPendingForms(sessionID: "ses_owner")
+        #expect(forms.count == (bytes == 2400 ? 1 : 0))
+        if let form = forms.first {
+            #expect(form.fields[1].conditions?.first?.value == .string(String(repeating: "x", count: 2400)))
+        }
+    }
+
+    @Test(arguments: [
+        #"{"key":"details","type":"external","url":"https://example.com","when":[{"key":"enabled","op":"eq","value":true}]}"#,
+        #"{"key":"details","type":"future","when":[{"key":"enabled","op":"eq","value":true}]}"#,
+        #"{"key":"details","type":"string","format":"future","when":[{"key":"enabled","op":"eq","value":true}]}"#,
+    ]) func unsupportedConditionalFieldTypesStayUnsupportedEvenOnAnInactiveBranch(field: String) throws {
+        let form = try JSONDecoder().decode(OCFormRequest.self, from: Data("""
+        {"id":"frm_future","sessionID":"ses_owner","title":"Future field","fields":[
+          {"key":"enabled","type":"boolean"}, \(field)
+        ]}
+        """.utf8))
+        #expect(InteractiveFormSafety.sanitize(form) != nil)
+        #expect(form.hasUnsupportedFields)
+        #expect(InteractiveFormSafety.submissionAnswer(["enabled": .boolean(false)], for: form) == nil)
+    }
+
+    @MainActor @Test(arguments: [
+        #"{"key":"target","type":"string","options":[]}"#,
+        #"{"key":"target","type":"string","options":[{"value":"ios","label":"iOS"}]}"#,
+        #"{"key":"target","type":"multiselect","options":[{"value":"ios","label":"iOS"}]}"#,
+        #"{"key":"target","type":"external","url":"https://example.com"}"#,
+    ]) func predicatesCannotReferenceClosedInvalidOptionsOrExternalAnswers(target: String) async throws {
+        let wire = """
+        {"data":[{"id":"frm_options","sessionID":"ses_owner","title":"Option rules","fields":[
+          \(target), {"key":"details","type":"string","when":[{"key":"target","op":"eq","value":"guess"}]}
+        ]}]}
+        """
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: Data(wire.utf8)),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let service = QuestionService(connection: ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        let form = try #require(try await service.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(form.hasUnsupportedFields)
+        await #expect(throws: OpenCodeError.self) { try await service.respondToForm(form, answer: [:]) }
+        #expect(transport.recordedRequests().count == 2)
     }
 
     private func sessionFormListEnvelope() -> Data {

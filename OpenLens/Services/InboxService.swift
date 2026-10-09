@@ -137,7 +137,7 @@ final class InboxService {
             return
         }
 
-        guard InteractiveFormSafety.accepts(answer: answer, for: form) else {
+        guard let answer = InteractiveFormSafety.submissionAnswer(answer, for: form) else {
             throw OpenCodeError.invalidPayload("The form reply does not satisfy the server-provided field constraints.")
         }
         guard let client = connection.client else {

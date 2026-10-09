@@ -4,16 +4,27 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
 **Priority:** P2
 
-- [ ] Supported when predicates determine active fields and update when dependent answers change.
-- [ ] Only active fields are validated and included in the submitted reply.
-- [ ] Hidden required fields do not block submission or leave stale answers in the payload.
-- [ ] Existing string, numeric, Boolean, multiselect, and external flows retain their validation behavior.
-- [ ] Unsupported predicates/types remain explicit and do not cause guessed or unsafe submissions.
-- [ ] Branch changes, defaults, boundaries, recovery, and reply ownership are covered through services and Remote.
-- [ ] Work from OpenLens V2 baseline 1dfb5aa or a descendant retaining its dual-protocol services and Remote isolation.
-- [ ] Extend the existing services, environment injection, and view-local state; preserve V1 and chat navigation behavior without adding a ViewModel/Presenter layer.
-- [ ] Verify externally visible behavior with Swift Testing at the existing service/transport boundary and gateway coverage where applicable; run the repository-required checks and include screenshots for visible changes.
+- [x] Supported when predicates determine active fields and update when dependent answers change.
+- [x] Only active fields are validated and included in the submitted reply.
+- [x] Hidden required fields do not block submission or leave stale answers in the payload.
+- [x] Existing string, numeric, Boolean, multiselect, and external flows retain their validation behavior.
+- [x] Unsupported predicates/types remain explicit and do not cause guessed or unsafe submissions.
+- [x] Branch changes, defaults, boundaries, recovery, and reply ownership are covered through services and Remote.
+- [x] Work from OpenLens V2 baseline 1dfb5aa or a descendant retaining its dual-protocol services and Remote isolation.
+- [x] Extend the existing services, environment injection, and view-local state; preserve V1 and chat navigation behavior without adding a ViewModel/Presenter layer.
+- [x] Verify externally visible behavior with Swift Testing at the existing service/transport boundary and gateway coverage where applicable; run the repository-required checks and include screenshots for visible changes.
+
+**Verification:**
+
+- Added **10 Swift Testing tests**, extending `OpenCodeV2FormTests` to **16 tests** with parameterized predicate and budget cases. Production `QuestionService`, `InboxService`, `OpenCodeClient` and injected transports prove AND rules, typed string/numeric/Boolean equality, multiselect membership/non-membership, unanswered `neq`, cascading inactive branches, required-field filtering, stale invalid draft removal, unknown-key rejection, string/number/integer/multiselect/external constraints, defaults, failed recovery/reply retries, cancellation and owning-session routes without location queries. Native event preparation and recovery apply the same predicate count/value budgets. A hosted `FormView` test toggles off/on/off/on, edits a conditional field, and verifies visibility and retained drafts.
+- Test-first failures reproduced the old unsupported fallback and rejected conditional reply (`build/afk-logs/20261009-195504-tests-1.log`), empty required string/multiselect acceptance (`20261009-195717-tests-1.log`), and the old renderer's always-visible conditional input plus missing closed-empty-option safety (`20261009-195918-tests-1.log`). The hosted harness initially lacked a `UIWindowScene` (`195717`/`195759`); attaching it to the test app's scene fixed control discovery. All failures were resolved before final verification.
+- Ran `/Users/example/Library/Application Support/AFK Agent/Runs/9d432496-9b1a-45f2-87ac-6d45561cf4da/bin/verify` after the final fixture change. **VERIFY RESULT: PASS** — **658 tests in 63 suites passed on 2026-10-09**, no failures or skips, on dedicated AFK simulator `C25B01FF-5F58-4572-BD98-548790F43A2C`. Saved log/result bundle: `build/afk-logs/20261009-200139-tests-1.log` and `build/afk-logs/20261009-200139-tests-1.xcresult`. The final focused run also passed all 16 form tests (`20261009-195954-tests-1.log`). `git diff --check` passed.
+- Extended screenshot fixtures with `SCREENSHOT_CONDITIONAL_FORM=active|waiting|unsupported`. Captured and visually inspected the verified build: [release branch](../screenshots/18-conditional-active.png), [waiting branch with required release fields omitted](../screenshots/18-conditional-waiting.png), and [explicit unsupported predicate with Submit disabled](../screenshots/18-conditional-unsupported.png). Reproduce using the authorized AFK screenshot wrapper with `SCREENSHOT_MODE SCREENSHOT_TAB=chat SCREENSHOT_CHAT_SESSION SCREENSHOT_FORM_SHEET` plus the scenario argument. Conditional captures use the large sheet detent to show the whole branch; ordinary form presentation retains its existing detents.
+- Contract decision: follow pinned [Form.When](https://github.com/anomalyco/opencode/blob/v2.0.23/packages/schema/src/form.ts) and [core form validation](https://github.com/anomalyco/opencode/blob/v2.0.23/packages/core/src/form.ts): AND, typed `eq`/`neq`, multiselect membership, unanswered references false for both operators, and earlier-field references only. Unknown operators, malformed values, wrong types, forward/self/missing references, closed invalid options (including an explicitly empty options list), external predicates and future field types remain explicit unsupported forms and block replies, even on an inactive branch. Predicate limits reuse the existing 12-field and 2,400-byte scalar budgets; oversized rules are rejected without truncation.
+- Reply/state decision: both services filter only known inactive answers before validation and transport. Unknown keys still fail. Evaluate in order using only active earlier answers so stale drafts cannot activate descendants. Keep view-local drafts across branch changes, but omit inactive values from every submitted payload. Server defaults initialize the renderer; services never invent missing answers. Required empty strings/selections are rejected even without a minimum constraint. Nonempty invalid numeric drafts stay represented for validation instead of silently becoming omitted optional answers. External actions retain explicit acknowledgement and safe HTTP(S) links.
+- Applicability/architecture: `1dfb5aa` is an ancestor of this checkout. Remote and gateway were removed in `77b72ac`; their isolation and coverage criteria are inapplicable, consistent with completed tickets 03/04/06. Retain direct V1/V2 services and existing static `hidden` field omission; the hidden-required/stale-answer criteria here cover inactive conditional branches. Extend the existing models, safety policy, services, native view-local `@State` and fixtures without a ViewModel/Presenter layer. Chat tab-bar hiding remains on `ConnectedRootView`'s NavigationStack; the only `ChatView` edit sets the conditional screenshot fixture's sheet detent.
+- Not verified: a live V2 server/two-client interaction, physical-device forms, iPad or enlarged Dynamic Type captures. Service/transport tests, native-event admission and hosted/screenshot simulator evidence cover this run. All simulator operations used the supplied AFK wrappers; the branch remains `afk/9d432496-9b1a-45f2-87ac-6d45561cf4da`.

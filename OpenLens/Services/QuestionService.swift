@@ -70,7 +70,7 @@ final class QuestionService {
     // MARK: - Form Response
 
     func respondToForm(_ form: OCFormRequest, answer: [String: OCFormValue]) async throws {
-        guard InteractiveFormSafety.accepts(answer: answer, for: form) else {
+        guard let answer = InteractiveFormSafety.submissionAnswer(answer, for: form) else {
             throw OpenCodeError.invalidPayload("The form reply does not satisfy the server-provided field constraints.")
         }
         guard let client = connection.client else {

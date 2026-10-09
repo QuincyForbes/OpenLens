@@ -269,7 +269,7 @@ struct ChatView: View {
                     },
                     isSubmitting: chatClient.isResolvingForm
                 )
-                .presentationDetents([.medium, .large])
+                .presentationDetents(ScreenshotFixtures.showsConditionalForm ? [.large] : [.medium, .large])
                 .interactiveDismissDisabled(chatClient.isResolvingForm)
             }
         }

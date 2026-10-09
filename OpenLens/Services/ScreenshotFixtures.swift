@@ -378,6 +378,10 @@ enum ScreenshotFixtures {
         return processInfo.arguments.contains(permissionSheetArgument) || processInfo.environment[permissionSheetEnvironmentKey] == "1"
     }
 
+    static var showsConditionalForm: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("SCREENSHOT_CONDITIONAL_FORM=") }
+    }
+
     static var opensFormSheet: Bool {
         let processInfo = ProcessInfo.processInfo
         return processInfo.arguments.contains(formSheetArgument) || processInfo.environment[formSheetEnvironmentKey] == "1"
@@ -581,7 +585,35 @@ enum ScreenshotFixtures {
         forms: [screenshotForm]
     )
 
-    private static let screenshotForm: OCFormRequest = {
+    private static var screenshotForm: OCFormRequest {
+        guard isEnabled, let scenario = ProcessInfo.processInfo.arguments
+            .first(where: { $0.hasPrefix("SCREENSHOT_CONDITIONAL_FORM=") })?
+            .split(separator: "=").last else { return standardScreenshotForm }
+        let enabled = scenario == "active"
+        let predicate = scenario == "unsupported" ? "future" : "eq"
+        let wire = """
+        {"id":"form-screenshot-1","sessionID":"session-screenshot-1",
+         "title":"Choose the release plan","fields":[
+          {"key":"release","type":"boolean","title":"Ship this release",
+           "description":"Turn on to set the release details.","required":true,"default":\(enabled)},
+          {"key":"summary","type":"string","title":"Release summary","required":true,
+           "minLength":3,"default":"Safer agent handoffs",
+           "when":[{"key":"release","op":"\(predicate)","value":true}]},
+          {"key":"confidence","type":"integer","title":"Confidence","required":true,
+           "minimum":1,"maximum":10,"default":8,
+           "when":[{"key":"release","op":"eq","value":true}]},
+          {"key":"reason","type":"string","title":"Reason to wait","required":true,
+           "default":"Finish verification first",
+           "when":[{"key":"release","op":"neq","value":true}]}
+         ]}
+        """
+        guard let form = try? JSONDecoder().decode(OCFormRequest.self, from: Data(wire.utf8)) else {
+            preconditionFailure("Conditional screenshot form must decode.")
+        }
+        return form
+    }
+
+    private static let standardScreenshotForm: OCFormRequest = {
         let data = Data(#"""
         {
           "id": "form-screenshot-1",

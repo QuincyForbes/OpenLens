@@ -17,7 +17,7 @@ struct FormView: View {
     @State private var externalAcknowledgements: [String: Bool] = [:]
 
     private var visibleFields: [OCFormField] {
-        form.fields.filter { !$0.hidden }
+        InteractiveFormSafety.activeFields(for: form, answer: draftAnswer)
     }
 
     var body: some View {
@@ -98,6 +98,7 @@ struct FormView: View {
                 case .boolean:
                     Toggle(field.displayTitle, isOn: booleanBinding(for: field.key))
                         .labelsHidden()
+                        .accessibilityIdentifier("form-\(field.key)")
                 case .multiselect:
                     multiselectField(field)
                 case .external:
@@ -115,6 +116,7 @@ struct FormView: View {
         }
         .padding(16)
         .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityIdentifier("form-field-\(field.key)")
     }
 
     @ViewBuilder
@@ -197,18 +199,18 @@ struct FormView: View {
     }
 
     private var canSubmit: Bool {
-        InteractiveFormSafety.accepts(answer: formAnswer, for: form)
+        InteractiveFormSafety.submissionAnswer(draftAnswer, for: form) != nil
     }
 
     private func submit() {
-        guard canSubmit else { return }
-        onSubmit(formAnswer)
+        guard let answer = InteractiveFormSafety.submissionAnswer(draftAnswer, for: form) else { return }
+        onSubmit(answer)
     }
 
-    private var formAnswer: [String: OCFormValue] {
+    private var draftAnswer: [String: OCFormValue] {
         var answer: [String: OCFormValue] = [:]
 
-        for field in visibleFields {
+        for field in form.fields where !field.hidden {
             switch field.kind {
             case .string:
                 if let value = selectedString(for: field), !value.isEmpty {
@@ -271,14 +273,8 @@ struct FormView: View {
 
     private func numericValue(for field: OCFormField) -> Double? {
         let raw = numbers[field.key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard let value = Double(raw), value.isFinite,
-              field.kind != .integer || value.rounded() == value,
-              field.numberMinimum.map({ value >= $0 }) ?? true,
-              field.numberMaximum.map({ value <= $0 }) ?? true
-        else {
-            return nil
-        }
-        return value
+        guard !raw.isEmpty else { return nil }
+        return Double(raw) ?? .nan
     }
 
     private func multiselectValues(for field: OCFormField) -> [String] {
