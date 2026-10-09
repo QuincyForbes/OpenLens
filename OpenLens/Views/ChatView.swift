@@ -122,8 +122,9 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ChatHeaderToolbar(
-                projectName: headerSession?.workspaceDisplayName
-                    ?? connection.projectName,
+                projectName: chatClient.sessionLocationState == .ready
+                    ? (headerSession?.workspaceDisplayName ?? connection.projectName)
+                    : connection.projectName,
                 branch: connection.branch,
                 connectionState: connection.state,
                 sessionTitle: headerSession?.title,

@@ -100,6 +100,17 @@ private enum PromptAdmissionOutcome: Equatable {
     case failed
 }
 
+private struct SessionWorkContext {
+    let session: OCSession
+    let projectRevision: UInt?
+}
+
+private struct SessionMovedBeforeSend: LocalizedError {
+    var errorDescription: String? {
+        "The session moved before this request was sent. Your draft was restored. Review repository attachments and try again."
+    }
+}
+
 private struct OptimisticV2CommandMessage {
     let text: String
     let knownTranscriptMessageIDs: Set<String>
@@ -910,6 +921,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
     @ObservationIgnored private var providerLoadToken = UUID()
+    // The context whose attachments, diff caches and model catalog were fully
+    // restored. This survives SSE reconnects and distinguishes Old → New → Old.
+    private var restoredWorkspaceRevision: UInt?
     private(set) var isStreamSynchronized = true
 
     /// Duration before a pending question is auto-rejected (5 minutes).
@@ -1556,6 +1570,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             await loadProviders()
         }
         guard !Task.isCancelled, currentSession?.id == session.id else { return }
+        restoredWorkspaceRevision = connection?.projectContextRevision
         let didLoadMessages = await loadMessages()
         guard !Task.isCancelled, currentSession?.id == session.id else { return }
         let permissionRecovered = await recoverPendingPermission()
@@ -1566,6 +1581,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     func restoreProjectContext(for session: OCSession) async {
+        var session = session
+        if usesV2SessionAPI, let currentSession, currentSession.id == session.id {
+            // Navigation retains the value captured when the destination was
+            // pushed. It cannot undo a canonical move or bypass a refusal.
+            guard sessionLocationState == .ready else { return }
+            session = currentSession
+        }
         guard let directory = session.directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
               connection?.selectedProjectDirectory != directory else { return }
         await connection?.setProjectContext(directory: directory)
@@ -1583,6 +1605,12 @@ final class ChatClient: SSEEventHandlerDelegate {
             sessionLocationState = .failed(message)
             errorMessage = message
             isStreamSynchronized = false
+        } else if ScreenshotFixtures.interruptsMoveSend {
+            inputText = "Keep this unsent draft"
+            if let file = try? PromptTextFileAttachment(data: Data("Phone note".utf8), name: "note.txt") {
+                composerAttachments = [.textFile(file)]
+            }
+            errorMessage = SessionMovedBeforeSend().localizedDescription
         }
     }
 
@@ -1592,7 +1620,18 @@ final class ChatClient: SSEEventHandlerDelegate {
         let isCurrent = { !Task.isCancelled && self.currentSession?.id == session.id
             && self.streamSynchronizationGeneration == generation }
         guard isCurrent() else { throw CancellationError() }
-        let oldDirectory = currentSession?.directory
+        defer {
+            // A view-driven refresh can be cancelled without a newer recovery
+            // taking ownership. Leave an actionable state rather than a silent
+            // disabled composer. A superseding generation owns its own state.
+            if currentSession?.id == session.id, streamSynchronizationGeneration == generation,
+               sessionLocationState == .rebinding {
+                let message = "Failed to rebind session location: Recovery was interrupted. Try again."
+                sessionLocationState = .failed(message)
+                errorMessage = message
+                isStreamSynchronized = false
+            }
+        }
         let previousDirectory = connection?.selectedProjectDirectory
         currentSession = session
         guard usesV2SessionAPI else { return }
@@ -1623,7 +1662,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             await restoreProjectContext(for: session)
         }
         guard isCurrent() else { throw CancellationError() }
-        if previousDirectory != connection?.selectedProjectDirectory {
+        if restoredWorkspaceRevision != connection?.projectContextRevision {
             // Relative server references and cached working-copy diffs belonged
             // to the previous location. Keep inline phone files and the draft.
             composerAttachments.removeAll { if case .serverFile = $0 { true } else { false } }
@@ -1635,10 +1674,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             messages.forEach { $0.setTurnFileChanges([]) }
             providers = []
             await loadProviders()
-        } else if oldDirectory != session.directory {
-            composerAttachments.removeAll { if case .serverFile = $0 { true } else { false } }
         }
         guard isCurrent() else { throw CancellationError() }
+        restoredWorkspaceRevision = connection?.projectContextRevision
         sessionLocationState = .ready
         if errorMessage?.hasPrefix("Failed to rebind session location") == true {
             errorMessage = nil
@@ -2749,8 +2787,9 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         contentVersion &+= 1
 
+        guard let context = sessionWorkContext else { return }
         Task {
-            await sendPromptAsync(text: text, messageID: userMessage.id, attachments: attachments)
+            await sendPromptAsync(text: text, messageID: userMessage.id, attachments: attachments, context: context)
         }
     }
 
@@ -2812,6 +2851,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
 
         isQueueingPrompt = true
+        let context = SessionWorkContext(session: session, projectRevision: connection?.projectContextRevision)
 
         Task {
             defer {
@@ -2826,8 +2866,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 if tracksAdmission {
                     await reconcileUncertainSubmissions(in: session.id, before: queuedPrompt.messageID)
                 }
-                guard canCompose, currentSession?.id == session.id,
-                      currentSession?.directory == session.directory else { throw CancellationError() }
+                try requireCurrentWorkLocation(context)
                 requestStarted = true
                 let admission = try await messagesService.queuePrompt(
                     sessionID: session.id,
@@ -2865,10 +2904,10 @@ final class ChatClient: SSEEventHandlerDelegate {
                     return
                 }
                 queuedPrompts.removeAll { $0.id == queuedPrompt.id }
-                restoreComposer(text, attachments: attachments)
+                restoreComposer(text, attachments: attachments, context: context)
                 errorMessage = outcome == .uncertain
                     ? AppText.promptAdmissionUncertain
-                    : "Failed to queue: \(error.localizedDescription)"
+                    : error is SessionMovedBeforeSend ? error.localizedDescription : "Failed to queue: \(error.localizedDescription)"
                 contentVersion &+= 1
             }
         }
@@ -2926,6 +2965,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         arguments: String,
         delivery: OCV2PromptInput.Delivery
     ) {
+        guard let context = sessionWorkContext else { return }
         let startsNewResponse = !isLoading
         if startsNewResponse {
             beginResponse()
@@ -2951,12 +2991,15 @@ final class ChatClient: SSEEventHandlerDelegate {
                 command: command,
                 arguments: arguments,
                 delivery: delivery,
-                messageID: userMessage.id
+                messageID: userMessage.id,
+                text: text,
+                context: context
             )
         }
     }
 
     private func sendAgentPrompt(text: String, agent: String, prompt: String) {
+        guard let context = sessionWorkContext else { return }
         let attachments = composerAttachments
         guard validateComposerAttachments(attachments, text: prompt, delivery: .steer) else { return }
 
@@ -2977,7 +3020,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         scrollAnchor &+= 1
 
         Task {
-            await sendPromptAsync(text: prompt, agent: agent, messageID: userMessage.id, attachments: attachments)
+            await sendPromptAsync(text: prompt, agent: agent, messageID: userMessage.id, attachments: attachments, context: context)
         }
     }
 
@@ -3488,10 +3531,30 @@ final class ChatClient: SSEEventHandlerDelegate {
         )
     }
 
-    private func restoreComposer(_ text: String, attachments: [PromptAttachment]) {
-        if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, composerAttachments.isEmpty {
+    private var sessionWorkContext: SessionWorkContext? {
+        currentSession.map { SessionWorkContext(session: $0, projectRevision: connection?.projectContextRevision) }
+    }
+
+    private func requireCurrentWorkLocation(_ context: SessionWorkContext) throws {
+        guard currentSession?.id == context.session.id else { throw CancellationError() }
+        guard canCompose, currentSession?.directory == context.session.directory,
+              connection?.projectContextRevision == context.projectRevision else {
+            throw SessionMovedBeforeSend()
+        }
+    }
+
+    private func restoreComposer(_ text: String, attachments: [PromptAttachment], context: SessionWorkContext) {
+        let restoresText = inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if restoresText {
             inputText = text
-            composerAttachments = attachments
+        }
+        if restoresText, composerAttachments.isEmpty {
+            let locationUnchanged = canCompose && currentSession?.directory == context.session.directory
+                && connection?.projectContextRevision == context.projectRevision
+            composerAttachments = attachments.filter {
+                if case .serverFile = $0 { return locationUnchanged }
+                return true
+            }
         }
     }
 
@@ -3546,6 +3609,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     func steerPrompt() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, canSteerPrompt else { return }
+        guard let context = sessionWorkContext else { return }
 
         if submitCommandIfPresent(text, delivery: .steer) {
             return
@@ -3562,7 +3626,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         scrollAnchor &+= 1
 
         Task {
-            await sendPromptAsync(text: text, messageID: userMessage.id, attachments: attachments)
+            await sendPromptAsync(text: text, messageID: userMessage.id, attachments: attachments, context: context)
         }
     }
 
@@ -3570,12 +3634,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         text: String,
         agent: String? = nil,
         messageID: String? = nil,
-        attachments: [PromptAttachment] = []
+        attachments: [PromptAttachment] = [],
+        context: SessionWorkContext
     ) async {
-        guard let session = currentSession else {
-            markResponseFailed("Not connected.")
-            return
-        }
+        let session = context.session
 
         let tracksAdmission = usesV2SessionAPI && messageID != nil
         var requestStarted = false
@@ -3587,8 +3649,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             if tracksAdmission, let messageID {
                 await reconcileUncertainSubmissions(in: session.id, before: messageID)
             }
-            guard canCompose, currentSession?.id == session.id,
-                  currentSession?.directory == session.directory else { throw CancellationError() }
+            try requireCurrentWorkLocation(context)
             requestStarted = true
             let admission = try await messagesService!.sendPromptAsync(
                 sessionID: session.id,
@@ -3633,7 +3694,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             // it over a later authoritative transcript load.
             optimisticV2UserMessageIDs.remove(messageID)
             if let submission = promptSubmissions.first(where: { $0.id == messageID }) {
-                restoreComposer(submission.text, attachments: submission.attachments)
+                restoreComposer(submission.text, attachments: submission.attachments, context: context)
+            }
+            if error is SessionMovedBeforeSend {
+                errorMessage = error.localizedDescription
             }
             guard responseState == .generating else { return }
             if outcome == .uncertain {
@@ -3645,6 +3709,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func markPromptFailed(_ error: Error, agent: String?) {
+        if error is SessionMovedBeforeSend {
+            markResponseFailed(error.localizedDescription)
+            return
+        }
         if let agent, !agent.isEmpty {
             markResponseFailed("Failed to run /\(agent): \(error.localizedDescription)")
         } else {
@@ -3656,17 +3724,15 @@ final class ChatClient: SSEEventHandlerDelegate {
         command: String,
         arguments: String,
         delivery: OCV2PromptInput.Delivery,
-        messageID: String
+        messageID: String,
+        text: String,
+        context: SessionWorkContext
     ) async {
-        guard let session = currentSession else {
-            markResponseFailed("Not connected.")
-            return
-        }
+        let session = context.session
 
         do {
             try await awaitSessionSettingsChanges(for: session.id)
-            guard canCompose, currentSession?.id == session.id,
-                  currentSession?.directory == session.directory else { throw CancellationError() }
+            try requireCurrentWorkLocation(context)
             try await messagesService!.sendCommand(
                 sessionID: session.id,
                 command: command,
@@ -3684,8 +3750,15 @@ final class ChatClient: SSEEventHandlerDelegate {
                 await loadMessages(syncModelSelection: false)
             }
         } catch {
+            guard currentSession?.id == session.id else { return }
             if usesV2SessionAPI {
                 optimisticV2CommandMessages.removeValue(forKey: messageID)
+            }
+            if error is SessionMovedBeforeSend {
+                restoreComposer(text, attachments: [], context: context)
+                errorMessage = error.localizedDescription
+                if responseState == .generating { markResponseFailed(error.localizedDescription) }
+                return
             }
             if delivery == .queue {
                 errorMessage = "Failed to queue /\(command): \(error.localizedDescription)"

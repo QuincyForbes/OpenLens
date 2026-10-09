@@ -64,10 +64,11 @@ final class ConnectionManager: ConnectionProviding {
 
 #if DEBUG
     /// Installs a negotiated client without opening a live network connection.
-    init(testClient: OpenCodeClient, capabilities: OpenCodeServerCapabilities) {
+    init(testClient: OpenCodeClient, capabilities: OpenCodeServerCapabilities, testSSEClient: SSEClient? = nil) {
         self.localNetworkAccessProbe = LocalNetworkAccessProbe()
         self.client = testClient
         self.serverCapabilities = capabilities
+        self.sseClient = testSSEClient
         self.state = .connected
     }
 #endif
@@ -295,7 +296,9 @@ final class ConnectionManager: ConnectionProviding {
         }
 
         await client.updateContextDirectory(normalizedDirectory)
-        guard !Task.isCancelled, generation == projectContextGeneration else { return }
+        // The actor has already changed request routing. Commit the matching
+        // published/SSE context even if the caller was cancelled at this await.
+        guard generation == projectContextGeneration else { return }
         selectedProjectDirectory = normalizedDirectory
         sseClient?.updateContextDirectory(normalizedDirectory)
         projectContextRevision &+= 1
@@ -370,7 +373,7 @@ final class ConnectionManager: ConnectionProviding {
 
             if let inferredDirectory {
                 await client.updateContextDirectory(inferredDirectory)
-                guard !Task.isCancelled, generation == projectContextGeneration else { return }
+                guard generation == projectContextGeneration else { return }
                 sseClient?.updateContextDirectory(inferredDirectory)
 
                 if let activeConnectionID = savedConnectionsStore?.activeConnectionID {

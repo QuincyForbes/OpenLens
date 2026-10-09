@@ -2,7 +2,11 @@ import Foundation
 
 enum ScreenshotFixtures {
     static var showsSessionMove: Bool {
-        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE") || failsSessionRebind
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE") || failsSessionRebind || interruptsMoveSend
+    }
+
+    static var interruptsMoveSend: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE_INTERRUPTED_SEND")
     }
 
     static var failsSessionRebind: Bool {

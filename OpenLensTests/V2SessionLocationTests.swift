@@ -4,6 +4,184 @@ import Testing
 
 @MainActor
 struct V2SessionLocationTests {
+    @Test func movingBackDuringCatalogRecoveryRestoresTheOriginalLocationsModels() async throws {
+        let server = LocationServer()
+        let (chat, connection, _) = try await makeChat(server)
+        await chat.loadSession(session())
+        await server.move(to: "/workspace/New")
+        await server.hold("/api/model", directory: "/workspace/New")
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { await server.isWaiting }
+        await server.move(to: "/workspace/Old")
+        chat.synchronizeCurrentSessionFromServer()
+        await server.release()
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(connection.selectedProjectDirectory == "/workspace/Old")
+        #expect(chat.sessionLocationState == .ready)
+        #expect(chat.availableModels.map(\.modelID) == ["Old-model"])
+    }
+
+    @Test(arguments: ["/workspace/Old", "/workspace/New"])
+    func rawSSEMoveReconnectsAndSwitchesTheProductionDirectoryFilter(eventDirectory: String) async throws {
+        let server = LocationServer()
+        let transport = LocationStreamingTransport(server: server)
+        let stream = SSEClient(baseURL: URL(string: "https://example.com")!, protocolVersion: .v2,
+                               contextDirectory: "/workspace/Old", transport: transport)
+        let (chat, connection, _) = try await makeChat(server, stream: stream)
+        await chat.loadSession(session())
+        stream.connect()
+        defer { stream.disconnect() }
+        try await waitUntil { await stream.synchronizationGeneration() > 0 && chat.isStreamSynchronized }
+        chat.attachComposerServerFile(relativePath: "Old.swift")
+        await server.move(to: "/workspace/New")
+        await server.hold("/api/vcs", directory: "/workspace/New")
+        try transport.send(type: "session.moved", directory: eventDirectory, data: ["sessionID": "ses_move"])
+        try await waitUntil { await server.isWaiting }
+        // setProjectContext reconnects the real SSEClient while metadata is
+        // held; its successful response starts a newer recovery generation.
+        try await waitUntil { await stream.synchronizationGeneration() >= 2 && transport.streamCount == 2 }
+        let gap = await stream.synchronizationGeneration()
+        #expect(gap >= 2)
+        await server.release()
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(connection.selectedProjectDirectory == "/workspace/New")
+        #expect(chat.sessionLocationState == .ready)
+        #expect(chat.composerAttachments.isEmpty)
+        #expect(chat.availableModels.map(\.modelID) == ["New-model"])
+
+        try transport.send(type: "session.renamed", directory: "/workspace/New",
+                           data: ["sessionID": "ses_move", "title": "New workspace event"])
+        try await waitUntil { chat.currentSession?.title == "New workspace event" }
+        try transport.send(type: "session.renamed", directory: "/workspace/Old",
+                           data: ["sessionID": "ses_move", "title": "Stale old event"])
+        try transport.send(type: "session.moved", directory: "/workspace/Third", data: ["sessionID": "ses_other"])
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(chat.currentSession?.title == "New workspace event")
+        #expect(chat.sessionLocationState == .ready)
+        #expect(transport.streamCount == 2)
+    }
+
+    @Test func cancellationCannotSplitTheRequestAndPublishedProjectContexts() async throws {
+        let server = LocationServer()
+        let (chat, connection, api) = try await makeChat(server)
+        await chat.loadSession(session())
+        let change = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await connection.setProjectContext(directory: "/workspace/New")
+        }
+        await change.value
+        #expect(await api.currentContextDirectory() == connection.selectedProjectDirectory)
+        // The navigation restore must see the same directory as the API and
+        // actually restore Old, rather than skipping a split client context.
+        await chat.restoreProjectContext(for: session())
+        #expect(await api.currentContextDirectory() == "/workspace/Old")
+        #expect(connection.selectedProjectDirectory == "/workspace/Old")
+    }
+
+    @Test(arguments: ["prompt", "queue", "steer", "command", "queued-command"], [false, true])
+    func workWaitingForSettingsIsRestoredSafelyWhenTheSessionMoves(delivery: String, refused: Bool) async throws {
+        let server = LocationServer()
+        let (chat, _, _) = try await makeChat(server)
+        await chat.loadSession(session())
+        await server.hold("/api/session/ses_move/model", directory: "/workspace/Old")
+        chat.selectModel(try #require(chat.availableModels.first))
+        try await waitUntil { await server.isWaiting }
+        let isCommand = delivery.contains("command")
+        let text = isCommand ? "/Old-command keep arguments" : "Keep this unsent draft"
+        if !isCommand {
+            chat.attachComposerServerFile(relativePath: "Old.swift")
+        }
+        chat.attachComposerTextFile(data: Data("Phone note".utf8), name: "note.txt")
+        chat.updateSlashCatalog(commands: ["Old-command"], agents: [])
+        chat.inputText = text
+        switch delivery {
+        case "queue", "queued-command": chat.beginExternalResponse(); chat.queuePrompt()
+        case "steer": chat.beginExternalResponse(); chat.steerPrompt()
+        default: chat.send()
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        await server.move(to: "/workspace/New")
+        await server.refuseNewLocation(refused ? 403 : nil)
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { refused ? chat.sessionLocationError != nil : chat.isStreamSynchronized }
+        await server.release()
+        try await waitUntil { chat.inputText == text }
+        #expect(chat.errorMessage?.contains("session moved") == true)
+        #expect(!chat.composerAttachments.contains { if case .serverFile = $0 { true } else { false } })
+        #expect(chat.composerAttachments.map(\.promptFile.name) == ["note.txt"])
+        #expect(await server.mutations == ["/api/session/ses_move/model"])
+    }
+
+    @Test(arguments: ["refresh", "status", "open"])
+    func cancellingARebindLeavesAnExplicitRetryInsteadOfABlockedComposer(path: String) async throws {
+        let server = LocationServer()
+        let (chat, connection, api) = try await makeChat(server)
+        await chat.loadSession(session())
+        await server.move(to: "/workspace/New")
+        await server.hold("/api/location", directory: "/workspace/New")
+        if path == "status" { chat.beginExternalResponse() }
+        let recovery = Task {
+            switch path {
+            case "open": await chat.loadSession(session())
+            case "status": _ = await chat.refreshCurrentSessionStatus()
+            default: _ = await chat.refreshCurrentSessionFromServer()
+            }
+        }
+        try await waitUntil { await server.isWaiting }
+        recovery.cancel()
+        await server.release()
+        await recovery.value
+        #expect(chat.sessionLocationError != nil)
+        #expect(!chat.canCompose)
+        #expect(connection.selectedProjectDirectory == "/workspace/Old")
+        #expect(await api.currentContextDirectory() == "/workspace/Old")
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(chat.sessionLocationState == .ready)
+        #expect(connection.selectedProjectDirectory == "/workspace/New")
+    }
+
+    @Test(arguments: [false, true])
+    func returningToTheChatCannotRestoreAStaleOrRefusedNavigationLocation(refused: Bool) async throws {
+        let server = LocationServer()
+        let (chat, connection, api) = try await makeChat(server)
+        let navigationSession = session()
+        await chat.loadSession(navigationSession)
+        await server.move(to: "/workspace/New")
+        await server.refuseNewLocation(refused ? 403 : nil)
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { refused ? chat.sessionLocationError != nil : chat.isStreamSynchronized }
+        // SessionChatDestinationView's same-id on-appear path, including a
+        // navigation value captured after a refused canonical recovery.
+        let capturedSession = refused ? try #require(chat.currentSession) : navigationSession
+        await chat.restoreProjectContext(for: capturedSession)
+        let expected = refused ? "/workspace/Old" : "/workspace/New"
+        #expect(connection.selectedProjectDirectory == expected)
+        #expect(await api.currentContextDirectory() == expected)
+        #expect(chat.canCompose == !refused)
+    }
+
+    @Test func reconnectDuringMetadataRecoveryStillFinishesTheWorkspaceHandoff() async throws {
+        let server = LocationServer()
+        let (chat, connection, _) = try await makeChat(server)
+        await chat.loadSession(session())
+        chat.attachComposerServerFile(relativePath: "Old.swift")
+        chat.attachComposerTextFile(data: Data("Phone note".utf8), name: "note.txt")
+        await server.hold("/api/vcs", directory: "/workspace/New")
+        await server.move(to: "/workspace/New")
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { await server.isWaiting }
+        // The SSE connection's 200 response reports a reconnect during the
+        // metadata load; a new recovery generation must finish the handoff.
+        chat.synchronizeCurrentSessionFromServer()
+        await server.release()
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(connection.selectedProjectDirectory == "/workspace/New")
+        #expect(chat.sessionLocationState == .ready)
+        #expect(chat.composerAttachments.map(\.promptFile.name) == ["note.txt"])
+        #expect(chat.availableModels.map(\.modelID) == ["New-model"])
+    }
+
     @Test(arguments: ["move-event", "reopen"])
     func canonicalReadFailureKeepsAKnownMoveBlockedUntilRetry(recovery: String) async throws {
         let server = LocationServer()
@@ -307,16 +485,21 @@ struct V2SessionLocationTests {
             if case .accepted = chat.promptSubmissions.last?.state { return true }
             return false
         }
-        #expect(await server.promptDirectories == ["/workspace/New"])
+        let prompt = try #require(await server.promptRequests.first)
+        #expect(prompt.url?.path == "/api/session/ses_move/prompt")
+        #expect(prompt.url?.query == nil) // V2 session work is routed by ID, not by location.
+        let promptBody = try #require(prompt.httpBody)
+        let body = try #require(try JSONSerialization.jsonObject(with: promptBody) as? [String: Any])
+        #expect(body["text"] as? String == "Continue after the move")
     }
 
     private func session() -> OCSession {
         OCSession(id: "ses_move", directory: "/workspace/Old", title: "Moved chat", time: .init(created: 0, updated: 0))
     }
 
-    private func makeChat(_ server: LocationServer) async throws -> (ChatClient, ConnectionManager, OpenCodeClient) {
+    private func makeChat(_ server: LocationServer, stream: SSEClient? = nil) async throws -> (ChatClient, ConnectionManager, OpenCodeClient) {
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/workspace/Old", transport: server)
-        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities(), testSSEClient: stream)
         let chat = ChatClient(
             connection: connection, liveActivity: TestLiveActivityProvider(),
             sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
@@ -343,7 +526,7 @@ private actor LocationServer: OpenCodeTransport {
     func failCanonicalReads(_ fail: Bool) { canonicalReadsFail = fail }
     var mutations: [String] = []
     var ordinaryWorkspaceDirectories: [String] = []
-    var promptDirectories: [String] = []
+    var promptRequests: [URLRequest] = []
     func clearWorkspaceReads() { ordinaryWorkspaceDirectories = [] }
     var heldRequest: (path: String, directory: String, fails: Bool)?
     var waiter: CheckedContinuation<Void, Never>?
@@ -386,10 +569,11 @@ private actor LocationServer: OpenCodeTransport {
         case "/api/skill": body = #"{"location":\#(location),"data":[{"id":"\#(name)-skill","name":"\#(name) skill"}]}"#
         case "/api/fs/list": body = #"{"location":\#(location),"data":[{"path":"\#(name).swift","type":"file"}]}"#
         case "/api/session/active": body = #"{"data":{}}"#
+        case "/api/session/ses_move/model": body = ""
         case "/api/session/ses_move/message": body = #"{"data":[{"id":"msg_existing","type":"user","time":{"created":1},"text":"Preserve this conversation"}],"cursor":{"next":null}}"#
         case "/api/session/ses_move/prompt":
             let input = try JSONDecoder().decode(PromptIdentity.self, from: #require(request.httpBody))
-            promptDirectories.append(directory)
+            promptRequests.append(request)
             body = #"{"data":{"id":"\#(input.id)","sessionID":"ses_move"}}"#
         case "/api/session/ses_move/inbox", "/api/session/ses_move/permission", "/api/session/ses_move/form": body = #"{"data":[]}"#
         default: throw URLError(.unsupportedURL)
@@ -410,4 +594,54 @@ private actor LocationServer: OpenCodeTransport {
 
 private final class LocationUnusedStream: OpenCodeEventStream, @unchecked Sendable {
     func start() {}; func suspend() {}; func resume() {}; func cancel() {}
+}
+
+nonisolated private final class LocationStreamingTransport: OpenCodeTransport, @unchecked Sendable {
+    private let server: LocationServer
+    private let lock = NSLock()
+    private var streams: [LocationEventStream] = []
+
+    init(server: LocationServer) { self.server = server }
+    var streamCount: Int { lock.withLock { streams.count } }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await server.data(for: request)
+    }
+
+    func makeEventStream(request: URLRequest, deliveryQueue: DispatchQueue,
+                         callbacks: OpenCodeEventStreamCallbacks) -> any OpenCodeEventStream {
+        let stream = LocationEventStream(request: request, queue: deliveryQueue, callbacks: callbacks)
+        lock.withLock { streams.append(stream) }
+        return stream
+    }
+
+    func send(type: String, directory: String, data: [String: Any]) throws {
+        let envelope: [String: Any] = ["type": type, "location": ["directory": directory], "data": data]
+        var bytes = Data("event: message\ndata: ".utf8)
+        bytes.append(try JSONSerialization.data(withJSONObject: envelope))
+        bytes.append(Data("\n\n".utf8))
+        lock.withLock { streams.last }?.send(bytes)
+    }
+}
+
+nonisolated private final class LocationEventStream: OpenCodeEventStream, @unchecked Sendable {
+    private let request: URLRequest
+    private let queue: DispatchQueue
+    private let callbacks: OpenCodeEventStreamCallbacks
+
+    init(request: URLRequest, queue: DispatchQueue, callbacks: OpenCodeEventStreamCallbacks) {
+        self.request = request
+        self.queue = queue
+        self.callbacks = callbacks
+    }
+    func start() {
+        queue.async { [self] in
+            _ = callbacks.onResponse(HTTPURLResponse(url: request.url!, statusCode: 200,
+                                                     httpVersion: nil, headerFields: ["Content-Type": "text/event-stream"])!)
+        }
+    }
+    func send(_ data: Data) { queue.async { [self] in callbacks.onData(data) } }
+    func suspend() {}
+    func resume() {}
+    func cancel() {}
 }
