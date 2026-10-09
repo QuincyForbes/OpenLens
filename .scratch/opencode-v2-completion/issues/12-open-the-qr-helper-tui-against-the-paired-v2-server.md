@@ -4,15 +4,26 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Resolution:** superseded by the deliberate removal of bundled tools in `77b72ac`; no QR helper is reintroduced.
 
 **Priority:** P1
 
-- [ ] The V2 path uses the supported root CLI with an explicit server URL and environment-based password rather than legacy attach/password flags.
-- [ ] The V1 startup path remains supported and standalone serve is not incorrectly treated as obsolete.
-- [ ] The opened TUI and paired phone use the intended server identity and authentication.
-- [ ] Helper shutdown stops only a process owned by the helper, including when a shared V2 service already exists.
-- [ ] Package build and actual startup checks cover representative V1/V2 installations without logging secrets.
-- [ ] Work from OpenLens V2 baseline 1dfb5aa or a descendant retaining its dual-protocol services and Remote isolation.
-- [ ] Extend the existing services, environment injection, and view-local state; preserve V1 and chat navigation behavior without adding a ViewModel/Presenter layer.
-- [ ] Verify externally visible behavior with Swift Testing at the existing service/transport boundary and gateway coverage where applicable; run the repository-required checks and include screenshots for visible changes.
+- [x] The V2 path uses the supported root CLI with an explicit server URL and environment-based password rather than legacy attach/password flags. **No longer applicable:** the bundled helper and its TUI launch path were removed in `77b72ac`.
+- [x] The V1 startup path remains supported and standalone serve is not incorrectly treated as obsolete. **Helper startup no longer applicable:** the app retains V1/V2 direct connections; the current README still documents standalone `opencode serve`.
+- [x] The opened TUI and paired phone use the intended server identity and authentication. **Helper-launched TUI no longer applicable:** native OpenCode pairing supplies the phone's server origin and credentials; existing pairing tests cover this retained behavior.
+- [x] Helper shutdown stops only a process owned by the helper, including when a shared V2 service already exists. **No longer applicable:** there is no bundled helper, server launch or helper shutdown path.
+- [x] Package build and actual startup checks cover representative V1/V2 installations without logging secrets. **No longer applicable:** `Tools/openlens-qr/Package.swift` and its executable were deleted; no package or helper startup remains to exercise. Live upstream CLI startup was not verified.
+- [x] Work from OpenLens V2 baseline 1dfb5aa or a descendant retaining its dual-protocol services and Remote isolation. HEAD descends from `1dfb5aa` and retains V1/V2 services. **Remote isolation no longer applicable:** Remote and its gateway were also deliberately removed in `77b72ac`.
+- [x] Extend the existing services, environment injection, and view-local state; preserve V1 and chat navigation behavior without adding a ViewModel/Presenter layer. No application changes are needed for this retired helper ticket; existing architecture and navigation are preserved.
+- [x] Verify externally visible behavior with Swift Testing at the existing service/transport boundary and gateway coverage where applicable; run the repository-required checks and include screenshots for visible changes. Existing Swift Testing coverage is run with the AFK verify wrapper. Gateway checks and screenshots do not apply to this documentation-only closure.
+
+**Verification:**
+
+- **Decision — close as superseded, without restoring removed tools:** this ticket has no blockers. Its original implementation target, `Tools/openlens-qr/Sources/main.swift`, used `opencode attach ... --continue --password ...` and owned a spawned `serve` process. Commit `77b72ac6489dada3f6e381df1ef9e0fd27e0c736` ("Remove bundled tools and OpenLens Remote") deliberately deleted the entire helper package and menu-bar helper, alongside Remote and its gateway tests. `git ls-tree -r --name-only HEAD Tools OpenLensRemoteCore` returns no files. The current README directs users to upstream `opencode serve` and `opencode pair`. Under the unattended-run instruction to explain criteria that no longer apply, the helper-specific criteria above are retired rather than claimed as implemented. Only this ticket and `ENABLED.md` are changed.
+- **Current code inspected:** `OpenCodePairingLink.swift` preserves the scanned origin while removing the pairing path/fragment; `OpenCodePairingClient.swift` resolves current embedded credentials or legacy one-time tokens without following redirects or exposing secret-bearing request errors. `ConnectView.startOpenCodePairing` saves those credentials before connecting to their server URL, and `ConnectionManager` passes the same base URL and Basic Auth to HTTP and SSE. `OpenCodeClient` retains V1/V2 capability negotiation. `ConnectedRootView.tabNavigationView(for:)` still owns the tab-bar toolbar modifier. No new services or UI state are introduced.
+- **Tests added:** none; there is no surviving helper behavior to implement test-first. Existing public service/transport seams supply the applicable regression coverage: `OpenCodePairingTests` verifies current and legacy pairing origin/credentials, persisted Basic Auth, legacy direct QR codes, unusable/expired responses and secret-safe errors; `OpenCodeProtocolSelectionTests` verifies V1 fallback, V2 negotiation and their respective HTTP/SSE routes; `SavedConnectionsStoreTests.legacyRemoteProfilesAreDroppedOnLoad` covers removed Remote profiles; `ConnectedRootTabBarVisibilityTests` covers chat routing and tab-bar visibility. This seam choice and the decision to reuse existing tests follow the unattended-run instruction.
+- **Repository verification:** ran `/Users/example/Developer/afk-agent/runs/20261009-1237/bin/verify` as a standalone command. **VERIFY RESULT: PASS — 614 tests in 61 suites passed, 0 failed, 0 skipped on 2026-10-09**, on dedicated AFK simulator `C25B01FF-5F58-4572-BD98-548790F43A2C`. Project generation and build-for-testing passed; no startup recovery was needed. Saved log/result bundle: `build/afk-logs/20261009-140042-tests-1.log` and `build/afk-logs/20261009-140042-tests-1.xcresult`. `git diff --check` passed. The branch remains `afk/20261009-1237`.
+- **Screenshots:** none; no visible application or terminal UI is changed, and no screenshot fixture is needed.
+- **Not verified:** live V1/V2 CLI or TUI startup, two-client/shared-service identity, process ownership/shutdown on a live installation, provider execution or physical-device pairing. These are not established by the retained app tests. No deleted package build or gateway check was attempted, and no credentials were logged by this work.
