@@ -502,6 +502,7 @@ struct MessageBubbleView: View {
     }
 
     private func subagentStatusText(for step: ChatMessage.PersistedSubagentStep) -> String {
+        if step.resultState == .cancelled { return "Cancelled" }
         if step.isError {
             return "Error"
         }
@@ -529,6 +530,7 @@ struct MessageBubbleView: View {
     }
 
     private func subagentIconName(for step: ChatMessage.PersistedSubagentStep) -> String {
+        if step.resultState == .cancelled { return "xmark.circle" }
         if step.isError {
             return "exclamationmark.circle.fill"
         }

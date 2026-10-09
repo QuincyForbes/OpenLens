@@ -63,6 +63,13 @@ struct SessionContextTimelineRow: View {
                         .multilineTextAlignment(.leading)
                         .lineLimit(isExpanded ? nil : 2)
                 }
+                if entry.kind == .synthetic, !isExpanded, !entry.details.isEmpty {
+                    Text(entry.details)
+                        .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
+                        .foregroundStyle(ink)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(3)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -82,6 +89,13 @@ struct SessionContextTimelineRow: View {
         case .shell: "terminal"
         case .compaction: "archivebox"
         case .idle: "flag.checkered"
+        case .synthetic:
+            switch entry.subagentResult?.state {
+            case .completed: "checkmark.circle"
+            case .error: "exclamationmark.circle"
+            case .cancelled: "xmark.circle"
+            case nil: "info.circle"
+            }
         }
     }
 }

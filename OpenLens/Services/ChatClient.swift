@@ -827,6 +827,21 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func rebuildDisplayedMessages() {
+        // Match each launch to the nearest later result for its child in
+        // canonical order. Earlier outcomes cannot finish a reused session.
+        let contextsByID = Dictionary(contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        var messagesByID = Dictionary(grouping: messages, by: \.id)
+        if let pending = pendingAssistantMessage { messagesByID[pending.id, default: []].append(pending) }
+        var seen = Set<String>()
+        let order = (transcriptEntryOrder + messages.map(\.id) + (pendingAssistantMessage.map { [$0.id] } ?? []))
+            .filter { seen.insert($0).inserted }
+        var childResults: [String: SubagentResultState] = [:]
+        for id in order.reversed() {
+            if let result = contextsByID[id]?.subagentResult, let childID = result.childID, let state = result.state {
+                childResults[childID] = state
+            }
+            for message in messagesByID[id] ?? [] { message.reconcileSubagentResults(childResults) }
+        }
         var result: [ChatMessage]
         if contextEntries.isEmpty {
             result = messages.count <= displayLimit ? messages : Array(messages.suffix(displayLimit))
@@ -1498,6 +1513,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             // Auto-start demo playback after session is ready
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentResults {
+                ScreenshotFixtures.applySubagentResults(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsContextTimeline {
                 ScreenshotFixtures.applyContextTimeline(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentTools {
@@ -1553,6 +1570,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = nil
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentResults {
+                ScreenshotFixtures.applySubagentResults(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsContextTimeline {
                 ScreenshotFixtures.applyContextTimeline(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentTools {

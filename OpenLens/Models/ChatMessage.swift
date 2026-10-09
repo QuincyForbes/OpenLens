@@ -431,6 +431,7 @@ final class ChatMessage: Identifiable {
         let isCompleted: Bool
         let isError: Bool
         let cost: Double?
+        var resultState: SubagentResultState? = nil
 
         /// A task/subagent card should animate only while it is actively working.
         /// Completed and failed work stays visually stable in the timeline.
@@ -1445,6 +1446,16 @@ final class ChatMessage: Identifiable {
         return normalizeStreamingPlaceholder() || removedSegment
     }
 
+    @ObservationIgnored private var subagentResultsByChildID: [String: SubagentResultState] = [:]
+
+    /// Apply canonical background outcomes without rewriting launch-tool facts.
+    /// Later tool progress rebuilds the same projection with this evidence.
+    func reconcileSubagentResults(_ results: [String: SubagentResultState]) {
+        guard subagentResultsByChildID != results else { return }
+        subagentResultsByChildID = results
+        rebuildDerivedState()
+    }
+
     func rebuildDerivedState() {
         hasRenderableTextPart = parts.contains { part in
             guard part.type == .text, part.isRenderableText else { return false }
@@ -2112,15 +2123,22 @@ final class ChatMessage: Identifiable {
         guard (taskState != nil && taskState?.status != .unknown)
             || title != "Subagent" || !detail.isEmpty else { return nil }
 
+        let childID = ["sessionID", "sessionId", "session_id"].compactMap { key -> String? in
+            guard let id = taskState?.metadata?[key]?.value as? String,
+                  InteractiveFormSafety.fitsIdentifier(id) else { return nil }
+            return id
+        }.first
+        let result = childID.flatMap { subagentResultsByChildID[$0] }
         return PersistedSubagentStep(
             id: part.id,
             agentName: agentName,
             title: title,
             detail: detail,
             prompt: prompt,
-            isCompleted: isSubagentPartCompleted(part, taskState: taskState),
-            isError: taskState?.status == .error,
-            cost: part.cost
+            isCompleted: result != nil || isSubagentPartCompleted(part, taskState: taskState),
+            isError: result.map { $0 == .error } ?? (taskState?.status == .error),
+            cost: part.cost,
+            resultState: result
         )
     }
 

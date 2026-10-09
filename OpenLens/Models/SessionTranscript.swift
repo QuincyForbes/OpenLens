@@ -25,7 +25,7 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
         case model = "model-switched"
         case agent = "agent-switched"
         case location = "location-switched"
-        case system, skill, shell, compaction, idle
+        case system, skill, shell, compaction, idle, synthetic
     }
 
     let id: String
@@ -34,12 +34,26 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
     let title: String
     let summary: String
     let details: String
+    let subagentResult: SubagentResult?
+
+    nonisolated struct SubagentResult: Sendable {
+        let childID: String?
+        let agent: String?
+        let state: SubagentResultState?
+
+        init(metadata: [String: Any]) {
+            let child = metadata["childID"] as? String
+            childID = child.flatMap { InteractiveFormSafety.fitsIdentifier($0) ? $0 : nil }
+            agent = StreamDisplayValue.preview(metadata["agent"] as? String, maximumBytes: 128)?.nilIfBlank
+            state = (metadata["state"] as? String).flatMap(SubagentResultState.init(rawValue:))
+        }
+    }
 
     static let maximumDetailCharacters = 40_000
 
     private enum CodingKeys: String, CodingKey {
         case id, type, time, model, previous, agent, location, description, text
-        case name, command, status, exit, output, reason, summary, recent, error, outcome
+        case name, command, status, exit, output, reason, summary, recent, error, outcome, metadata
     }
 
     init(from decoder: Decoder) throws {
@@ -61,6 +75,9 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
         func joined(_ sections: [String]) -> String {
             sections.filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
+        let metadata = object(.metadata)
+        subagentResult = kind == .synthetic && metadata["source"] as? String == "subagent"
+            ? SubagentResult(metadata: metadata) : nil
         let status = text(.status)
         let fullDetails: String
         var outputWasTruncated = false
@@ -112,6 +129,19 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
             summary = text(.reason).capitalized
             let error = (try? values.decode(OCAPIError.self, forKey: .error))?.message ?? ""
             fullDetails = joined([text(.summary), text(.recent).isEmpty ? "" : "Recent context:\n\(text(.recent))", error])
+        case .synthetic:
+            title = subagentResult.map { "Subagent · \($0.state?.title ?? "Result")" } ?? "Session update"
+            summary = [subagentResult?.agent, text(.description).nilIfBlank]
+                .compactMap { $0 }.joined(separator: " · ")
+            let resultText = text(.text)
+            // Released background delivery wraps the readable text in one
+            // subagent envelope. Only unwrap that exact outer shape.
+            if subagentResult != nil, resultText.hasPrefix("<subagent "),
+               let newline = resultText.firstIndex(of: "\n"), resultText.hasSuffix("\n</subagent>") {
+                fullDetails = String(resultText[resultText.index(after: newline)...].dropLast("\n</subagent>".count))
+            } else {
+                fullDetails = resultText
+            }
         case .idle:
             switch text(.outcome) {
             case "succeeded": title = "Execution succeeded"
@@ -133,4 +163,17 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
 
 private nonisolated func joinedStatus(_ title: String, status: String) -> String {
     status.isEmpty ? title : "\(title) · \(status.capitalized)"
+}
+
+/// Terminal background-job states, independent of launch-tool completion.
+nonisolated enum SubagentResultState: String, Sendable {
+    case completed, error, cancelled
+
+    var title: String {
+        switch self {
+        case .completed: "Completed"
+        case .error: "Failed"
+        case .cancelled: "Cancelled"
+        }
+    }
 }

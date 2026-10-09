@@ -66,7 +66,7 @@ nonisolated struct V2EventAdapter {
              "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
              "session.revert.committed", "session.revert.staged", "session.revert.cleared",
              "session.message.content.updated", "session.deleted", "session.idle",
-             "session.instructions.updated", "session.skill.activated",
+             "session.instructions.updated", "session.skill.activated", "session.synthetic",
              "session.shell.started", "session.shell.ended",
              "session.compaction.started", "session.compaction.ended", "session.compaction.failed":
             return reconcile()

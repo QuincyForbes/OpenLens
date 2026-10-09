@@ -1,6 +1,48 @@
 import Foundation
 
 enum ScreenshotFixtures {
+    static var showsSubagentResults: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_RESULTS")
+    }
+
+    /// Canonical synthetic records reconcile the actual persisted launch card.
+    @MainActor static func applySubagentResults(to chat: ChatClient) {
+        let arguments = ProcessInfo.processInfo.arguments
+        let stateArgument = arguments.first { $0.hasPrefix("SCREENSHOT_SUBAGENT_RESULT_STATE=") }
+        let state = stateArgument?.split(separator: "=").last.map(String.init) ?? "completed"
+        let resultText: String
+        switch state {
+        case "error": resultText = "The review could not finish. The provider is offline."
+        case "cancelled": resultText = "The background review was cancelled."
+        default: resultText = "Reviewed the changes. No blocking issues found.\nAll checks passed."
+        }
+        var records: [[String: Any]] = [
+            ["id": "fixture-user", "type": "user", "text": "Run the review in the background."],
+            ["id": "fixture-launch", "type": "assistant", "content": [[
+                "id": "fixture-call", "type": "tool", "name": "subagent", "state": [
+                    "status": "completed", "input": ["agent": "review", "description": "Review the changes"],
+                    "content": [["type": "text", "text": "Background job started"]],
+                    "metadata": ["sessionID": "ses_fixture_child", "status": "running"]
+                ]
+            ]]],
+            ["id": "fixture-result", "type": "synthetic", "description": "Review the changes",
+             "text": "<subagent sessionID=\"ses_fixture_child\" state=\"\(state)\" description=\"Review the changes\">\n\(resultText)\n</subagent>",
+             "metadata": ["source": "subagent", "childID": "ses_fixture_child", "agent": "review", "state": state]]
+        ]
+        if arguments.contains("SCREENSHOT_SUBAGENT_RESULT_UNKNOWN") {
+            records[2]["text"] = "The server reported an unfamiliar child outcome."
+            records[2]["metadata"] = ["source": "subagent", "childID": "ses_fixture_child", "agent": "review", "state": "future"]
+            records.append(["id": "fixture-other", "type": "synthetic", "description": "Automatic context update",
+                            "text": "Keep the current feature branch for review.", "metadata": ["source": "other"]])
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: records),
+              let entries = try? JSONDecoder().decode([OCV2SessionMessage].self, from: data) else { return }
+        chat.replaceTranscript(SessionTranscript(
+            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
+            contextEntries: entries.compactMap(\.contextEntry), entryOrder: entries.map(\.id)
+        ))
+    }
+
     static var showsContextTimeline: Bool {
         ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_CHANGES") || showsContextResults
     }
