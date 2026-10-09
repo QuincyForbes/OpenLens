@@ -107,8 +107,16 @@ nonisolated enum StreamToolPartSafety {
 
         for key in ["sessionId", "sessionID", "session_id"] {
             guard let value = metadata[key]?.value as? String,
-                  let identifier = safeIdentifier(value) else { continue }
+                  let identifier = safeIdentifier(value),
+                  InteractiveFormSafety.fitsIdentifier(identifier) else { continue }
             result[key] = AnyCodable(identifier)
+        }
+
+        // V2 subagent success can mean that a background child was launched,
+        // not that the child finished. Retain only the released status values.
+        if let status = metadata["status"]?.value as? String,
+           status == "running" || status == "completed" {
+            result["status"] = AnyCodable(status)
         }
 
         return result.isEmpty ? nil : result

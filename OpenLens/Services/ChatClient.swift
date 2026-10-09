@@ -1445,6 +1445,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             // Auto-start demo playback after session is ready
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentTools {
+                ScreenshotFixtures.applySubagentTools(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
                 ScreenshotFixtures.applyExecutionOutcome(to: self)
             } else {
@@ -1496,6 +1498,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = nil
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentTools {
+                ScreenshotFixtures.applySubagentTools(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
                 ScreenshotFixtures.applyExecutionOutcome(to: self)
             } else {

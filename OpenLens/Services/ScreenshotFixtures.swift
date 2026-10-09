@@ -1,6 +1,46 @@
 import Foundation
 
 enum ScreenshotFixtures {
+    static var showsSubagentTools: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_TOOLS")
+    }
+
+    /// Uses the production activity projection, including successful launches
+    /// whose children remain running after the parent's response has ended.
+    static func applySubagentTools(to chat: ChatClient) {
+        let sessionID = defaultSession.id
+        let messageID = "fixture-subagents"
+        func part(_ id: String, tool: String = "subagent", agent: String, description: String, childStatus: String, failed: Bool = false) -> OCPart {
+            StreamToolPartSafety.sanitize(OCPart(
+                id: id, sessionID: sessionID, messageID: messageID, type: .tool, tool: tool,
+                state: OCToolState(
+                    status: failed ? .error : .completed,
+                    input: AnyCodable(["agent": agent, "description": description]),
+                    error: failed ? "Subagent failed" : nil,
+                    metadata: ["sessionID": AnyCodable("ses_\(id)"), "status": AnyCodable(childStatus)]
+                )
+            ))
+        }
+        let parts: [OCPart]
+        if ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_PENDING") {
+            parts = [StreamToolPartSafety.sanitize(OCPart(
+                id: "pending-child", sessionID: sessionID, messageID: messageID, type: .tool,
+                tool: "subagent", state: OCToolState(status: .pending)
+            ))]
+        } else {
+            parts = [
+                part("legacy", tool: "task", agent: "explore", description: "Inspect the legacy task flow", childStatus: "running"),
+                part("background", agent: "review", description: "Review changes in the background", childStatus: "running"),
+                part("completed", agent: "test", description: "Run focused checks", childStatus: "completed"),
+                part("failed", agent: "build", description: "Build the release target", childStatus: "running", failed: true)
+            ]
+        }
+        chat.messages = [
+            ChatMessage(id: "fixture-user", role: .user, content: "Delegate the review and verification work."),
+            ChatMessage(id: messageID, role: .assistant, content: "", parts: parts)
+        ]
+    }
+
     static var showsSessionMove: Bool {
         ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE") || failsSessionRebind || interruptsMoveSend
     }

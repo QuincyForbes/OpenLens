@@ -412,6 +412,7 @@ struct MessageBubbleView: View {
                 Spacer(minLength: 8)
 
                 subagentStatusView(for: step)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             if !step.detail.isEmpty {
