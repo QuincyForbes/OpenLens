@@ -1870,6 +1870,9 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
     var hasConditionalRules: Bool { conditions?.isEmpty != true }
 
     var id: String { key }
+    // V2 2.0.23 ExternalField has no `when`, and server validateAnswer requires
+    // its acknowledgement before testing activity. Never guess that a rule
+    // makes an external action optional.
     var isSupported: Bool {
         kind != .unsupported
             && conditions?.allSatisfy({ ["eq", "neq"].contains($0.op) }) == true

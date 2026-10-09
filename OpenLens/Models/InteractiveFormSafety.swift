@@ -81,6 +81,7 @@ nonisolated enum InteractiveFormSafety {
             for condition in conditions {
                 guard ["eq", "neq"].contains(condition.op),
                       let target = earlier[condition.key], target.isSupported,
+                      !target.hidden,
                       target.kind != .external else { return false }
                 switch (target.kind, condition.value) {
                 case (.boolean, .boolean), (.number, .number), (.integer, .number):

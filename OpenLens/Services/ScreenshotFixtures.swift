@@ -591,11 +591,14 @@ enum ScreenshotFixtures {
             .split(separator: "=").last else { return standardScreenshotForm }
         let enabled = scenario == "active"
         let predicate = scenario == "unsupported" ? "future" : "eq"
+        let releaseProperties = scenario == "optional"
+            ? #""description":"Choose an answer to show the matching fields.""#
+            : "\"description\":\"Turn on to set the release details.\",\"required\":true,\"default\":\(enabled)"
         let wire = """
         {"id":"form-screenshot-1","sessionID":"session-screenshot-1",
          "title":"Choose the release plan","fields":[
           {"key":"release","type":"boolean","title":"Ship this release",
-           "description":"Turn on to set the release details.","required":true,"default":\(enabled)},
+           \(releaseProperties)},
           {"key":"summary","type":"string","title":"Release summary","required":true,
            "minLength":3,"default":"Safer agent handoffs",
            "when":[{"key":"release","op":"\(predicate)","value":true}]},

@@ -96,9 +96,7 @@ struct FormView: View {
                 case .number, .integer:
                     numericField(field)
                 case .boolean:
-                    Toggle(field.displayTitle, isOn: booleanBinding(for: field.key))
-                        .labelsHidden()
-                        .accessibilityIdentifier("form-\(field.key)")
+                    booleanField(field)
                 case .multiselect:
                     multiselectField(field)
                 case .external:
@@ -117,6 +115,23 @@ struct FormView: View {
         .padding(16)
         .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 14))
         .accessibilityIdentifier("form-field-\(field.key)")
+    }
+
+    @ViewBuilder
+    private func booleanField(_ field: OCFormField) -> some View {
+        if !field.required && field.booleanDefault == nil {
+            Picker(field.displayTitle, selection: optionalBooleanBinding(for: field.key)) {
+                Text("Not answered").tag(Optional<Bool>.none)
+                Text("No").tag(Optional(false))
+                Text("Yes").tag(Optional(true))
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("form-\(field.key)")
+        } else {
+            Toggle(field.displayTitle, isOn: booleanBinding(for: field.key))
+                .labelsHidden()
+                .accessibilityIdentifier("form-\(field.key)")
+        }
     }
 
     @ViewBuilder
@@ -300,6 +315,10 @@ struct FormView: View {
 
     private func booleanBinding(for key: String) -> Binding<Bool> {
         Binding(get: { booleans[key, default: false] }, set: { booleans[key] = $0 })
+    }
+
+    private func optionalBooleanBinding(for key: String) -> Binding<Bool?> {
+        Binding(get: { booleans[key] }, set: { booleans[key] = $0 })
     }
 
     private func multiselectBinding(for key: String, value: String) -> Binding<Bool> {

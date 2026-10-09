@@ -307,6 +307,7 @@ struct OpenCodeV2FormTests {
         #"[{"key":"enabled","op":"future","value":true}]"#,
         #"[{"key":"enabled","op":"eq","value":"true"}]"#,
         #"[{"key":"missing","op":"eq","value":true}]"#,
+        #"[{"key":"secret","op":"eq","value":false}]"#,
         #"[{"key":"details","op":"eq","value":"self"}]"#,
         #"[{"key":"later","op":"eq","value":true}]"#,
         #"[{"key":"enabled","op":"eq","value":[true]}]"#,
@@ -318,6 +319,7 @@ struct OpenCodeV2FormTests {
         let wire = """
         {"data":[{"id":"frm_unsupported","title":"Future rules","fields":[
           {"key":"enabled","type":"boolean","default":false},
+          {"key":"secret","type":"boolean","hidden":true,"default":false},
           {"key":"details","type":"string","when":\(predicate)},
           {"key":"later","type":"boolean"}
         ]}]}
@@ -354,25 +356,146 @@ struct OpenCodeV2FormTests {
             onSubmit: { _ in }, onCancel: {}, isSubmitting: false))
         window.isHidden = false
         defer { window.isHidden = true; window.rootViewController = nil }
-        try await Task.sleep(for: .milliseconds(300))
+        try await waitUntil { descendants(window).contains { $0 is UISwitch } }
         let toggle = try #require(descendants(window).compactMap { $0 as? UISwitch }.first)
         #expect(descendants(window).compactMap { $0 as? UITextField }.isEmpty)
         toggle.setOn(true, animated: false)
         toggle.sendActions(for: .valueChanged)
-        try await Task.sleep(for: .milliseconds(150))
+        try await waitUntil { descendants(window).compactMap { $0 as? UITextField }.first?.text == "Ready to ship" }
         let input = try #require(descendants(window).compactMap { $0 as? UITextField }.first)
         #expect(input.text == "Ready to ship")
         input.text = "Edited release"
         input.sendActions(for: .editingChanged)
-        try await Task.sleep(for: .milliseconds(150))
         toggle.setOn(false, animated: false)
         toggle.sendActions(for: .valueChanged)
-        try await Task.sleep(for: .milliseconds(150))
+        try await waitUntil { descendants(window).compactMap { $0 as? UITextField }.isEmpty }
         #expect(descendants(window).compactMap { $0 as? UITextField }.isEmpty)
         toggle.setOn(true, animated: false)
         toggle.sendActions(for: .valueChanged)
-        try await Task.sleep(for: .milliseconds(150))
+        try await waitUntil { descendants(window).compactMap { $0 as? UITextField }.first?.text == "Edited release" }
         #expect(descendants(window).compactMap { $0 as? UITextField }.first?.text == "Edited release")
+    }
+
+    @MainActor @Test(arguments: ["eq", "neq"])
+    func optionalBooleanStartsUnansweredAndSubmitsOnlyTheChosenBranch(op: String) async throws {
+        let value = op == "eq" ? "false" : "true"
+        let form = try JSONDecoder().decode(OCFormRequest.self, from: Data("""
+        {"id":"frm_optional","sessionID":"ses_owner","title":"Optional answer","fields":[
+          {"key":"enabled","type":"boolean","title":"Release now"},
+          {"key":"reason","type":"string","title":"Reason to wait","required":true,
+           "when":[{"key":"enabled","op":"\(op)","value":\(value)}]}
+        ]}
+        """.utf8))
+        var submissions: [[String: OCFormValue]] = []
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: Color.clear
+            .sheet(isPresented: .constant(true)) {
+                FormView(form: form, onSubmit: { submissions.append($0) }, onCancel: {}, isSubmitting: false)
+                    .presentationDetents([.large])
+            })
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previousKeyWindow?.makeKey() }
+        try await waitUntil { descendants(window).contains { $0 is UISegmentedControl } }
+        let choice = try #require(descendants(window).compactMap { $0 as? UISegmentedControl }.first)
+        #expect(choice.numberOfSegments == 3)
+        #expect(choice.titleForSegment(at: 0) == "Not answered")
+        #expect(choice.selectedSegmentIndex == 0)
+        #expect(descendants(window).compactMap { $0 as? UISwitch }.isEmpty)
+        #expect(descendants(window).compactMap { $0 as? UITextField }.isEmpty)
+        try await waitUntil {
+            descendants(window).compactMap { $0 as? UINavigationBar }
+                .contains { $0.topItem?.trailingItemGroups.contains { !$0.barButtonItems.isEmpty } == true }
+        }
+        let submitItems = descendants(window).compactMap { $0 as? UINavigationBar }
+            .flatMap { $0.topItem?.trailingItemGroups.flatMap(\.barButtonItems) ?? [] }
+        let submit = try #require(submitItems.first)
+        let action = try #require(submit.action)
+        try await waitUntil { submit.isEnabled }
+        #expect(UIApplication.shared.sendAction(action, to: submit.target, from: submit, for: nil))
+        try await waitUntil { submissions.count == 1 }
+        #expect(submissions[0].isEmpty)
+
+        choice.selectedSegmentIndex = 1
+        choice.sendActions(for: .valueChanged)
+        try await waitUntil { !descendants(window).compactMap { $0 as? UITextField }.isEmpty && !submit.isEnabled }
+        let reason = try #require(descendants(window).compactMap { $0 as? UITextField }.first)
+        reason.text = "Finish verification"
+        reason.sendActions(for: .editingChanged)
+        try await waitUntil { submit.isEnabled }
+        #expect(UIApplication.shared.sendAction(action, to: submit.target, from: submit, for: nil))
+        try await waitUntil { submissions.count == 2 }
+        #expect(submissions[1] == ["enabled": .boolean(false), "reason": .string("Finish verification")])
+
+        choice.selectedSegmentIndex = 0
+        choice.sendActions(for: .valueChanged)
+        try await waitUntil { descendants(window).compactMap { $0 as? UITextField }.isEmpty && submit.isEnabled }
+        #expect(UIApplication.shared.sendAction(action, to: submit.target, from: submit, for: nil))
+        try await waitUntil { submissions.count == 3 }
+        #expect(submissions[2].isEmpty)
+
+        choice.selectedSegmentIndex = 2
+        choice.sendActions(for: .valueChanged)
+        try await waitUntil { choice.selectedSegmentIndex == 2 && submit.isEnabled }
+        #expect(UIApplication.shared.sendAction(action, to: submit.target, from: submit, for: nil))
+        try await waitUntil { submissions.count == 4 }
+        #expect(submissions[3] == ["enabled": .boolean(true)])
+
+        // Carry the actual UI submissions through the production reply boundary.
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+        ] + Array(repeating: .init(statusCode: 204, body: Data()), count: 4))
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let service = QuestionService(connection: ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        for answer in submissions { try await service.respondToForm(form, answer: answer) }
+        let replies = transport.recordedRequests().dropFirst()
+        #expect(replies.allSatisfy { $0.path == "/api/session/ses_owner/form/frm_optional/reply" })
+        let answers = try replies.map { try #require(try bodyObject($0)["answer"] as? [String: Any]) }
+        #expect(answers[0].isEmpty && answers[2].isEmpty)
+        #expect(Set(answers[1].keys) == ["enabled", "reason"])
+        #expect(answers[1]["enabled"] as? Bool == false)
+        #expect(answers[1]["reason"] as? String == "Finish verification")
+        #expect(Set(answers[3].keys) == ["enabled"])
+        #expect(answers[3]["enabled"] as? Bool == true)
+    }
+
+    @MainActor @Test(arguments: [false, true])
+    func conditionalExternalFieldsCannotGuessServerAcknowledgementSemantics(enabled: Bool) async throws {
+        let wire = Data(#"""
+        {"data":[{"id":"frm_external_when","sessionID":"ses_owner","title":"External rules","fields":[
+          {"key":"enabled","type":"boolean"},
+          {"key":"docs","type":"external","url":"https://example.com/checklist",
+           "when":[{"key":"enabled","op":"eq","value":true}]}
+        ]}]}
+        """#.utf8)
+        let transport = V2FormTransport(responses: [
+            .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
+            .init(statusCode: 200, body: wire),
+        ])
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let questions = QuestionService(connection: connection)
+        let form = try #require(try await questions.recoverPendingForm(sessionID: "ses_owner"))
+        #expect(form.hasUnsupportedFields)
+        #expect(!form.fields[1].isSupported)
+        for answer: [String: OCFormValue] in [
+            ["enabled": .boolean(enabled)], ["enabled": .boolean(enabled), "docs": .boolean(true)],
+        ] {
+            await #expect(throws: OpenCodeError.self) { try await questions.respondToForm(form, answer: answer) }
+            await #expect(throws: OpenCodeError.self) { try await InboxService(connection: connection).respondToForm(form, answer: answer) }
+        }
+        #expect(transport.recordedRequests().count == 2)
+    }
+
+    @MainActor private func waitUntil(sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @MainActor () -> Bool) async throws {
+        for _ in 0..<500 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("Timed out waiting for the native form update", sourceLocation: sourceLocation)
+        throw FormUIWaitTimeout()
     }
 
     @MainActor private func descendants(_ view: UIView) -> [UIView] {
@@ -615,3 +738,5 @@ nonisolated private final class UnusedV2FormEventStream: OpenCodeEventStream, @u
     func resume() {}
     func cancel() {}
 }
+
+nonisolated private struct FormUIWaitTimeout: Error {}
