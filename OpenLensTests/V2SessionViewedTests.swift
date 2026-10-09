@@ -324,7 +324,10 @@ struct V2SessionViewedTests {
         #expect(await server.viewRequests.count == 1)
     }
 
-    @Test func visibleCompletionsAreAcknowledgedSeriallyWithTheirOwnObservedMarkers() async throws {
+    // Rapid transport completions can land within one SwiftUI render frame.
+    // Repeated hosting exercises that timing without slowing acknowledgements.
+    @Test(arguments: 0..<10)
+    func visibleCompletionsAreAcknowledgedSeriallyWithTheirOwnObservedMarkers(_ iteration: Int) async throws {
         let server = ViewedTransport()
         let chat = try await makeChat(server)
         let visibility = ViewedChatVisibility()

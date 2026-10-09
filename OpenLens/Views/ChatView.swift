@@ -47,7 +47,6 @@ struct ChatView: View {
     private struct ResultViewingContext: Equatable {
         let sessionID: String?
         let idle: Double?
-        let viewed: Double?
         let isSynchronized: Bool
         let isActive: Bool
         let isOnScreen: Bool
@@ -55,7 +54,6 @@ struct ChatView: View {
 
     private var resultViewingContext: ResultViewingContext {
         .init(sessionID: chatClient.currentSession?.id, idle: chatClient.currentSession?.time.idle,
-              viewed: chatClient.currentSession?.time.viewed,
               isSynchronized: chatClient.isStreamSynchronized, isActive: scenePhase == .active,
               isOnScreen: isOnScreen)
     }
@@ -191,6 +189,10 @@ struct ChatView: View {
             await loadCommands(force: true)
             await loadSkills(force: true)
         }
+        // Watch completion/visibility inputs, not the viewed marker this
+        // acknowledgement writes. The service merges confirmed markers into
+        // its displayed snapshot; feeding them back here can hit SwiftUI's
+        // per-frame mutation limit and suppress the next visible completion.
         .onChange(of: resultViewingContext, initial: true) { _, _ in
             chatClient.updateDisplayedResult(
                 chatClient.isStreamSynchronized ? chatClient.currentSession : nil,
