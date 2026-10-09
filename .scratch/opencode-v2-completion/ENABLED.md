@@ -60,15 +60,16 @@ Verified after review with 525 passing tests in 56 suites on the dedicated AFK s
 
 ## 07: Mark newly completed V2 session results as unread
 
-Commits: `dc47a29`, including the ticket's done status.
+Commits: `dc47a29`, corrected after AFK review in `c19246a`, including the ticket's done status.
 
 - Completed V2 results show an Unread badge until the server confirms that completion was viewed. Active work keeps its working indicator; changing a title does not make a result unread.
-- Opening a synchronized chat in the foreground acknowledges only the completion captured for that visit. A newer completion arriving during viewing stays unread until a later visit, foreground viewing or explicit retry.
-- A lost response is checked against canonical server state. If viewing cannot be confirmed, the result stays unread and the chat offers Try Again. Confirmed retry or later confirmation clears the error.
-- Refreshing or returning to the list restores shared desktop/phone read markers. While the V2 list stays visible, inactive rows also refresh every 30 seconds. A delayed acknowledgement cannot replace a newer result or change a different chat.
+- Opening a synchronized chat in the foreground acknowledges the displayed completion. Each newer completion you watch in that chat also gets acknowledged, with one request in flight and the latest displayed marker next. An older request cannot mark an unseen newer completion read.
+- A lost response is checked against canonical server state. Re-syncing the transcript preserves an in-flight acknowledgement. If viewing cannot be confirmed, the result stays unread and the chat offers Try Again, even if another operation also fails. Confirmed retry or later confirmation clears the viewing error.
+- Confirmed viewing immediately clears the matching list/sidebar badge, including while the chat stays open. An older poll cannot restore it, and a delayed acknowledgement cannot replace a newer result or change a different chat.
+- Refreshing or returning to the list restores shared desktop/phone read markers. Every 30 seconds while the foreground V2 list stays visible, only unread inactive rows reread their markers, with at most four concurrent requests. A failed attention read preserves the result and waits for another attention refresh. Desktop viewing events recover only session info without reloading the open chat's transcript, inbox, permissions or forms.
 - V1 behavior and chat tab bar hiding are preserved.
 
-Verified with **572 passing tests in 59 suites** on the dedicated AFK simulator on 2026-10-09. Ticket 07 adds 16 Swift Testing tests, including hosted foreground and completion-race checks. Screenshots show [unread results](screenshots/07-unread-results.png), [viewed results](screenshots/07-viewed-results.png), and [unconfirmed viewing with retry](screenshots/07-view-acknowledgement-failed.png). Live two-client server/device behavior and manual iPad/poll-timer interaction remain unverified; transport and foreground chat behavior are covered with injected fixtures. Remote and its gateway were removed in `77b72ac`.
+Verified after review with **578 passing tests in 59 suites** on the dedicated AFK simulator on 2026-10-09. Ticket 07 now has 22 Swift Testing tests, including hosted sequential completions, re-sync during POST/canonical reread, typed error retry, immediate row marker propagation, stale polls, a 200-read-row refresh exclusion and marker-only event request checks. Screenshots recaptured from the repaired build show [unread results](screenshots/07-unread-results.png), [viewed results](screenshots/07-viewed-results.png), and [unconfirmed viewing with retry](screenshots/07-view-acknowledgement-failed.png). This supersedes the original 572-test verification and once-per-visit policy. Live two-client server/device behavior and manual iPad/poll-timer interaction remain unverified; transport, row merging, refresh selection and foreground chat behavior are covered with injected fixtures. Remote and its gateway were removed in `77b72ac`.
 
 ## 08: Rebind an open V2 session after its location changes
 
