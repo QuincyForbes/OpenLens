@@ -60,15 +60,18 @@ Verified after review with 525 passing tests in 56 suites on the dedicated AFK s
 
 ## 08: Rebind an open V2 session after its location changes
 
-Commits: `8fee5d0`, including the ticket's done status.
+Commits: `8fee5d0`, corrected after AFK review in `2dba41c`, including the ticket's done status.
 
 - When another client moves your open session, the phone rereads its canonical location and restores the new project, branch, model catalog, commands, skills and files. Your conversation, typed draft and inline phone attachments stay with the session.
-- New prompts and location-dependent requests use the restored directory. Old repository attachment references and composer selections are cleared, and the Workspace browser returns to the new root. Late responses from the previous directory cannot replace the refreshed chat or workspace.
-- Move events can reach the open chat from either directory; another session's move is ignored. Returning to the app, recovering a stream gap, refreshing status and reopening the session also recover its location.
+- Location-dependent requests use the restored directory. Prompts retain the same server session ID; the server owns their execution location. Successful recovery clears old repository attachment references and composer selections and resets the Workspace browser to the new root. Obsolete responses cannot replace the recovered chat or workspace.
+- Move events can reach the open chat from either directory; another session's move is ignored. Canonical recovery and explicit session loading follow the latest location. Returning to an already loaded chat destination preserves its current binding and respects a refused handoff instead of restoring a stale navigation value.
+- An SSE reconnect during project metadata recovery still completes attachment cleanup and model reload. Moving back to the original directory while another catalog is loading also restores the correct models.
 - If the server refuses the new location or canonical recovery fails after a known move, the chat keeps your draft and conversation, shows an explicit error with Try Again, and blocks new work until recovery succeeds. It never starts using an event's unverified destination.
+- Cancelling a handoff leaves an explicit retry state. During a failed handoff the header shows the bound project and branch, with the requested destination explained in the error.
+- If a move interrupts work waiting to be sent, the phone restores unsent prompt or command text and inline phone files, drops stale repository references from restored attachments, and asks you to review and retry. It does not automatically forward that work.
 - This observes moves initiated elsewhere. Initiating a move from the phone remains ticket 22.
 
-Verified with 538 passing tests in 57 suites on the dedicated AFK simulator on 2026-10-09. Screenshots show [the rebound chat and command catalog](screenshots/08-rebound-chat.png), [the restored Workspace project and branch](screenshots/08-rebound-files.png), and [a refused rebind with retry](screenshots/08-rebind-failed.png). Direct two-client behavior is covered by the production services with an injected stateful transport; a live V2 server/two-device exercise remains unverified. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
+Verified after review with 545 passing tests in 57 suites on the dedicated AFK simulator on 2026-10-09. Ticket 08 has 19 tests with 50 cases, including real SSE parsing/filter/reconnect callbacks over an injected stream transport, navigation restoration, cancelled recovery, and ten settings-wait/send cases. Screenshots show [the rebound chat and command catalog](screenshots/08-rebound-chat.png), [the restored Workspace project and branch](screenshots/08-rebound-files.png), [a refused rebind with its bound header and retry](screenshots/08-rebind-failed.png), and [restored unsent text and an inline phone file](screenshots/08-unsent-move.png). This supersedes the original 538-test completion claims. A live V2 server/two-device move or prompt execution and manual iPad navigation remain unverified; raw stream behavior and the navigation service helper are covered through injected transports. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
 
 ## 13: Send screenshots and supported photos in V2 prompts
 
