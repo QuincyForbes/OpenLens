@@ -75,7 +75,11 @@ enum ScreenshotFixtures {
     }
 
     static var showsViewAcknowledgementFailure: Bool {
-        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_VIEW_ACK_FAILED")
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_VIEW_ACK_FAILED") || showsSendAndViewAcknowledgementFailure
+    }
+
+    static var showsSendAndViewAcknowledgementFailure: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SEND_AND_VIEW_ACK_FAILED")
     }
 
     static var simulatesOutcomeRefresh: Bool {
@@ -115,6 +119,9 @@ enum ScreenshotFixtures {
         if showsViewAcknowledgementFailure {
             chat.resultViewingState = .failed(sessionID: defaultSessionID, idle: defaultSession.time.idle ?? 0,
                 message: "Failed to confirm viewed result: The network connection was lost.")
+        }
+        if showsSendAndViewAcknowledgementFailure {
+            chat.errorMessage = "Failed to send the prompt: The network connection was lost."
         }
         switch executionState {
         case .working:

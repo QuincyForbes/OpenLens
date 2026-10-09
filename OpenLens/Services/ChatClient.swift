@@ -157,6 +157,32 @@ final class ChatClient: SSEEventHandlerDelegate {
         return nil
     }
 
+    enum PresentedError: Equatable {
+        case location(String)
+        case operation(String)
+        case viewing(String)
+
+        var message: String {
+            switch self {
+            case .location(let message), .operation(let message), .viewing(let message): message
+            }
+        }
+
+        var canRetry: Bool {
+            if case .operation = self { return false }
+            return true
+        }
+    }
+
+    /// Viewing recovery remains available after the user dismisses an error
+    /// from sending or another operation. A location failure still blocks work.
+    var presentedError: PresentedError? {
+        if let sessionLocationError { return .location(sessionLocationError) }
+        if let errorMessage { return .operation(errorMessage) }
+        if let resultViewingError { return .viewing(resultViewingError) }
+        return nil
+    }
+
     /// Incremented when the chat should programmatically snap to the bottom.
     var scrollAnchor: UInt = 0
 

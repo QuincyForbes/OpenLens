@@ -418,8 +418,16 @@ final class SessionsService {
         let candidates = sessions.filter { $0.hasUnreadResult && (statuses[$0.id]?.type ?? .idle) == .idle }
         let fresh = await readCanonicalSessions(candidates)
         guard !Task.isCancelled, connection.client === client else { return sessions }
+        let recovered = sessions.map { session in
+            guard let canonical = fresh[session.id], canonical.hasUnreadResult,
+                  let idle = canonical.completedResultMarker,
+                  idle > (session.completedResultMarker ?? 0) else { return session }
+            // A viewed watermark for an older completion must be compared
+            // against the newly discovered result, not this row's stale idle.
+            return canonical
+        }
         for session in fresh.values { recordViewedMarker(session, client: client) }
-        return applyingConfirmedViewedMarkers(to: sessions)
+        return applyingConfirmedViewedMarkers(to: recovered)
     }
 
     private func readCanonicalSessions(_ sessions: [OCSession]) async -> [String: OCSession] {

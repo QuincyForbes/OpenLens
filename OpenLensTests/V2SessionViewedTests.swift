@@ -139,6 +139,20 @@ struct V2SessionViewedTests {
         #expect(data["sessionID"] as? String == "ses_1")
     }
 
+    @Test func attentionRefreshPreservesANewerUnreadCompletionAgainstAnOlderRow() async throws {
+        let server = ViewedTransport()
+        let service = try await makeService(server)
+        let stale = OCSession(id: "ses_1", title: "Old result", time: .init(created: 1000, updated: 1000, idle: 1000), outcome: "succeeded")
+        await server.complete(3000)
+        await server.desktopViewed(2000)
+        let rows = await service.refreshUnreadResults(in: [stale], statuses: [:])
+        let result = try #require(rows.first)
+        #expect(result.hasUnreadResult)
+        #expect(result.time.idle == 3000)
+        #expect(result.time.viewed == 2000)
+        #expect(service.applyingConfirmedViewedMarkers(to: rows)[0].hasUnreadResult)
+    }
+
     @Test(arguments: ["ses_1", "ses_other"])
     func viewedEventsRefreshOnlyTheMatchingMarkerWithoutReloadingHistory(sessionID: String) async throws {
         let server = ViewedTransport()
@@ -341,6 +355,58 @@ struct V2SessionViewedTests {
         #expect(await server.observedMarkers == [2000, 3000, 4000])
     }
 
+    @Test func aRetainedChatOnAnotherTabDoesNotViewResultsAfterForegroundRecovery() async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        let visibility = ViewedChatVisibility()
+        visibility.isActive = true
+        let window = try await showChat(chat, visibility: visibility, server: server, inTabs: true)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitUntil { chat.currentSession?.time.viewed == 2000 }
+        visibility.selectedTab = 1
+        try await waitUntil { visibility.renderedChat == false && visibility.renderedTab == 1 }
+        await server.complete(3000)
+        chat.currentSession = try await makeService(server).getSession(id: "ses_1")
+        visibility.isActive = false
+        try await waitUntil { visibility.renderedActive == false }
+        let readsBeforeForegrounding = await server.statusReads
+        visibility.isActive = true
+        try await waitUntil { visibility.renderedActive == true }
+        // Global foreground recovery can update a retained hidden chat even
+        // when TabView defers the child's own scenePhase callbacks.
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil {
+            let reads = await server.statusReads
+            return visibility.renderedActive == true && chat.isStreamSynchronized && reads > readsBeforeForegrounding
+        }
+        #expect(await server.observedMarkers == [2000])
+        #expect(chat.currentSession?.hasUnreadResult == true)
+        visibility.selectedTab = 0
+        try await waitUntil { chat.currentSession?.time.viewed == 3000 }
+        #expect(await server.observedMarkers == [2000, 3000])
+    }
+
+    @Test func returningToARetainedChatRestartsItsCancelledAcknowledgementWithoutSessionChanges() async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        let visibility = ViewedChatVisibility()
+        visibility.isActive = true
+        await server.holdView()
+        let window = try await showChat(chat, visibility: visibility, server: server, inTabs: true)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitForView(server)
+        visibility.selectedTab = 1
+        try await waitUntil { visibility.renderedChat == false && visibility.renderedTab == 1 }
+        await server.releaseView()
+        try await waitUntil { await server.concurrentViews == 0 }
+        #expect(chat.currentSession?.time.viewed == nil)
+        #expect(await server.viewed == nil)
+        visibility.selectedTab = 0
+        try await waitUntil { chat.currentSession?.time.viewed == 2000 }
+        #expect(await server.observedMarkers == [2000, 2000])
+        #expect(chat.currentSession?.hasUnreadResult == false)
+    }
+
     @Test(arguments: ["post", "canonical-read"])
     func aResyncDoesNotDropAnInFlightVisibleAcknowledgement(phase: String) async throws {
         let server = ViewedTransport()
@@ -384,6 +450,25 @@ struct V2SessionViewedTests {
         #expect(chat.errorMessage == "Another operation failed")
     }
 
+    @Test func sendErrorsArePresentedAndDismissibleBeforeAPersistentViewingError() async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        await server.loseResponse(committed: false)
+        await chat.viewCurrentResult(try #require(chat.currentSession))
+        let viewingError = try #require(chat.resultViewingError)
+        chat.errorMessage = "Failed to send the prompt."
+        chat.responseState = .failed
+        let first = try #require(chat.presentedError)
+        #expect(first == .operation("Failed to send the prompt."))
+        #expect(!first.canRetry)
+        chat.dismissError()
+        #expect(chat.responseState == .idle)
+        let remaining = try #require(chat.presentedError)
+        #expect(remaining == .viewing(viewingError))
+        #expect(remaining.canRetry)
+        #expect(chat.resultViewingError == viewingError)
+    }
+
     @Test func displayedMarkersCoalesceWhileOneAcknowledgementIsHeld() async throws {
         let server = ViewedTransport()
         let chat = try await makeChat(server)
@@ -403,23 +488,24 @@ struct V2SessionViewedTests {
         chat.stopViewingResults()
     }
 
-    private func showChat(_ chat: ChatClient, visibility: ViewedChatVisibility, server: ViewedTransport) async throws -> UIWindow {
+    private func showChat(_ chat: ChatClient, visibility: ViewedChatVisibility, server: ViewedTransport, inTabs: Bool = false) async throws -> UIWindow {
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: server)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
-        window.rootViewController = UIHostingController(rootView: ViewedChatHarness(chat: chat, visibility: visibility)
+        window.rootViewController = UIHostingController(rootView: ViewedChatHarness(chat: chat, visibility: visibility, inTabs: inTabs)
             .environment(\.connection, connection)
             .environment(\.workspaceService, WorkspaceService(connection: connection)))
         window.isHidden = false
         return window
     }
 
-    private func waitUntil(_ condition: @MainActor () async -> Bool) async throws {
+    private func waitUntil(sourceLocation: SourceLocation = #_sourceLocation, _ condition: @MainActor () async -> Bool) async throws {
         for _ in 0..<500 {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
+        Issue.record("Timed out waiting for the hosted view or transport", sourceLocation: sourceLocation)
         throw ViewedTestTimeout()
     }
 
@@ -514,6 +600,7 @@ private actor ViewedTransport: OpenCodeTransport {
             maximumConcurrentViews = max(maximumConcurrentViews, concurrentViews)
             defer { concurrentViews -= 1 }
             if holdsView { await withCheckedContinuation { waiters.append($0) } }
+            try Task.checkCancellation()
             if completesDuringView { idle = 3000 }
             let requestBody = try #require(request.httpBody)
             let payload = try #require(JSONSerialization.jsonObject(with: requestBody) as? [String: Double])
@@ -556,15 +643,42 @@ private final class ViewedUnusedStream: OpenCodeEventStream, @unchecked Sendable
 private final class ViewedChatVisibility {
     var isActive = false
     var renderedActive: Bool?
+    var selectedTab = 0
+    var renderedTab: Int?
+    var renderedChat: Bool?
 }
 
 private struct ViewedChatHarness: View {
     let chat: ChatClient
-    let visibility: ViewedChatVisibility
+    @Bindable var visibility: ViewedChatVisibility
+    var inTabs = false
     var body: some View {
-        ChatView(chatClient: chat, initialSession: chat.currentSession)
-            .environment(\.scenePhase, visibility.isActive ? .active : .background)
+        Group {
+            if inTabs {
+                TabView(selection: $visibility.selectedTab) {
+                    NavigationStack(path: .constant(["chat"])) {
+                        Text("Sessions")
+                            .navigationDestination(for: String.self) { _ in hostedChat }
+                    }
+                    .tabItem { Label("Chat", systemImage: "bubble.left") }
+                    .tag(0)
+                    Text("Workspace")
+                        .onAppear { visibility.renderedTab = 1 }
+                        .tabItem { Label("Workspace", systemImage: "folder") }
+                        .tag(1)
+                }
+            } else {
+                hostedChat
+            }
+        }
+        .environment(\.scenePhase, visibility.isActive ? .active : .background)
             .onChange(of: visibility.isActive, initial: true) { _, active in visibility.renderedActive = active }
+    }
+
+    private var hostedChat: some View {
+        ChatView(chatClient: chat, initialSession: chat.currentSession)
+            .onAppear { visibility.renderedChat = true; visibility.renderedTab = 0 }
+            .onDisappear { visibility.renderedChat = false }
     }
 }
 

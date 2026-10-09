@@ -42,6 +42,7 @@ struct ChatView: View {
     @State private var pickedPhotos: [PhotosPickerItem] = []
     @State private var attachmentSource: ComposerAttachmentSource?
     @State private var previewedTextFile: PromptTextFileAttachment?
+    @State private var isOnScreen = false
 
     private struct ResultViewingContext: Equatable {
         let sessionID: String?
@@ -49,12 +50,14 @@ struct ChatView: View {
         let viewed: Double?
         let isSynchronized: Bool
         let isActive: Bool
+        let isOnScreen: Bool
     }
 
     private var resultViewingContext: ResultViewingContext {
         .init(sessionID: chatClient.currentSession?.id, idle: chatClient.currentSession?.time.idle,
               viewed: chatClient.currentSession?.time.viewed,
-              isSynchronized: chatClient.isStreamSynchronized, isActive: scenePhase == .active)
+              isSynchronized: chatClient.isStreamSynchronized, isActive: scenePhase == .active,
+              isOnScreen: isOnScreen)
     }
 
     init(chatClient: ChatClient, initialSession: OCSession? = nil) {
@@ -78,21 +81,22 @@ struct ChatView: View {
             .environment(\.chatSkillIDs, availableSkills.map(\.id))
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
-            if let error = chatClient.sessionLocationError ?? chatClient.resultViewingError ?? chatClient.errorMessage {
+            if let error = chatClient.presentedError {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(isRetroChat ? RetroChatStyle.danger : .orange)
                         .font(.system(size: 13))
-                    Text(error)
+                    Text(error.message)
                         .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13))
                         .foregroundStyle(secondaryTextColor)
                     Spacer()
-                    Button(chatClient.sessionLocationError == nil && chatClient.resultViewingError == nil ? AppText.dismiss : AppText.tryAgain) {
-                        if chatClient.sessionLocationError != nil {
+                    Button(error.canRetry ? AppText.tryAgain : AppText.dismiss) {
+                        switch error {
+                        case .location:
                             chatClient.synchronizeCurrentSessionFromServer()
-                        } else if chatClient.resultViewingError != nil {
+                        case .viewing:
                             chatClient.retryViewingDisplayedResult()
-                        } else {
+                        case .operation:
                             chatClient.dismissError()
                         }
                     }
@@ -157,9 +161,11 @@ struct ChatView: View {
             )
         }
         .onAppear {
+            isOnScreen = true
             displayedResponseState = chatClient.responseState
         }
         .onDisappear {
+            isOnScreen = false
             chatClient.stopViewingResults()
         }
         // Initial load: ensure session is loaded when view appears
@@ -187,7 +193,7 @@ struct ChatView: View {
         .onChange(of: resultViewingContext, initial: true) { _, _ in
             chatClient.updateDisplayedResult(
                 chatClient.isStreamSynchronized ? chatClient.currentSession : nil,
-                isForeground: scenePhase == .active
+                isForeground: scenePhase == .active && isOnScreen
             )
         }
 
