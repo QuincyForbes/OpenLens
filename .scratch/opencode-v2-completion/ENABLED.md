@@ -153,11 +153,12 @@ Commits: `dbc37f0`, marked done in `cb1a25c`.
 
 ## 10: Preserve useful V2 context changes in the timeline
 
-Commits: `f6e020b`, including the ticket's done status, corrected after review in `4ceb5bd`.
+Commits: `f6e020b`, including the ticket's done status, corrected after review in `4ceb5bd` and `569b10c`.
 
 - Your conversation now shows model, agent and location changes, system updates and activated skills in their original position, as compact context rows.
 - You can expand rows to read previous selections/location, system instructions and skill text. Saved shell results expose readable multiline output, exit codes and a server truncation note; compaction rows expose the saved summary, recent context and failure details.
 - Large detail previews stop at 40,000 characters and say “Preview shortened.” Server truncation remains visible too.
+- Wrapped context titles and summaries align to the leading edge in standard and retro chat, including long commands and paths in disclosure controls.
 - Retro chat uses its existing pixel fonts and ink on paper for context rows and disclosures, including with dark system appearance.
 - Delivered compaction appears once in history even when a stale inbox snapshot still lists it as queued or steering work.
 - Idle entries show where an execution succeeded, failed or was interrupted. Unknown outcomes keep a neutral completion label.
@@ -165,3 +166,5 @@ Commits: `f6e020b`, including the ticket's done status, corrected after review i
 - Load earlier history restores older context alongside messages and tool results. A staged revert hides both at the same canonical boundary. Streaming text keeps its live object while refresh places it between canonical context rows, without duplication; an unavailable revert boundary still hides later chat and context IDs. Existing V1 chat and chat tab bar hiding remain available.
 
 Verified after review with **597 passing tests in 60 suites**, including seven new tests for inbox delivery, shell output, preview limits, reverts and live ordering, on the dedicated AFK simulator on 2026-10-09. Screenshots show [context changes](screenshots/10-context-changes.png), [compact results alongside a reply](screenshots/10-context-results.png), [expanded shell/compaction details](screenshots/10-context-details.png), [standard dark-mode details](screenshots/10-context-details-dark.png), [retro dark-mode results](screenshots/10-context-retro-dark.png) and [context changes](screenshots/10-context-retro-changes-dark.png), and [the shortened preview with both notices](screenshots/10-context-shortened-details.png). Live two-client server and physical-device behavior remain unverified; injected transport/native-event tests and simulator captures cover the implemented behavior. Per-token compaction summary updates, compaction admission, active-context inspection, shell output paging/PTY and synthetic background-child delivery remain outside this ticket. Remote and its gateway were removed in `77b72ac`.
+
+The final alignment correction passed all **597 tests in 60 suites** on 2026-10-09. Recaptured [retro context changes](screenshots/10-context-retro-changes-dark.png) and a [standard wrapping shell command](screenshots/10-context-wrapping-summary.png) confirm leading alignment in the verified simulator build.
