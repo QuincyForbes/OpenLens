@@ -1772,7 +1772,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             let transcript = try await messagesService!.loadTranscript(sessionID: session.id)
             let loaded = transcript.messages
             guard isCurrent() else { return false }
-            let loadedIDs = Set(loaded.map(\.id))
+            let loadedIDs = Set(transcript.entryOrder)
             queuedPrompts.removeAll { prompt in
                 prompt.state == .queued && loadedIDs.contains(prompt.messageID)
             }
@@ -3719,7 +3719,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// such as an optimistic steer, are not repeated.
     private func projectSessionInbox() {
         guard usesV2SessionAPI else { return }
-        let transcriptIDs = Set(messages.map(\.id))
+        let transcriptIDs = Set(transcriptEntryOrder).union(messages.map(\.id))
         let serverIDs = Set(sessionInbox.map(\.id))
         let localEntries = locallyAdmittedInbox.map(\.entry).filter { !serverIDs.contains($0.id) }
         // A command's optimistic row has no server admission ID. Matching its

@@ -2611,6 +2611,7 @@ private struct ChatMessagesListView: View {
                     .frame(width: 0, height: 0)
                     .accessibilityHidden(true)
                 }
+                .defaultScrollAnchor(ScreenshotFixtures.scrollsToContextDetailsEnd ? .bottom : nil)
                 .onScrollGeometryChange(for: ChatScrollState.self) { geometry in
                     ChatScrollPolicy.state(
                         contentHeight: geometry.contentSize.height,

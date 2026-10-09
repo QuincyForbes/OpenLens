@@ -35,6 +35,8 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
     let summary: String
     let details: String
 
+    static let maximumDetailCharacters = 40_000
+
     private enum CodingKeys: String, CodingKey {
         case id, type, time, model, previous, agent, location, description, text
         case name, command, status, exit, output, reason, summary, recent, error, outcome
@@ -60,40 +62,43 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
             sections.filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
         let status = text(.status)
+        let fullDetails: String
+        var outputWasTruncated = false
         switch kind {
         case .model:
             title = "Model changed"
             summary = modelName(object(.model))
             let previous = modelName(object(.previous))
-            details = previous.isEmpty ? "" : "Previously: \(previous)"
+            fullDetails = previous.isEmpty ? "" : "Previously: \(previous)"
         case .agent:
             title = "Agent changed"
             summary = text(.agent)
             let previous = text(.previous)
-            details = previous.isEmpty ? "" : "Previously: \(previous)"
+            fullDetails = previous.isEmpty ? "" : "Previously: \(previous)"
         case .location:
             title = "Location changed"
             summary = object(.location)["directory"] as? String ?? ""
             let previous = (object(.previous)["location"] as? [String: Any])?["directory"] as? String ?? ""
-            details = previous.isEmpty ? "" : "Previously: \(previous)"
+            fullDetails = previous.isEmpty ? "" : "Previously: \(previous)"
         case .system:
             title = "System update"
             summary = text(.description)
-            details = text(.text)
+            fullDetails = text(.text)
         case .skill:
             title = "Skill activated"
             summary = text(.name)
-            details = text(.text)
+            fullDetails = text(.text)
         case .shell:
             title = joinedStatus("Shell", status: status)
             summary = text(.command)
             let exit = (try? values.decode(Int.self, forKey: .exit)).map { "Exit code: \($0)" } ?? ""
-            // Retain unfamiliar structured output for inspection instead of
-            // assuming it is stdout or silently dropping a usable result.
             let output = try? values.decode(AnyCodable.self, forKey: .output)
             let outputText: String
             if let string = output?.value as? String {
                 outputText = string
+            } else if let object = output?.value as? [String: Any], let string = object["text"] as? String {
+                outputWasTruncated = object["truncated"] as? Bool == true
+                outputText = joined([string, outputWasTruncated ? "Output truncated." : ""])
             } else if let object = output?.value,
                       JSONSerialization.isValidJSONObject(object),
                       let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) {
@@ -101,12 +106,12 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
             } else {
                 outputText = ""
             }
-            details = joined([exit, outputText])
+            fullDetails = joined([exit, outputText])
         case .compaction:
             title = joinedStatus("Compaction", status: status)
             summary = text(.reason).capitalized
             let error = (try? values.decode(OCAPIError.self, forKey: .error))?.message ?? ""
-            details = joined([text(.summary), text(.recent).isEmpty ? "" : "Recent context:\n\(text(.recent))", error])
+            fullDetails = joined([text(.summary), text(.recent).isEmpty ? "" : "Recent context:\n\(text(.recent))", error])
         case .idle:
             switch text(.outcome) {
             case "succeeded": title = "Execution succeeded"
@@ -115,7 +120,13 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
             default: title = "Execution ended"
             }
             summary = ""
-            details = ""
+            fullDetails = ""
+        }
+        if fullDetails.count > Self.maximumDetailCharacters {
+            let notice = "\n\n" + joined(["Preview shortened.", outputWasTruncated ? "Output truncated." : ""])
+            details = String(fullDetails.prefix(Self.maximumDetailCharacters - notice.count)) + notice
+        } else {
+            details = fullDetails
         }
     }
 }

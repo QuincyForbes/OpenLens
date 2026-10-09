@@ -13,12 +13,19 @@ enum ScreenshotFixtures {
         isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_DETAILS")
     }
 
+    static var scrollsToContextDetailsEnd: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_LONG_DETAILS")
+    }
+
     /// Decode the same tagged records as history, then use the production
     /// transcript projection. Variants fit all supported context kinds on screen.
-    static func applyContextTimeline(to chat: ChatClient) {
+    @MainActor static func applyContextTimeline(to chat: ChatClient) {
+        let shellText = scrollsToContextDetailsEnd
+            ? String(repeating: "Check passed. ", count: 4_000)
+            : #"All 24 checks passed.\n/workspace/OpenLens"#
         let records = showsContextResults ? #"""
         [
-          {"id":"fixture-shell","type":"shell","time":{"created":1,"completed":2},"shellID":"shell_checks","command":"swift test","status":"completed","exit":0,"output":"All 24 checks passed."},
+          {"id":"fixture-shell","type":"shell","time":{"created":1,"completed":2},"shellID":"shell_checks","command":"swift test","status":"completed","exit":0,"output":{"text":"\#(shellText)","truncated":true}},
           {"id":"fixture-compaction","type":"compaction","time":{"created":3},"status":"completed","reason":"manual","summary":"The feature is implemented and verified.","recent":"Keep the current branch for review."},
           {"id":"fixture-reply","type":"assistant","time":{"created":4},"content":[{"type":"text","text":"The checks passed. Ready for review."}]},
           {"id":"fixture-idle","type":"idle","time":{"created":5},"outcome":"succeeded"}
@@ -35,7 +42,7 @@ enum ScreenshotFixtures {
         """#
         guard let entries = try? JSONDecoder().decode([OCV2SessionMessage].self, from: Data(records.utf8)) else { return }
         chat.replaceTranscript(SessionTranscript(
-            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map(MessagesService.convert),
+            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
             contextEntries: entries.compactMap(\.contextEntry),
             entryOrder: entries.map(\.id)
         ))

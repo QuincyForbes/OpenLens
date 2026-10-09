@@ -4,6 +4,134 @@ import Testing
 
 @MainActor
 struct V2ContextTimelineTests {
+    @Test func missingRevertBoundaryFiltersBothChatAndContextByID() async throws {
+        let transport = ContextTimelineTransport()
+        await transport.setHistory(#"""
+        {"data":[
+          {"id":"msg_001","type":"user","text":"Before"},
+          {"id":"msg_002","type":"system","text":"Before context"},
+          {"id":"msg_004","type":"skill","name":"After","text":"After context"},
+          {"id":"msg_005","type":"assistant","content":[{"type":"text","text":"After"}]}
+        ],"cursor":{"next":null}}
+        """#)
+        let chat = try await makeChat(transport)
+        chat.currentSession = OCSession(id: "ses_1", title: "Context", time: .init(created: 0, updated: 0),
+                                        revert: .init(messageID: "msg_003"))
+        #expect(await chat.loadMessages())
+        #expect(chat.messages.map(\.id) == ["msg_001"])
+        #expect(chat.contextEntries.map(\.id) == ["msg_002"])
+        #expect(chat.transcriptEntryOrder == ["msg_001", "msg_002"])
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["message-msg_001", "context-msg_002"])
+        #expect(await chat.loadMessages())
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["message-msg_001", "context-msg_002"])
+    }
+
+    @Test func pendingLiveTextTakesItsCanonicalContextPositionWithoutDuplicatingAfterRefresh() async throws {
+        let transport = ContextTimelineTransport()
+        let initial = #"""
+        {"data":[
+          {"id":"msg_user","type":"user","text":"Check"},
+          {"id":"msg_before","type":"system","text":"Instructions"}
+        ],"cursor":{"next":null}}
+        """#
+        await transport.setHistory(initial)
+        await transport.setActive(true)
+        let chat = try await makeChat(transport)
+        #expect(await chat.loadMessages())
+        var adapter = V2EventAdapter()
+        func deliver(_ type: String, _ fields: [String: Any]) throws {
+            var data = fields
+            data["sessionID"] = "ses_1"
+            data["assistantMessageID"] = "msg_live"
+            let event = try #require(try adapter.event(["type": type, "data": data], directory: nil))
+            chat.receiveStreamEvent(SSEInboundEvent.prepare(event, retainingRawEvent: false) ?? .raw(event))
+        }
+        try deliver("session.step.started", ["agent": "build", "model": ["id": "test", "providerID": "test"]])
+        let pending = try #require(chat.pendingAssistantMessage)
+        #expect(pending.isStreaming)
+        // The existing thinking placeholder stays after known history until
+        // REST supplies the streaming message's canonical position.
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["message-msg_user", "context-msg_before", "message-msg_live-part-streaming-thinking-msg_live"])
+        try deliver("session.text.started", ["ordinal": 0])
+        try deliver("session.text.delta", ["ordinal": 0, "delta": "Live answer"])
+        try await waitUntil { chat.timelineItems(showsThinking: true).contains { $0.id == "message-msg_live-part-msg_live-0" } }
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["message-msg_user", "context-msg_before", "message-msg_live-part-msg_live-0"])
+
+        await transport.setHistory(#"""
+        {"data":[
+          {"id":"msg_user","type":"user","text":"Check"},
+          {"id":"msg_before","type":"system","text":"Instructions"},
+          {"id":"msg_live","type":"assistant","content":[{"type":"text","text":"Live answer"}]},
+          {"id":"msg_after","type":"model-switched","model":{"providerID":"test","id":"next"}}
+        ],"cursor":{"next":null}}
+        """#)
+        let expected = ["message-msg_user", "context-msg_before", "message-msg_live-part-msg_live-0", "context-msg_after"]
+        for _ in 0..<2 {
+            #expect(await chat.loadMessages())
+            #expect(chat.pendingAssistantMessage === pending)
+            #expect(chat.displayedMessages.first { $0.id == "msg_live" } === pending)
+            #expect(chat.timelineItems(showsThinking: true).map(\.id) == expected)
+            #expect(pending.isStreaming)
+        }
+        try deliver("session.text.delta", ["ordinal": 0, "delta": " continues"])
+        try await waitUntil { pending.streamingTextProjection(forPartID: "msg_live-0")?.copyText() == "Live answer continues" }
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == expected)
+        chat.unloadSession(ifMatching: "ses_1")
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        for _ in 0..<300 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("Timed out waiting for context timeline projection")
+    }
+
+    @Test(arguments: ["system", "skill", "shell", "compaction"])
+    func largeContextDetailsHaveABoundedReadablePreview(_ kind: String) throws {
+        let longText = String(repeating: "🧪 check passed\n", count: 4_000)
+        let field = kind == "shell" ? "output" : kind == "compaction" ? "summary" : "text"
+        let data = try JSONSerialization.data(withJSONObject: ["id": "msg_long", "type": kind, field: longText])
+        let entry = try JSONDecoder().decode(SessionContextEntry.self, from: data)
+        #expect(entry.details.count <= 40_000)
+        #expect(entry.details.hasPrefix("🧪 check passed\n"))
+        #expect(entry.details.hasSuffix("\n\nPreview shortened."))
+        #expect(!entry.details.contains("�"))
+    }
+
+    @Test func shorteningAShellPreviewPreservesTheServersTruncationNotice() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "id": "msg_long", "type": "shell",
+            "output": ["text": String(repeating: "Checks passed\n", count: 4_000), "truncated": true]
+        ])
+        let entry = try JSONDecoder().decode(SessionContextEntry.self, from: data)
+        #expect(entry.details.count <= 40_000)
+        #expect(entry.details.contains("Preview shortened."))
+        #expect(entry.details.hasSuffix("Output truncated."))
+    }
+
+    @Test(arguments: [true, false])
+    func structuredShellOutputKeepsNewlinesAndReportsTruncation(_ truncated: Bool) async throws {
+        let transport = ContextTimelineTransport()
+        await transport.setHistory(#"""
+        {"data":[{"id":"msg_shell","type":"shell","status":"completed","exit":0,"output":{"text":"Checks passed.\n/workspace/OpenLens","truncated":\#(truncated)}}],"cursor":{"next":null}}
+        """#)
+        let chat = try await makeChat(transport)
+        #expect(await chat.loadMessages())
+        let expected = "Exit code: 0\n\nChecks passed.\n/workspace/OpenLens" + (truncated ? "\n\nOutput truncated." : "")
+        #expect(chat.contextEntries.first?.details == expected)
+    }
+
+    @Test func unfamiliarShellOutputRemainsInspectable() async throws {
+        let transport = ContextTimelineTransport()
+        await transport.setHistory(#"{"data":[{"id":"msg_shell","type":"shell","output":{"futureResult":"Useful result"}}],"cursor":{"next":null}}"#)
+        let chat = try await makeChat(transport)
+        #expect(await chat.loadMessages())
+        let details = try #require(chat.contextEntries.first?.details)
+        let value = try JSONSerialization.jsonObject(with: Data(details.utf8)) as? [String: String]
+        #expect(value == ["futureResult": "Useful result"])
+    }
+
     @Test func stagedRevertHidesContextAfterTheSameHistoryBoundary() async throws {
         let chat = try await makeChat(ContextTimelineTransport())
         chat.currentSession = OCSession(id: "ses_1", title: "Context", time: .init(created: 0, updated: 0),
@@ -81,8 +209,7 @@ struct V2ContextTimelineTests {
         #expect(chat.transcriptEntryOrder == ["msg_shell", "msg_user", "msg_system"])
         #expect(chat.contextEntries.count == 2)
         #expect(chat.contextEntries.first?.title == "Shell · Completed")
-        #expect(chat.contextEntries.first?.details.contains("Passed") == true)
-        #expect(chat.contextEntries.first?.details.contains("truncated") == true)
+        #expect(chat.contextEntries.first?.details == "Exit code: 0\n\nPassed")
         #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["context-msg_shell", "message-msg_user", "context-msg_system"])
     }
 
@@ -177,12 +304,14 @@ private actor ContextTimelineTransport: OpenCodeTransport {
     private var page = history
     private var continuationPage: String?
     private var requests = 0
+    private var active = false
     private var holdsHistory = false
     private var historyWaiter: CheckedContinuation<Void, Never>?
     var hasHeldHistory: Bool { historyWaiter != nil }
     func holdHistory() { holdsHistory = true }
     func releaseHistory() { holdsHistory = false; historyWaiter?.resume(); historyWaiter = nil }
     func setHistory(_ value: String) { page = value }
+    func setActive(_ value: Bool) { active = value }
     func setPages(first: String, second: String) { page = first; continuationPage = second }
     func requestCount() -> Int { requests }
 
@@ -197,7 +326,7 @@ private actor ContextTimelineTransport: OpenCodeTransport {
             let cursor = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "cursor" }?.value
             body = cursor == nil ? page : (continuationPage ?? page)
         case "/api/session/ses_1": body = #"{"data":{"id":"ses_1","title":"Context","time":{"created":0,"updated":0}}}"#
-        case "/api/session/active": body = #"{"data":{}}"#
+        case "/api/session/active": body = active ? #"{"data":{"ses_1":{"type":"busy"}}}"# : #"{"data":{}}"#
         case "/api/session/ses_1/inbox", "/api/session/ses_1/permission", "/api/session/ses_1/form": body = #"{"data":[]}"#
         default: throw URLError(.unsupportedURL)
         }

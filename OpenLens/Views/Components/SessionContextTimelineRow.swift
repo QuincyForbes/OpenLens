@@ -4,6 +4,8 @@ import SwiftUI
 /// remain selectable in place, without creating another navigation destination.
 struct SessionContextTimelineRow: View {
     let entry: SessionContextEntry
+    @Environment(\.chatEasterEgg) private var chatEasterEgg
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isExpanded = false
 
     init(entry: SessionContextEntry, initiallyExpanded: Bool = false) {
@@ -18,42 +20,55 @@ struct SessionContextTimelineRow: View {
             } else {
                 DisclosureGroup(isExpanded: $isExpanded) {
                     Text(entry.details)
-                        .font(.callout)
-                        .foregroundStyle(Color.primary)
+                        .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
+                        .foregroundStyle(ink)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 6)
                 } label: {
                     label
                 }
-                .tint(Color.primary)
+                .foregroundStyle(ink)
+                .tint(ink)
+                // The native disclosure arrow also needs light-control
+                // contrast on retro's fixed pale paper in dark appearance.
+                .environment(\.colorScheme, isRetroChat ? .light : colorScheme)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .background {
+            if !isRetroChat {
+                RoundedRectangle(cornerRadius: 12).fill(.quaternary.opacity(0.45))
+            }
+        }
+        .ifRetroPanel(isRetroChat)
         .accessibilityIdentifier("context-\(entry.id)")
     }
 
     private var label: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol)
-                .foregroundStyle(Color.primary.opacity(0.65))
+                .foregroundStyle(secondaryInk)
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 3) {
                 Text(entry.title)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.primary)
+                    .font(isRetroChat ? RetroChatStyle.headerFont : .subheadline.weight(.medium))
+                    .foregroundStyle(ink)
                 if !entry.summary.isEmpty {
                     Text(entry.summary)
-                        .font(.caption)
-                        .foregroundStyle(Color.primary.opacity(0.65))
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .caption)
+                        .foregroundStyle(secondaryInk)
                         .lineLimit(isExpanded ? nil : 2)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+
+    private var isRetroChat: Bool { chatEasterEgg.visualMode.isRetro }
+    private var ink: Color { isRetroChat ? RetroChatStyle.ink : .primary }
+    private var secondaryInk: Color { isRetroChat ? RetroChatStyle.secondaryInk : .primary.opacity(0.65) }
 
     private var symbol: String {
         switch entry.kind {

@@ -273,6 +273,27 @@ struct V2SessionInboxTests {
         #expect(chat.messages.map(\.id) == ["msg_a"])
     }
 
+    @Test(arguments: ["queue", "steer"])
+    func deliveredCompactionAppearsOnceAcrossInboxAndContextHistory(_ delivery: String) async throws {
+        let server = InboxFakeServer()
+        await server.setInbox("ses_1", [.compaction("msg_c", delivery: delivery)])
+        let chat = try await Self.openChat(server: server)
+        #expect(chat.queuedPrompts.map(\.messageID) == ["msg_c"])
+
+        // Simulate delivery after the inbox snapshot but before history is read.
+        // The deliberately stale inbox still contains the same admitted ID.
+        await server.setCompactionHistory("ses_1", ["msg_c"])
+        #expect(await chat.loadMessages())
+        #expect(chat.queuedPrompts.isEmpty)
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["context-msg_c"])
+
+        // A later recovery must not reproject the stale accepted card.
+        chat.synchronizeCurrentSessionFromServer()
+        try await Self.waitUntil { chat.isStreamSynchronized }
+        #expect(chat.queuedPrompts.isEmpty)
+        #expect(chat.timelineItems(showsThinking: true).map(\.id) == ["context-msg_c"])
+    }
+
     @Test func aPendingAdmissionIsDistinguishedFromAcceptedWork() async throws {
         let server = InboxFakeServer()
         await server.setInbox("ses_1", [.user("msg_desktop", "From the desktop")])
@@ -600,6 +621,7 @@ private actor InboxFakeServer: OpenCodeTransport {
 
     private var inboxes: [String: [Entry]] = [:]
     private var histories: [String: [(String, String)]] = [:]
+    private var compactionHistories: [String: [String]] = [:]
     private var failsInbox = false
     private var losesMutationResponse = false
     private var rejectsMutations = false
@@ -622,6 +644,7 @@ private actor InboxFakeServer: OpenCodeTransport {
 
     func setInbox(_ sessionID: String, _ entries: [Entry]) { inboxes[sessionID] = entries }
     func setHistory(_ sessionID: String, _ messages: [(String, String)]) { histories[sessionID] = messages }
+    func setCompactionHistory(_ sessionID: String, _ ids: [String]) { compactionHistories[sessionID] = ids }
     func setFailsInbox(_ fails: Bool) { failsInbox = fails }
     func setLosesMutationResponse(_ loses: Bool) { losesMutationResponse = loses }
     func setRejectsMutations(_ rejects: Bool) { rejectsMutations = rejects }
@@ -702,7 +725,10 @@ private actor InboxFakeServer: OpenCodeTransport {
             let messages = histories[sessionID, default: []].map { id, text in
                 #"{"id":"\#(id)","type":"user","time":{"created":1},"text":"\#(text)"}"#
             }
-            return respond(200, #"{"data":[\#(messages.joined(separator: ","))],"cursor":{"next":null}}"#)
+            let compactions = compactionHistories[sessionID, default: []].map { id in
+                #"{"id":"\#(id)","type":"compaction","time":{"created":2},"status":"running","reason":"manual","summary":"","recent":""}"#
+            }
+            return respond(200, #"{"data":[\#((messages + compactions).joined(separator: ","))],"cursor":{"next":null}}"#)
         case "permission", "form":
             return respond(200, #"{"data":[]}"#)
         case "interrupt":
