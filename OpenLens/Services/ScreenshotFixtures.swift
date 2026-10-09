@@ -11,10 +11,14 @@ enum ScreenshotFixtures {
         let stateArgument = arguments.first { $0.hasPrefix("SCREENSHOT_SUBAGENT_RESULT_STATE=") }
         let state = stateArgument?.split(separator: "=").last.map(String.init) ?? "completed"
         let resultText: String
-        switch state {
-        case "error": resultText = "The review could not finish. The provider is offline."
-        case "cancelled": resultText = "The background review was cancelled."
-        default: resultText = "Reviewed the changes. No blocking issues found.\nAll checks passed."
+        if arguments.contains("SCREENSHOT_SUBAGENT_RESULT_LONG") {
+            resultText = String(repeating: "Reviewed the changes. All checks passed. ", count: 1_000)
+        } else {
+            switch state {
+            case "error": resultText = "The review could not finish. The provider is offline."
+            case "cancelled": resultText = "The background review was cancelled."
+            default: resultText = "Reviewed the changes. No blocking issues found.\nAll checks passed."
+            }
         }
         var records: [[String: Any]] = [
             ["id": "fixture-user", "type": "user", "text": "Run the review in the background."],
@@ -35,12 +39,26 @@ enum ScreenshotFixtures {
             records.append(["id": "fixture-other", "type": "synthetic", "description": "Automatic context update",
                             "text": "Keep the current feature branch for review.", "metadata": ["source": "other"]])
         }
+        var queuedEntry: OCV2InboxEntry?
+        if arguments.contains("SCREENSHOT_SUBAGENT_RESULT_QUEUED") {
+            let result = records.remove(at: 2)
+            let wireEntry: [String: Any] = [
+                "id": "fixture-result", "sessionID": defaultSession.id, "type": "synthetic", "delivery": "steer",
+                "payload": ["text": result["text"] ?? "", "description": "Review the changes", "metadata": result["metadata"] ?? [:]]
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: wireEntry) {
+                queuedEntry = try? JSONDecoder().decode(OCV2InboxEntry.self, from: data)
+            }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: records),
               let entries = try? JSONDecoder().decode([OCV2SessionMessage].self, from: data) else { return }
         chat.replaceTranscript(SessionTranscript(
             messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
             contextEntries: entries.compactMap(\.contextEntry), entryOrder: entries.map(\.id)
         ))
+        if let queuedEntry, let pending = chat.queuedPrompt(for: queuedEntry) {
+            chat.queuedPrompts = [pending]
+        }
     }
 
     static var showsContextTimeline: Bool {

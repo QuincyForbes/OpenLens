@@ -34,22 +34,37 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
     let title: String
     let summary: String
     let details: String
+    let resultPreview: String
     let subagentResult: SubagentResult?
 
-    nonisolated struct SubagentResult: Sendable {
+    nonisolated struct SubagentResult: Equatable, Sendable {
         let childID: String?
         let agent: String?
         let state: SubagentResultState?
 
-        init(metadata: [String: Any]) {
+        init?(metadata: [String: Any]) {
+            guard metadata["source"] as? String == "subagent" else { return nil }
             let child = metadata["childID"] as? String
             childID = child.flatMap { InteractiveFormSafety.fitsIdentifier($0) ? $0 : nil }
             agent = StreamDisplayValue.preview(metadata["agent"] as? String, maximumBytes: 128)?.nilIfBlank
             state = (metadata["state"] as? String).flatMap(SubagentResultState.init(rawValue:))
         }
+
+        /// Only call for supported-source metadata; the wrapper never proves
+        /// identity or success. Unfamiliar text keeps its original shape.
+        static func readableText(_ text: String) -> String {
+            guard text.hasPrefix("<subagent "), let newline = text.firstIndex(of: "\n"),
+                  text.hasSuffix("\n</subagent>") else { return text }
+            return String(text[text.index(after: newline)...].dropLast("\n</subagent>".count))
+        }
     }
 
     static let maximumDetailCharacters = 40_000
+
+    /// Collapsed labels, including VoiceOver, must not consume a full result.
+    static func resultTextPreview(_ text: String) -> String {
+        StreamDisplayValue.preview(text, maximumBytes: 320)
+    }
 
     private enum CodingKeys: String, CodingKey {
         case id, type, time, model, previous, agent, location, description, text
@@ -76,8 +91,7 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
             sections.filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
         let metadata = object(.metadata)
-        subagentResult = kind == .synthetic && metadata["source"] as? String == "subagent"
-            ? SubagentResult(metadata: metadata) : nil
+        subagentResult = kind == .synthetic ? SubagentResult(metadata: metadata) : nil
         let status = text(.status)
         let fullDetails: String
         var outputWasTruncated = false
@@ -131,17 +145,12 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
             fullDetails = joined([text(.summary), text(.recent).isEmpty ? "" : "Recent context:\n\(text(.recent))", error])
         case .synthetic:
             title = subagentResult.map { "Subagent · \($0.state?.title ?? "Result")" } ?? "Session update"
-            summary = [subagentResult?.agent, text(.description).nilIfBlank]
-                .compactMap { $0 }.joined(separator: " · ")
+            summary = StreamDisplayValue.preview(
+                [subagentResult?.agent, text(.description).nilIfBlank]
+                    .compactMap { $0 }.joined(separator: " · "), maximumBytes: 512
+            )
             let resultText = text(.text)
-            // Released background delivery wraps the readable text in one
-            // subagent envelope. Only unwrap that exact outer shape.
-            if subagentResult != nil, resultText.hasPrefix("<subagent "),
-               let newline = resultText.firstIndex(of: "\n"), resultText.hasSuffix("\n</subagent>") {
-                fullDetails = String(resultText[resultText.index(after: newline)...].dropLast("\n</subagent>".count))
-            } else {
-                fullDetails = resultText
-            }
+            fullDetails = subagentResult != nil ? SubagentResult.readableText(resultText) : resultText
         case .idle:
             switch text(.outcome) {
             case "succeeded": title = "Execution succeeded"
@@ -158,6 +167,7 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
         } else {
             details = fullDetails
         }
+        resultPreview = kind == .synthetic ? Self.resultTextPreview(details) : ""
     }
 }
 

@@ -816,6 +816,23 @@ nonisolated struct OCToolState: Codable, Sendable {
     }
 }
 
+/// Shared alias precedence for card identity, stream ownership and safety.
+nonisolated enum OCSubagentMetadata {
+    static let childIDKeys = ["sessionId", "sessionID", "session_id"]
+
+    static func validChildID(_ value: AnyCodable?) -> String? {
+        guard let id = value?.value as? String, InteractiveFormSafety.fitsIdentifier(id) else { return nil }
+        return id
+    }
+
+    static func childID(in metadata: [String: AnyCodable]?) -> String? {
+        for key in childIDKeys {
+            if let id = validChildID(metadata?[key]) { return id }
+        }
+        return nil
+    }
+}
+
 /// Child state reported in V2 subagent tool metadata. This is evidence from
 /// that tool update, rather than a subscription to the child's later outcome.
 nonisolated enum OCSubagentStatus: String, Sendable {
@@ -2844,6 +2861,7 @@ nonisolated struct OCV2InboxEntry: Decodable, Equatable, Sendable {
     let text: String?
     /// Synthetic entries only.
     let description: String?
+    let subagentResult: SessionContextEntry.SubagentResult?
     /// Names of files attached to a user entry.
     let fileNames: [String]
     /// Destination of a move entry.
@@ -2857,7 +2875,8 @@ nonisolated struct OCV2InboxEntry: Decodable, Equatable, Sendable {
         text: String?,
         description: String? = nil,
         fileNames: [String] = [],
-        moveDirectory: String? = nil
+        moveDirectory: String? = nil,
+        subagentResult: SessionContextEntry.SubagentResult? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2865,6 +2884,7 @@ nonisolated struct OCV2InboxEntry: Decodable, Equatable, Sendable {
         self.delivery = delivery
         self.text = text
         self.description = description
+        self.subagentResult = subagentResult
         self.fileNames = fileNames
         self.moveDirectory = moveDirectory
     }
@@ -2875,6 +2895,7 @@ nonisolated struct OCV2InboxEntry: Decodable, Equatable, Sendable {
         struct Location: Decodable { let directory: String? }
         let text: String?
         let description: String?
+        let metadata: AnyCodable?
         let files: [File]?
         let location: Location?
     }
@@ -2888,6 +2909,8 @@ nonisolated struct OCV2InboxEntry: Decodable, Equatable, Sendable {
         let payload = (try? container.decodeIfPresent(Payload.self, forKey: .payload)) ?? nil
         text = payload?.text
         description = payload?.description
+        subagentResult = type == "synthetic"
+            ? SessionContextEntry.SubagentResult(metadata: payload?.metadata?.value as? [String: Any] ?? [:]) : nil
         fileNames = payload?.files?.compactMap(\.name) ?? []
         moveDirectory = payload?.location?.directory
     }

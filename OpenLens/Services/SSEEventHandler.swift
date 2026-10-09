@@ -883,14 +883,6 @@ final class SSEEventHandler {
     }
 
     private func relatedSessionID(from state: OCToolState) -> String? {
-        let metadata = state.metadata ?? [:]
-
-        return stringValue(for: "sessionId", in: metadata)
-            ?? stringValue(for: "sessionID", in: metadata)
-            ?? stringValue(for: "session_id", in: metadata)
-    }
-
-    private func stringValue(for key: String, in metadata: [String: AnyCodable]) -> String? {
-        (metadata[key]?.value as? String)?.nilIfBlank
+        OCSubagentMetadata.childID(in: state.metadata)
     }
 }

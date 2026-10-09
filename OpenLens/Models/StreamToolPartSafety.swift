@@ -105,10 +105,8 @@ nonisolated enum StreamToolPartSafety {
         guard let metadata else { return nil }
         var result: [String: AnyCodable] = [:]
 
-        for key in ["sessionId", "sessionID", "session_id"] {
-            guard let value = metadata[key]?.value as? String,
-                  let identifier = safeIdentifier(value),
-                  InteractiveFormSafety.fitsIdentifier(identifier) else { continue }
+        for key in OCSubagentMetadata.childIDKeys {
+            guard let identifier = OCSubagentMetadata.validChildID(metadata[key]) else { continue }
             result[key] = AnyCodable(identifier)
         }
 

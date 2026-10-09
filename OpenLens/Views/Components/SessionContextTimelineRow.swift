@@ -63,8 +63,8 @@ struct SessionContextTimelineRow: View {
                         .multilineTextAlignment(.leading)
                         .lineLimit(isExpanded ? nil : 2)
                 }
-                if entry.kind == .synthetic, !isExpanded, !entry.details.isEmpty {
-                    Text(entry.details)
+                if entry.kind == .synthetic, !isExpanded, !entry.resultPreview.isEmpty {
+                    Text(entry.resultPreview)
                         .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
                         .foregroundStyle(ink)
                         .multilineTextAlignment(.leading)

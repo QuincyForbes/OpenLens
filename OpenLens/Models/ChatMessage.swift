@@ -1451,8 +1451,17 @@ final class ChatMessage: Identifiable {
     /// Apply canonical background outcomes without rewriting launch-tool facts.
     /// Later tool progress rebuilds the same projection with this evidence.
     func reconcileSubagentResults(_ results: [String: SubagentResultState]) {
-        guard subagentResultsByChildID != results else { return }
-        subagentResultsByChildID = results
+        guard role == .assistant else { return }
+        // Fresh history already derived every message. Only a matching child
+        // outcome may invalidate that projection; unrelated results are cheap.
+        var relevant: [String: SubagentResultState] = [:]
+        for part in parts {
+            guard let state = subagentToolState(from: part) else { continue }
+            let childID = OCSubagentMetadata.childID(in: state.metadata)
+            if let childID, let result = results[childID] { relevant[childID] = result }
+        }
+        guard subagentResultsByChildID != relevant else { return }
+        subagentResultsByChildID = relevant
         rebuildDerivedState()
     }
 
@@ -2123,11 +2132,7 @@ final class ChatMessage: Identifiable {
         guard (taskState != nil && taskState?.status != .unknown)
             || title != "Subagent" || !detail.isEmpty else { return nil }
 
-        let childID = ["sessionID", "sessionId", "session_id"].compactMap { key -> String? in
-            guard let id = taskState?.metadata?[key]?.value as? String,
-                  InteractiveFormSafety.fitsIdentifier(id) else { return nil }
-            return id
-        }.first
+        let childID = OCSubagentMetadata.childID(in: taskState?.metadata)
         let result = childID.flatMap { subagentResultsByChildID[$0] }
         return PersistedSubagentStep(
             id: part.id,

@@ -3763,11 +3763,19 @@ final class ChatClient: SSEEventHandlerDelegate {
         contentVersion &+= 1
     }
 
-    private func queuedPrompt(for entry: OCV2InboxEntry) -> QueuedPrompt? {
+    /// Shared inbox presentation, also used by static screenshot fixtures.
+    func queuedPrompt(for entry: OCV2InboxEntry) -> QueuedPrompt? {
         let kind: QueuedPrompt.Kind
         switch entry.type {
         case "user": kind = .user
-        case "synthetic": kind = .synthetic(description: entry.description)
+        case "synthetic":
+            if let result = entry.subagentResult {
+                let name = result.agent.map { "Subagent \($0)" } ?? "Subagent result"
+                let label = [name, result.state?.title, "awaiting delivery"].compactMap { $0 }.joined(separator: " · ")
+                kind = .synthetic(description: label)
+            } else {
+                kind = .synthetic(description: entry.description)
+            }
         case "compaction": kind = .compaction
         case "move": kind = .move(directory: entry.moveDirectory)
         default: return nil
@@ -3777,7 +3785,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         return QueuedPrompt(
             id: queuedPrompts.first { $0.messageID == entry.id }?.id ?? UUID(),
             messageID: entry.id,
-            text: entry.text ?? "",
+            text: entry.subagentResult != nil
+                ? SessionContextEntry.resultTextPreview(SessionContextEntry.SubagentResult.readableText(entry.text ?? ""))
+                : entry.text ?? "",
             attachments: submission?.attachments ?? [],
             state: .queued,
             kind: kind,
