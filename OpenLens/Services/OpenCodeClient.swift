@@ -35,11 +35,14 @@ actor OpenCodeClient {
         self.capabilities = nil
     }
 
-    func updateContextDirectory(_ directory: String?) {
+    @discardableResult
+    func updateContextDirectory(_ directory: String?) -> String? {
+        let previousDirectory = contextDirectory
         contextRevision &+= 1
         let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         Logger.api.debug("OpenCode client context directory changed from \(self.contextDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         self.contextDirectory = normalizedDirectory
+        return previousDirectory
     }
 
     func currentContextDirectory() -> String? {

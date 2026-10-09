@@ -6,6 +6,107 @@ import UIKit
 
 @Suite(.serialized)
 struct OpenCodeV2FormTests {
+    @MainActor @Test(arguments: [false, true])
+    func successfulFormResolutionInvalidatesHeldReadsAndTheirCachedGlobals(cancel: Bool) async throws {
+        let gate = FormReadGate(readToHold: 2)
+        let pending = Data(#"""
+        {"location":{"directory":"/a"},"data":[
+          {"id":"frm_global","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]}
+        ]}
+        """#.utf8)
+        let empty = Data(#"{"location":{"directory":"/a"},"data":[]}"#.utf8)
+        let operation = cancel ? "DELETE /api/session/global/form/frm_global" : "POST /api/session/global/form/frm_global/reply"
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request /a": Array(repeating: .init(statusCode: 200, body: empty), count: 4),
+            "GET /api/form /a": [.init(statusCode: 200, body: pending), .init(statusCode: 200, body: pending),
+                .init(statusCode: 200, body: empty), .init(statusCode: 503, body: Data()), .init(statusCode: 503, body: Data())],
+            operation: [.init(statusCode: 204, body: Data())],
+        ], matchesLocation: true, gate: gate)
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/a", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        let initial = try await inbox.loadInbox()
+        let form = try #require(initial.globalForms.first)
+        let heldRead = Task { try await inbox.loadInbox() }
+        for _ in 0..<500 {
+            if await gate.isHeld { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await gate.isHeld)
+        if cancel { try await inbox.cancelForm(form) }
+        else { try await inbox.respondToForm(form, answer: ["ok": .boolean(true)]) }
+        let postResolutionRead = Task { try await inbox.loadInbox() }
+        for _ in 0..<500 {
+            if transport.recordedRequests().filter({ $0.path == "/api/form" }).count >= 3 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // The new load must issue a fresh read while the pre-resolution one is held.
+        let freshReadStarted = transport.recordedRequests().filter { $0.path == "/api/form" }.count == 3
+        #expect(freshReadStarted)
+        // On the red path, release first so the regression can fail without
+        // deadlocking. On the green path, finish the new read before the old
+        // response arrives, exposing any subsequent stale cache write.
+        if !freshReadStarted { await gate.release() }
+        let postResolution = try await postResolutionRead.value
+        #expect(postResolution.globalForms.isEmpty)
+        #expect(postResolution.warning == nil)
+        await gate.release()
+        let oldCaller = try await heldRead.value
+        #expect(oldCaller.globalForms.isEmpty)
+        // Failure after the late response cannot resurrect its cached global.
+        let afterLateResponse = try await inbox.loadInbox()
+        #expect(afterLateResponse.globalForms.isEmpty)
+        #expect(afterLateResponse.warning != nil)
+    }
+
+    @MainActor @Test func inboxDiscoversGlobalFormsInTheWorkspaceLeftBeforeAnyInboxLoad() async throws {
+        let pendingA = Data(#"""
+        {"location":{"directory":"/a"},"data":[
+          {"id":"frm_global","sessionID":"global","title":"MCP A","fields":[{"key":"ok","type":"boolean"}]},
+          {"id":"frm_a","sessionID":"ses_a","title":"Session A","fields":[{"key":"ok","type":"boolean"}]}
+        ]}
+        """#.utf8)
+        let settledA = Data(#"{"location":{"directory":"/a"},"data":[]}"#.utf8)
+        let b = Data(#"""
+        {"location":{"directory":"/b"},"data":[
+          {"id":"frm_b","sessionID":"ses_b","title":"Session B","fields":[{"key":"ok","type":"boolean"}]}
+        ]}
+        """#.utf8)
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request /b": Array(repeating: .init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/b"},"data":[]}"#.utf8)), count: 3),
+            "GET /api/form /a": [.init(statusCode: 200, body: pendingA), .init(statusCode: 200, body: settledA)],
+            "GET /api/form /b": Array(repeating: .init(statusCode: 200, body: b), count: 3),
+            "POST /api/session/global/form/frm_global/reply": [.init(statusCode: 204, body: Data())],
+        ], matchesLocation: true)
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/a", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let chat = ChatClient(connection: connection, liveActivity: TestLiveActivityProvider(),
+            sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
+            providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
+            savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore())
+        // No Inbox service or load existed while Chat was in A.
+        await chat.restoreProjectContext(for: OCSession(id: "ses_b", directory: "/b", title: "Chat in B", time: .init(created: 0, updated: 0)))
+        let inbox = InboxService(connection: connection)
+        let discovered = try await inbox.loadInbox()
+        #expect(discovered.warning == nil)
+        #expect(discovered.sessionForms.map(\.id) == ["frm_b"])
+        let global = try #require(discovered.globalForms.first)
+        #expect(global.globalDirectory == "/a")
+        try await inbox.respondToForm(global, answer: ["ok": .boolean(true)])
+        let settled = try await inbox.loadInbox()
+        #expect(settled.globalForms.isEmpty)
+        #expect(settled.warning == nil)
+        _ = try await inbox.loadInbox()
+        let requests = transport.recordedRequests()
+        #expect(requests.filter { $0.path == "/api/form" && $0.queryItems["location[directory]"] == "/a" }.count == 2)
+        let reply = try #require(requests.first { $0.method == "POST" })
+        #expect(reply.queryItems == ["location[directory]": "/a"])
+        #expect(await client.currentContextDirectory() == "/b")
+    }
+
     @MainActor @Test func canonicalLocationRefreshReplacesOldFormsEvenIfTheRememberedReadFails() async throws {
         func body(_ id: String) -> Data {
             Data("""
@@ -1108,9 +1209,6 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
                     result[item.name] = value
                 }
             }
-        if url.path == "/api/form", queryItems["location[directory]"] == "/a" {
-            await gate?.holdFirstRead()
-        }
         let response = try lock.withLock { () throws -> Response in
             requests.append(.init(
                 method: request.httpMethod ?? "GET",
@@ -1131,6 +1229,11 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
                 throw MissingV2FormResponse()
             }
             return responses.removeFirst()
+        }
+        if url.path == "/api/form", queryItems["location[directory]"] == "/a" {
+            // Reserve the server snapshot before holding its delivery, so a
+            // concurrent post-resolution read receives the next snapshot.
+            await gate?.holdRead()
         }
 
         return (
@@ -1164,13 +1267,16 @@ nonisolated private final class UnusedV2FormEventStream: OpenCodeEventStream, @u
 nonisolated private struct FormUIWaitTimeout: Error {}
 
 private actor FormReadGate {
-    private var held = false
+    private let readToHold: Int
+    private var readCount = 0
     private var continuation: CheckedContinuation<Void, Never>?
     var isHeld: Bool { continuation != nil }
 
-    func holdFirstRead() async {
-        guard !held else { return }
-        held = true
+    init(readToHold: Int = 1) { self.readToHold = readToHold }
+
+    func holdRead() async {
+        readCount += 1
+        guard readCount == readToHold else { return }
         await withCheckedContinuation { continuation = $0 }
     }
 

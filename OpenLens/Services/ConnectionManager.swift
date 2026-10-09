@@ -22,6 +22,7 @@ final class ConnectionManager: ConnectionProviding {
     private(set) var selectedProjectDirectory: String?
     private(set) var projectContextRevision: UInt = 0
     private var projectContextGeneration: UInt = 0
+    @ObservationIgnored private var globalFormRecoveryDirectories: Set<String> = []
     private(set) var connectionMethod: ConnectionMethod?
     private(set) var serverURL: URL?
     private(set) var localNetworkAccessRequired: Bool = false
@@ -163,6 +164,7 @@ final class ConnectionManager: ConnectionProviding {
             serverVersion = capabilities.serverVersion
 
             self.client = apiClient
+            globalFormRecoveryDirectories = []
             self.serverURL = baseURL
             self.selectedProjectDirectory = restoredProjectDirectory?.nilIfBlank
 
@@ -222,6 +224,7 @@ final class ConnectionManager: ConnectionProviding {
         sseClient?.disconnect()
         sseClient = nil
         client = nil
+        globalFormRecoveryDirectories = []
         serverURL = nil
         state = .disconnected
         serverVersion = nil
@@ -295,7 +298,15 @@ final class ConnectionManager: ConnectionProviding {
             return
         }
 
-        await client.updateContextDirectory(normalizedDirectory)
+        let previousDirectory = await client.updateContextDirectory(normalizedDirectory)
+        guard self.client === client else { return }
+        // Chat can leave a workspace before any Inbox load has discovered its
+        // global forms. Queue that actual routing directory for recovery once.
+        if serverCapabilities?.protocolVersion == .v2,
+           let previousDirectory, previousDirectory != normalizedDirectory,
+           InteractiveFormSafety.fitsGlobalDirectory(previousDirectory) {
+            globalFormRecoveryDirectories.insert(previousDirectory)
+        }
         // The actor has already changed request routing. Commit the matching
         // published/SSE context even if the caller was cancelled at this await.
         guard generation == projectContextGeneration else { return }
@@ -314,6 +325,13 @@ final class ConnectionManager: ConnectionProviding {
         }
 
         await refreshProjectMetadata()
+    }
+
+    func takeGlobalFormRecoveryDirectories(using client: OpenCodeClient) -> Set<String> {
+        guard self.client === client else { return [] }
+        let directories = globalFormRecoveryDirectories
+        globalFormRecoveryDirectories = []
+        return directories
     }
 
     func clearProjectContext() async {
