@@ -222,3 +222,14 @@ Verified with **648 passing tests in 63 suites**, zero failures or skips, using 
 
 
 AFK verification repair for ticket 17: rapid visible V2 completions are acknowledged serially with their own observed markers, so a third result cannot remain unread because acknowledgements retriggered SwiftUI's per-frame observation guard. Chat's observation key now tracks completion/synchronization/visibility inputs while the existing service owns confirmed viewed-marker updates. The original hosted-view timeout was reproduced before the fix; its regression now runs ten rapid-completion cases without extra sleeps or increased timeouts. The complete viewed-marker suite passed 26 tests (39 cases), and final full AFK verification passed **642 tests in 63 suites** on 2026-10-09 with zero failures/skips and no result-observer loop diagnostic (`build/afk-logs/20261009-145943-tests-1.log`). Ticket 17 records the finding and correction. Layout and controls are unchanged, so its existing screenshots remain applicable.
+
+## 18: Complete conditional V2 forms on the phone
+
+Commit: `05833e2`, including the ticket's done status and screenshots.
+
+- You can complete supported conditional V2 forms in the native phone form from Chat or Inbox. Fields appear and disappear as earlier string, numeric, Boolean or multiselect answers change.
+- Switching branches keeps your local draft for when you return. Inactive required fields do not block Submit, and their previous answers never travel in the reply or activate another hidden branch.
+- Active fields keep their input constraints and external-action acknowledgements. Recovery and retries use the form's owning session, even when the selected location differs.
+- Unknown or malformed predicates, invalid references and future field types show the OpenCode fallback and disable Submit.
+
+Verified with **658 passing tests in 63 suites on 2026-10-09**, including 16 form tests with service/transport, native-event admission and hosted SwiftUI coverage. Screenshots show the [release branch](screenshots/18-conditional-active.png), [waiting branch](screenshots/18-conditional-waiting.png) and [unsupported fallback](screenshots/18-conditional-unsupported.png). Remote was removed in `77b72ac`; this ticket follows the current direct-connection scope. Live V2 server, physical-device, iPad and enlarged Dynamic Type verification remain unperformed.
