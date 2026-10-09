@@ -58,6 +58,18 @@ Commits: `c345d35`, corrected after review in `78e5e40`, including the ticket's 
 
 Verified after review with 525 passing tests in 56 suites on the dedicated AFK simulator on 2026-10-09. Screenshots show [session outcomes](screenshots/06-session-outcomes.png), [a freshly recovered result](screenshots/06-refreshed-session-outcomes.png), [a failed result read](screenshots/06-failed-outcome-refresh.png), [successful execution](screenshots/06-chat-succeeded.png), [failed execution](screenshots/06-chat-failed.png), [interruption](screenshots/06-chat-interrupted.png), [active work](screenshots/06-chat-working.png), [permission waiting](screenshots/06-chat-permission.png), [form waiting](screenshots/06-chat-form.png), and [unavailable outcome evidence](screenshots/06-chat-unknown.png). Remote was removed in `77b72ac`; this ticket follows the current direct-connection scope. A live two-client V2 server session, physical-device Live Activity run, and manual iPad selection exercise remain unverified; the selection recovery is covered at the service boundary.
 
+## 08: Rebind an open V2 session after its location changes
+
+Commits: `8fee5d0`, including the ticket's done status.
+
+- When another client moves your open session, the phone rereads its canonical location and restores the new project, branch, model catalog, commands, skills and files. Your conversation, typed draft and inline phone attachments stay with the session.
+- New prompts and location-dependent requests use the restored directory. Old repository attachment references and composer selections are cleared, and the Workspace browser returns to the new root. Late responses from the previous directory cannot replace the refreshed chat or workspace.
+- Move events can reach the open chat from either directory; another session's move is ignored. Returning to the app, recovering a stream gap, refreshing status and reopening the session also recover its location.
+- If the server refuses the new location or canonical recovery fails after a known move, the chat keeps your draft and conversation, shows an explicit error with Try Again, and blocks new work until recovery succeeds. It never starts using an event's unverified destination.
+- This observes moves initiated elsewhere. Initiating a move from the phone remains ticket 22.
+
+Verified with 538 passing tests in 57 suites on the dedicated AFK simulator on 2026-10-09. Screenshots show [the rebound chat and command catalog](screenshots/08-rebound-chat.png), [the restored Workspace project and branch](screenshots/08-rebound-files.png), and [a refused rebind with retry](screenshots/08-rebind-failed.png). Direct two-client behavior is covered by the production services with an injected stateful transport; a live V2 server/two-device exercise remains unverified. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
+
 ## 13: Send screenshots and supported photos in V2 prompts
 
 Commits: `c685bb2`, marked done in `b61ed5a`.
