@@ -6,7 +6,7 @@ enum ScreenshotFixtures {
     }
 
     /// Uses the production activity projection, including successful launches
-    /// whose children remain running after the parent's response has ended.
+    /// retaining launch-time running evidence after the parent's response ends.
     static func applySubagentTools(to chat: ChatClient) {
         let sessionID = defaultSession.id
         let messageID = "fixture-subagents"
@@ -22,7 +22,16 @@ enum ScreenshotFixtures {
             ))
         }
         let parts: [OCPart]
-        if ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_PENDING") {
+        if ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_UNKNOWN") {
+            parts = [
+                StreamToolPartSafety.sanitize(OCPart(
+                    id: "unknown-child", sessionID: sessionID, messageID: messageID, type: .tool,
+                    tool: "subagent", state: OCToolState(status: .unknown)
+                )),
+                OCPart(id: "fixture-result", sessionID: sessionID, messageID: messageID, type: .text,
+                       text: "The server reported an unsupported tool state.")
+            ]
+        } else if ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_PENDING") {
             parts = [StreamToolPartSafety.sanitize(OCPart(
                 id: "pending-child", sessionID: sessionID, messageID: messageID, type: .tool,
                 tool: "subagent", state: OCToolState(status: .pending)

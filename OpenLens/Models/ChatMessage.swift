@@ -2109,7 +2109,8 @@ final class ChatMessage: Identifiable {
         let title = agentName ?? fallbackName ?? "Subagent"
         let detail = description ?? prompt ?? stateTitle ?? source ?? stateError ?? ""
 
-        guard taskState != nil || title != "Subagent" || !detail.isEmpty else { return nil }
+        guard (taskState != nil && taskState?.status != .unknown)
+            || title != "Subagent" || !detail.isEmpty else { return nil }
 
         return PersistedSubagentStep(
             id: part.id,
@@ -2135,10 +2136,12 @@ final class ChatMessage: Identifiable {
             if taskState.status == .error { return true }
             // The tool invocation can succeed while its child keeps working.
             // Unknown advisory metadata falls back to the ordinary tool state.
-            switch taskState.metadata?["status"]?.value as? String {
-            case "running": return false
-            case "completed": return true
-            default: break
+            let childStatus = (taskState.metadata?["status"]?.value as? String)
+                .flatMap(OCSubagentStatus.init(rawValue:))
+            switch childStatus {
+            case .running: return false
+            case .completed: return true
+            case nil: break
             }
             return taskState.status == .completed || taskState.status == .error
         }

@@ -114,9 +114,9 @@ nonisolated enum StreamToolPartSafety {
 
         // V2 subagent success can mean that a background child was launched,
         // not that the child finished. Retain only the released status values.
-        if let status = metadata["status"]?.value as? String,
-           status == "running" || status == "completed" {
-            result["status"] = AnyCodable(status)
+        if let rawStatus = metadata["status"]?.value as? String,
+           let status = OCSubagentStatus(rawValue: rawStatus) {
+            result["status"] = AnyCodable(status.rawValue)
         }
 
         return result.isEmpty ? nil : result

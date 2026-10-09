@@ -4,6 +4,20 @@ import Testing
 
 @MainActor
 struct V2SubagentToolTests {
+    @Test(arguments: ["task", "subagent"])
+    func unknownToolStatusWithoutDetailsDoesNotInventWorkingDelegatedWork(_ name: String) throws {
+        let raw = OCEvent(type: "message.part.updated", properties: AnyCodable(["part": [
+            "id": "call_child", "sessionID": "ses_parent", "messageID": "msg_parent", "type": "tool",
+            "tool": name, "state": ["status": "future"]
+        ]]))
+        let message = try preparedMessage(raw)
+        #expect(message.parts.first?.state?.status == .unknown)
+        #expect(!message.assistantSegments.contains { segment in
+            if case .subagent = segment.kind { return true }
+            return false
+        })
+    }
+
     @Test(arguments: ["sessionID", "sessionId", "session_id"])
     func validChildIdentifiersAndReleasedStatusesSurvivePreparation(_ key: String) throws {
         for status in ["running", "completed"] {
@@ -49,6 +63,42 @@ struct V2SubagentToolTests {
         }
     }
 
+    @Test(arguments: ["session.tool.progress", "session.tool.success"])
+    func malformedNativeV2MetadataFallsBackToTheToolState(_ type: String) throws {
+        let malformed: [Any] = [
+            NSNull(), ["future"], "unexpected", 42,
+            ["sessionID": 42, "status": ["running": true]],
+            ["sessionID": "../child", "status": "future"],
+            ["sessionID": String(repeating: "x", count: 257), "status": false]
+        ]
+        for metadata in malformed {
+            var adapter = V2EventAdapter()
+            _ = try adapter.event(event("session.tool.input.started", ["name": "subagent"]), directory: "/work")
+            _ = try adapter.event(event("session.tool.called", ["input": ["agent": "explore", "description": "Inspect the workspace"]]), directory: "/work")
+            // Replace prior valid running evidence with malformed metadata;
+            // an invalid advisory update must not preserve that stale status.
+            _ = try adapter.event(event("session.tool.progress", ["metadata": ["sessionID": "ses_child", "status": "running"]]), directory: "/work")
+            let result = try #require(try adapter.event(event(type, ["metadata": metadata]), directory: "/work"))
+            let message = try preparedMessage(result)
+            #expect(message.parts.first?.state?.metadata == nil)
+            guard case .subagent(let step) = message.assistantSegments.first?.kind else {
+                Issue.record("Malformed native V2 metadata must not hide the tool")
+                return
+            }
+            #expect(step.detail == "Inspect the workspace")
+            #expect(!step.isError)
+            if type == "session.tool.progress" {
+                #expect(message.parts.first?.state?.status == .running)
+                #expect(step.isActive)
+                #expect(!step.isCompleted)
+            } else {
+                #expect(message.parts.first?.state?.status == .completed)
+                #expect(step.isCompleted)
+                #expect(!step.isActive)
+            }
+        }
+    }
+
     @Test(arguments: ["", " ", ".", "..", "../child", "ses/child", "child?x=1", "child\n", "é", String(repeating: "x", count: 257)])
     func invalidChildIdentifierIsDroppedWithoutChangingRunningEvidence(_ identifier: String) throws {
         let message = try preparedMessage(partEvent(metadata: ["sessionID": identifier, "status": "running"]))
@@ -79,10 +129,11 @@ struct V2SubagentToolTests {
     }
 
     @Test(arguments: ["task", "subagent"], ["sessionID", "sessionId", "session_id"])
-    func launchedChildKeepsPermissionAndFormOwnership(_ name: String, _ key: String) throws {
+    func launchedChildStaysWorkingAndKeepsRequestOwnershipAfterParentTurnEnds(_ name: String, _ key: String) throws {
         let chat = ChatClient(demoMode: true)
         chat.currentSession = OCSession(id: "ses_parent", title: "Parent", time: OCSessionTime(created: 1, updated: 1))
-        chat.messages = [ChatMessage(id: "msg_parent", role: .assistant, content: "")]
+        chat.beginExternalResponse()
+        chat.pendingAssistantMessage = ChatMessage(id: "msg_parent", role: .assistant, content: "", isStreaming: true)
         let handler = SSEEventHandler(haptics: HapticController(), liveActivityTracker: LiveActivityTracker(liveActivity: TestLiveActivityProvider()))
         handler.delegate = chat
         var adapter = V2EventAdapter()
@@ -94,7 +145,20 @@ struct V2SubagentToolTests {
         ] {
             if let event = try adapter.event(event(type, extra), directory: "/work") { handler.handleEvent(event) }
         }
-        try expectWorking(try #require(chat.messages.first))
+        try expectWorking(try #require(chat.pendingAssistantMessage))
+        let stepEnded = try #require(try adapter.event(event("session.step.ended", ["finish": "stop"]), directory: "/work"))
+        handler.handleEvent(stepEnded)
+        #expect(chat.pendingAssistantMessage == nil)
+        let finishedParent = try #require(chat.messages.first { $0.id == "msg_parent" })
+        #expect(!finishedParent.isStreaming)
+        #expect(chat.isLoading)
+        // The shared idle projection invokes ChatClient.finishLoading(), so
+        // this ends the parent turn as well as its assistant step.
+        handler.handleEvent(OCEvent(type: "session.status", properties: AnyCodable([
+            "sessionID": "ses_parent", "status": ["type": "idle"]
+        ])))
+        #expect(!chat.isLoading)
+        try expectWorking(finishedParent)
         handler.handleEvent(permissionEvent(sessionID: "ses_unrelated"))
         #expect(chat.pendingPermission == nil)
         handler.handleEvent(permissionEvent(sessionID: "ses_child"))

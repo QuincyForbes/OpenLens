@@ -784,6 +784,13 @@ nonisolated struct OCToolState: Codable, Sendable {
     }
 }
 
+/// Child state reported in V2 subagent tool metadata. This is evidence from
+/// that tool update, rather than a subscription to the child's later outcome.
+nonisolated enum OCSubagentStatus: String, Sendable {
+    case running
+    case completed
+}
+
 nonisolated enum OCToolStatus: String, Codable, Sendable {
     case pending
     case running
