@@ -1008,7 +1008,7 @@ struct MicroRootView: View {
     private var visibleForms: [OCFormRequest] {
         var result = inbox.forms
         if let pending = chatClient.pendingForm,
-           !result.contains(where: { $0.id == pending.id }) {
+           !result.contains(where: { $0.identity == pending.identity }) {
             result.insert(pending, at: 0)
         }
         return result
@@ -1243,7 +1243,7 @@ struct MicroRootView: View {
 
         do {
             try await inboxService.respondToForm(form, answer: answer)
-            if chatClient.pendingForm?.id == form.id {
+            if chatClient.pendingForm?.id == form.id, chatClient.pendingForm?.owner == form.owner {
                 chatClient.pendingForm = nil
                 chatClient.showFormSheet = false
             }
@@ -1263,7 +1263,7 @@ struct MicroRootView: View {
 
         do {
             try await inboxService.cancelForm(form)
-            if chatClient.pendingForm?.id == form.id {
+            if chatClient.pendingForm?.id == form.id, chatClient.pendingForm?.owner == form.owner {
                 chatClient.pendingForm = nil
                 chatClient.showFormSheet = false
             }

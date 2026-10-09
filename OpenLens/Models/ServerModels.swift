@@ -1761,7 +1761,7 @@ nonisolated struct OCQuestionRequest: Codable, Identifiable, Sendable {
 
 /// Only MCP forms may use the wire sentinel "global". They belong to a
 /// location, not a session; recovery binds that location before any operation.
-nonisolated enum OCFormOwner: Equatable, Sendable {
+nonisolated enum OCFormOwner: Hashable, Sendable {
     case session(String)
     case global(directory: String?)
 
@@ -1775,6 +1775,10 @@ nonisolated enum OCFormOwner: Equatable, Sendable {
 
 /// A server-driven v2 form retaining its wire identity and recovered ownership.
 nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
+    nonisolated struct Identity: Hashable, Sendable {
+        let id: String
+        let owner: OCFormOwner
+    }
     let id: String
     let sessionID: String
     let title: String
@@ -1787,6 +1791,7 @@ nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
     }
 
     var isGlobal: Bool { sessionID == "global" }
+    var identity: Identity { Identity(id: id, owner: owner) }
 
     init(
         id: String,

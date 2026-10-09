@@ -1124,8 +1124,13 @@ actor OpenCodeClient {
     /// Fetches pending v2 forms. Session-scoped reads preserve the owning
     /// session without accepting a caller-supplied location; inbox reads use
     /// the active location and bind global MCP owners to the resolved location.
-    func listPendingForms(sessionID: String? = nil) async throws -> [OCFormRequest] {
+    func listPendingForms(sessionID: String? = nil, directory: String? = nil) async throws -> [OCFormRequest] {
         guard usesV2 else { return [] }
+
+        guard sessionID == nil || directory == nil,
+              directory.map(InteractiveFormSafety.fitsGlobalDirectory) ?? true else {
+            throw OpenCodeError.invalidPayload("An explicit form location must be a valid workspace, without a session owner.")
+        }
 
         let forms: [OCFormRequest]
         if let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
@@ -1148,7 +1153,9 @@ actor OpenCodeClient {
                     : form
             }
         } else {
-            let response: OCV2Located<[OCFormRequest]> = try await getV2Located("/api/form")
+            let response: OCV2Located<[OCFormRequest]> = try await getV2Located("/api/form",
+                queryItems: directory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
+                includesLocation: directory == nil)
             forms = response.data.map { $0.recovered(at: response.location.directory) }
         }
 
@@ -1216,8 +1223,7 @@ actor OpenCodeClient {
             }
             return []
         case .global(let directory):
-            guard let directory, directory.hasPrefix("/"), directory.utf8.count <= 4_096,
-                  !directory.contains("\0") else {
+            guard let directory, InteractiveFormSafety.fitsGlobalDirectory(directory) else {
                 throw OpenCodeError.invalidPayload("Refresh Inbox to recover the global form's location.")
             }
             return [URLQueryItem(name: "location[directory]", value: directory)]

@@ -6,6 +6,162 @@ import UIKit
 
 @Suite(.serialized)
 struct OpenCodeV2FormTests {
+    @MainActor @Test func canonicalLocationRefreshReplacesOldFormsEvenIfTheRememberedReadFails() async throws {
+        func body(_ id: String) -> Data {
+            Data("""
+            {"location":{"directory":"/canonical"},"data":[
+              {"id":"\(id)","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]}
+            ]}
+            """.utf8)
+        }
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request /alias": Array(repeating: .init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/canonical"},"data":[]}"#.utf8)), count: 2),
+            "GET /api/form /alias": [.init(statusCode: 200, body: body("frm_old")), .init(statusCode: 200, body: body("frm_new"))],
+            "GET /api/form /canonical": [.init(statusCode: 503, body: Data())],
+        ], matchesLocation: true)
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/alias", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        let initial = try await inbox.loadInbox()
+        #expect(initial.globalForms.map(\.id) == ["frm_old"])
+        let refreshed = try await inbox.loadInbox()
+        #expect(refreshed.warning != nil)
+        #expect(refreshed.globalForms.map(\.id) == ["frm_new"])
+        #expect(refreshed.globalForms.first?.globalDirectory == "/canonical")
+    }
+
+    @MainActor @Test func overlappingInboxLoadsUseTheNewWorkspaceAfterAHeldOldWorkspaceRead() async throws {
+        let gate = FormReadGate()
+        let a = Data(#"""
+        {"location":{"directory":"/a"},"data":[
+          {"id":"frm_global","sessionID":"global","title":"MCP A","fields":[{"key":"ok","type":"boolean"}]},
+          {"id":"frm_a","sessionID":"ses_a","title":"Session A","fields":[{"key":"ok","type":"boolean"}]}
+        ]}
+        """#.utf8)
+        let b = Data(#"""
+        {"location":{"directory":"/b"},"data":[
+          {"id":"frm_b","sessionID":"ses_b","title":"Session B","fields":[{"key":"ok","type":"boolean"}]}
+        ]}
+        """#.utf8)
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request /a": [.init(statusCode: 200, body: Data(#"{"location":{"directory":"/a"},"data":[]}"#.utf8))],
+            "GET /api/permission/request /b": [.init(statusCode: 200, body: Data(#"{"location":{"directory":"/b"},"data":[]}"#.utf8))],
+            "GET /api/form /a": Array(repeating: .init(statusCode: 200, body: a), count: 2),
+            "GET /api/form /b": [.init(statusCode: 200, body: b)],
+        ], matchesLocation: true, gate: gate)
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/a", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        async let oldRead = inbox.loadInbox()
+        for _ in 0..<500 {
+            if await gate.isHeld { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await gate.isHeld)
+        await connection.setProjectContext(directory: "/b")
+        async let newRead = inbox.loadInbox()
+        await gate.release()
+        for snapshot in try await [oldRead, newRead] {
+            #expect(snapshot.warning == nil)
+            #expect(snapshot.globalForms.first?.globalDirectory == "/a")
+            #expect(snapshot.sessionForms.map(\.id) == ["frm_b"])
+        }
+    }
+
+    @MainActor @Test func inboxDeduplicatesGlobalFormsByLocationAndIDAndRetainsThemOnFailedReads() async throws {
+        func body(_ directory: String, includeGlobal: Bool = true) -> Data {
+            Data("""
+            {"location":{"directory":"\(directory)"},"data":[
+              {"id":"frm_session","sessionID":"ses\(directory.dropFirst())","title":"Session","fields":[{"key":"ok","type":"boolean"}]}
+              \(includeGlobal ? #",{"id":"frm_shared","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]},{"id":"frm_shared","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]}"# : "")
+            ]}
+            """.utf8)
+        }
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request /a": [.init(statusCode: 200, body: Data(#"{"location":{"directory":"/a"},"data":[]}"#.utf8))],
+            "GET /api/permission/request /b": Array(repeating: .init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/b"},"data":[]}"#.utf8)), count: 3),
+            "GET /api/form /a": [.init(statusCode: 200, body: body("/a")), .init(statusCode: 503, body: Data()),
+                .init(statusCode: 200, body: body("/a", includeGlobal: false))],
+            "GET /api/form /b": Array(repeating: .init(statusCode: 200, body: body("/b")), count: 3),
+        ], matchesLocation: true)
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/a", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        let initial = try await inbox.loadInbox()
+        #expect(initial.globalForms.count == 1)
+        await connection.setProjectContext(directory: "/b")
+        let failed = try await inbox.loadInbox()
+        #expect(failed.warning != nil)
+        #expect(failed.globalForms.count == 2)
+        #expect(Set(failed.globalForms.compactMap(\.globalDirectory)) == ["/a", "/b"])
+        #expect(failed.sessionForms.map(\.sessionID) == ["sesb"])
+        let settled = try await inbox.loadInbox()
+        #expect(settled.warning == nil)
+        #expect(settled.globalForms.count == 1)
+        #expect(settled.globalForms.first?.globalDirectory == "/b")
+        _ = try await inbox.loadInbox()
+        #expect(transport.recordedRequests().filter { $0.path == "/api/form" && $0.queryItems["location[directory]"] == "/a" }.count == 3)
+    }
+
+    @MainActor @Test func inboxRecoversRememberedGlobalFormsAfterChatSwitchesWorkspaceAndForgetsSettledLocations() async throws {
+        func located(_ directory: String, _ ids: [(String, String)]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["location": ["directory": directory], "data": ids.map { id, owner in
+                ["id": id, "sessionID": owner, "title": id, "fields": [["key": "ok", "type": "boolean"]]] as [String: Any]
+            }])
+        }
+        let pendingA = try located("/a", [("frm_reply", "global"), ("frm_cancel", "global"), ("frm_a_session", "ses_a")])
+        let cancelA = try located("/a", [("frm_cancel", "global"), ("frm_a_session", "ses_a")])
+        let settledA = try located("/a", [("frm_a_session", "ses_a")])
+        let pendingB = try located("/b", [("frm_b_session", "ses_b")])
+        let transport = V2FormTransport(pathResponses: [
+            "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
+            "GET /api/permission/request /a": [.init(statusCode: 200, body: try located("/a", []))],
+            "GET /api/permission/request /b": Array(repeating: .init(statusCode: 200, body: try located("/b", [])), count: 4),
+            "GET /api/form /a": [.init(statusCode: 200, body: pendingA), .init(statusCode: 200, body: pendingA),
+                .init(statusCode: 200, body: cancelA), .init(statusCode: 200, body: settledA)],
+            "GET /api/form /b": Array(repeating: .init(statusCode: 200, body: pendingB), count: 4),
+            "POST /api/session/global/form/frm_reply/reply": [.init(statusCode: 204, body: Data())],
+            "DELETE /api/session/global/form/frm_cancel": [.init(statusCode: 204, body: Data())],
+        ], matchesLocation: true)
+        let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/a", transport: transport)
+        let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
+        let inbox = InboxService(connection: connection)
+        let initial = try await inbox.loadInbox()
+        #expect(initial.globalForms.map(\.id) == ["frm_reply", "frm_cancel"])
+        let chat = ChatClient(connection: connection, liveActivity: TestLiveActivityProvider(),
+            sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
+            providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
+            savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore())
+        // Exercise the production workspace-restoration path called when opening a chat.
+        await chat.restoreProjectContext(for: OCSession(id: "ses_b", directory: "/b", title: "Chat in B", time: .init(created: 0, updated: 0)))
+        #expect(await client.currentContextDirectory() == "/b")
+        let switched = try await inbox.loadInbox()
+        #expect(switched.warning == nil)
+        #expect(switched.globalForms.map(\.id) == ["frm_reply", "frm_cancel"])
+        #expect(switched.sessionForms.map(\.id) == ["frm_b_session"])
+        #expect(switched.pendingRequestCount == 3)
+        let reply = try #require(switched.globalForms.first { $0.id == "frm_reply" })
+        try await inbox.respondToForm(reply, answer: ["ok": .boolean(false)])
+        let afterReply = try await inbox.loadInbox()
+        #expect(afterReply.globalForms.map(\.id) == ["frm_cancel"])
+        try await inbox.cancelForm(try #require(afterReply.globalForms.first))
+        let afterCancel = try await inbox.loadInbox()
+        #expect(afterCancel.globalForms.isEmpty)
+        #expect(afterCancel.sessionForms.map(\.id) == ["frm_b_session"])
+        let requestsBeforeFinalLoad = transport.recordedRequests().count
+        _ = try await inbox.loadInbox()
+        let finalRequests = transport.recordedRequests().dropFirst(requestsBeforeFinalLoad)
+        #expect(!finalRequests.contains { $0.path == "/api/form" && $0.queryItems["location[directory]"] == "/a" })
+        let operations = transport.recordedRequests().filter { $0.method != "GET" }
+        #expect(operations.map(\.path) == ["/api/session/global/form/frm_reply/reply", "/api/session/global/form/frm_cancel"])
+        #expect(operations.allSatisfy { $0.queryItems == ["location[directory]": "/a"] })
+    }
+
     @MainActor @Test(arguments: [
         #"{"key":"future","type":"server-control","title":"Future control"}"#,
         #"{"key":"future","type":"string","when":[{"key":"ok","op":"future","value":true}]}"#,
@@ -51,6 +207,7 @@ struct OpenCodeV2FormTests {
         await #expect(throws: OpenCodeError.self) { try await inbox.respondToForm(unbound, answer: ["ok": .boolean(true)]) }
         await #expect(throws: OpenCodeError.self) { try await inbox.cancelForm(unbound) }
         for directory in ["", "relative/path", "/bad\0path", "/" + String(repeating: "x", count: 4_096)] {
+            await #expect(throws: OpenCodeError.self) { _ = try await client.listPendingForms(directory: directory) }
             await #expect(throws: OpenCodeError.self) {
                 try await client.replyToForm(owner: .global(directory: directory), formID: "frm_global", answer: [:])
             }
@@ -65,6 +222,9 @@ struct OpenCodeV2FormTests {
         }
         await #expect(throws: OpenCodeError.self) { try await client.replyToForm(sessionID: "global", formID: "frm_global", answer: [:]) }
         await #expect(throws: OpenCodeError.self) { try await client.cancelForm(sessionID: "global", formID: "frm_global") }
+        await #expect(throws: OpenCodeError.self) {
+            _ = try await client.listPendingForms(sessionID: "ses_owner", directory: "/workspace/mcp")
+        }
         #expect(transport.recordedRequests().map(\.path) == ["/api/info"])
     }
 
@@ -94,22 +254,31 @@ struct OpenCodeV2FormTests {
         let located = Data(#"""
         {"location":{"directory":"/canonical/mcp"},"data":[
           {"id":"frm_global","sessionID":"global","title":"MCP","fields":[{"key":"ok","type":"boolean"}]},
+          {"id":"frm_cancel","sessionID":"global","title":"Cancel MCP","fields":[{"key":"ok","type":"boolean"}]},
           {"id":"frm_session","sessionID":"ses_owner","title":"Session","fields":[{"key":"ok","type":"boolean"}]}
         ]}
         """#.utf8)
         let transport = V2FormTransport(pathResponses: [
             "GET /api/info": [.init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse)],
-            "GET /api/permission/request": Array(repeating: .init(statusCode: 200,
-                body: Data(#"{"location":{"directory":"/canonical/mcp"},"data":[]}"#.utf8)), count: 3),
-            "GET /api/form": [.init(statusCode: 503, body: Data()),
-                .init(statusCode: 200, body: located), .init(statusCode: 200, body: located)],
+            "GET /api/permission/request /canonical/mcp": Array(repeating: .init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/canonical/mcp"},"data":[]}"#.utf8)), count: 2),
+            "GET /api/permission/request /another/chat": [.init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/another/chat"},"data":[]}"#.utf8))],
+            "GET /api/form /canonical/mcp": [.init(statusCode: 503, body: Data()),
+                .init(statusCode: 200, body: located), .init(statusCode: 200, body: Data(#"""
+                {"location":{"directory":"/canonical/mcp"},"data":[
+                  {"id":"frm_cancel","sessionID":"global","title":"Cancel MCP","fields":[{"key":"ok","type":"boolean"}]}
+                ]}
+                """#.utf8))],
+            "GET /api/form /another/chat": [.init(statusCode: 200,
+                body: Data(#"{"location":{"directory":"/another/chat"},"data":[]}"#.utf8))],
             "POST /api/session/global/form/frm_global/reply": [
                 .init(statusCode: 503, body: Data()), .init(statusCode: 204, body: Data())],
-            "DELETE /api/session/global/form/frm_global": [
+            "DELETE /api/session/global/form/frm_cancel": [
                 .init(statusCode: 503, body: Data()), .init(statusCode: 204, body: Data())],
-        ])
+        ], matchesLocation: true)
         let client = OpenCodeClient(baseURL: URL(string: "https://example.com")!,
-            contextDirectory: "/requested/mcp", transport: transport)
+            contextDirectory: "/canonical/mcp", transport: transport)
         let connection = ConnectionManager(testClient: client, capabilities: try await client.probeCapabilities())
         let inbox = InboxService(connection: connection)
         let failed = try await inbox.loadInbox()
@@ -117,15 +286,18 @@ struct OpenCodeV2FormTests {
         #expect(failed.warning != nil)
         let recovered = try await inbox.loadInbox()
         #expect(recovered.warning == nil)
-        #expect(recovered.globalForms.map(\.id) == ["frm_global"])
+        #expect(recovered.globalForms.map(\.id) == ["frm_global", "frm_cancel"])
         #expect(recovered.sessionForms.map(\.id) == ["frm_session"])
-        #expect(recovered.pendingRequestCount == 2)
+        #expect(recovered.pendingRequestCount == 3)
         let global = try #require(recovered.globalForms.first)
         #expect(global.owner == .global(directory: "/canonical/mcp"))
         await client.updateContextDirectory("/another/chat")
         await #expect(throws: OpenCodeError.self) { try await inbox.respondToForm(global, answer: ["ok": .boolean(true)]) }
         try await inbox.respondToForm(global, answer: ["ok": .boolean(false)])
         let reopened = try await inbox.loadInbox()
+        #expect(reopened.warning == nil)
+        #expect(reopened.globalForms.map(\.id) == ["frm_cancel"])
+        #expect(reopened.sessionForms.isEmpty)
         let cancel = try #require(reopened.globalForms.first)
         await #expect(throws: OpenCodeError.self) { try await inbox.cancelForm(cancel) }
         try await inbox.cancelForm(cancel)
@@ -911,15 +1083,21 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
     private let lock = NSLock()
     private var responses: [Response]
     private var pathResponses: [String: [Response]]?
+    private let matchesLocation: Bool
+    private let gate: FormReadGate?
     private var requests: [RecordedRequest] = []
 
     init(responses: [Response]) {
         self.responses = responses
+        self.matchesLocation = false
+        self.gate = nil
     }
 
-    init(pathResponses: [String: [Response]]) {
+    init(pathResponses: [String: [Response]], matchesLocation: Bool = false, gate: FormReadGate? = nil) {
         self.responses = []
         self.pathResponses = pathResponses
+        self.matchesLocation = matchesLocation
+        self.gate = gate
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -930,6 +1108,9 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
                     result[item.name] = value
                 }
             }
+        if url.path == "/api/form", queryItems["location[directory]"] == "/a" {
+            await gate?.holdFirstRead()
+        }
         let response = try lock.withLock { () throws -> Response in
             requests.append(.init(
                 method: request.httpMethod ?? "GET",
@@ -938,7 +1119,9 @@ nonisolated private final class V2FormTransport: OpenCodeTransport, @unchecked S
                 body: request.httpBody
             ))
             if pathResponses != nil {
-                let key = "\(request.httpMethod ?? "GET") \(url.path)"
+                let locationSuffix = matchesLocation && ["/api/form", "/api/permission/request"].contains(url.path)
+                    ? " \(queryItems["location[directory]"] ?? "<missing location>")" : ""
+                let key = "\(request.httpMethod ?? "GET") \(url.path)\(locationSuffix)"
                 guard var queued = pathResponses?[key], !queued.isEmpty else { throw MissingV2FormResponse() }
                 let response = queued.removeFirst()
                 pathResponses?[key] = queued
@@ -979,3 +1162,20 @@ nonisolated private final class UnusedV2FormEventStream: OpenCodeEventStream, @u
 }
 
 nonisolated private struct FormUIWaitTimeout: Error {}
+
+private actor FormReadGate {
+    private var held = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    var isHeld: Bool { continuation != nil }
+
+    func holdFirstRead() async {
+        guard !held else { return }
+        held = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}

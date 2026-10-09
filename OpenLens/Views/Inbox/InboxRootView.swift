@@ -267,7 +267,7 @@ struct InboxRootView: View {
                 emptyRow(symbol: "checkmark.circle", text: "No pending forms from the agent.")
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(forms.enumerated()), id: \.element.id) { index, form in
+                    ForEach(Array(forms.enumerated()), id: \.element.identity) { index, form in
                         VStack(alignment: .leading, spacing: 14) {
                             HStack(alignment: .top, spacing: 12) {
                                 itemBadge(title: form.isGlobal ? "MCP" : "Form", tint: Color.appPrimary)

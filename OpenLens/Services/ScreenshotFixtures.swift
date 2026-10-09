@@ -581,6 +581,14 @@ enum ScreenshotFixtures {
         guard let global = try? JSONDecoder().decode(OCFormRequest.self, from: Data(wire.utf8)) else {
             preconditionFailure("Global screenshot form must decode.")
         }
+        if ["remembered", "multiple"].contains(scenario) {
+            let remembered = OCFormRequest(id: global.id, sessionID: "global", title: "Confirm MCP in Tools",
+                fields: global.fields, globalDirectory: "/workspace/Tools")
+            let forms = scenario == "multiple"
+                ? [global.recovered(at: "/workspace/OpenLens"), remembered, standardScreenshotForm]
+                : [remembered, standardScreenshotForm]
+            return InboxSnapshot(permissions: [], questions: [], forms: forms)
+        }
         return InboxSnapshot(permissions: [], questions: [],
             forms: [global.recovered(at: "/workspace/OpenLens"), standardScreenshotForm])
     }
