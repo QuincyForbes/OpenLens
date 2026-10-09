@@ -20,12 +20,15 @@ enum ScreenshotFixtures {
     /// Decode the same tagged records as history, then use the production
     /// transcript projection. Variants fit all supported context kinds on screen.
     @MainActor static func applyContextTimeline(to chat: ChatClient) {
+        let shellCommand = ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_WRAPPING_SUMMARY")
+            ? "swift test --filter V2ContextTimelineTests --configuration debug"
+            : "swift test"
         let shellText = scrollsToContextDetailsEnd
             ? String(repeating: "Check passed. ", count: 4_000)
             : #"All 24 checks passed.\n/workspace/OpenLens"#
         let records = showsContextResults ? #"""
         [
-          {"id":"fixture-shell","type":"shell","time":{"created":1,"completed":2},"shellID":"shell_checks","command":"swift test","status":"completed","exit":0,"output":{"text":"\#(shellText)","truncated":true}},
+          {"id":"fixture-shell","type":"shell","time":{"created":1,"completed":2},"shellID":"shell_checks","command":"\#(shellCommand)","status":"completed","exit":0,"output":{"text":"\#(shellText)","truncated":true}},
           {"id":"fixture-compaction","type":"compaction","time":{"created":3},"status":"completed","reason":"manual","summary":"The feature is implemented and verified.","recent":"Keep the current branch for review."},
           {"id":"fixture-reply","type":"assistant","time":{"created":4},"content":[{"type":"text","text":"The checks passed. Ready for review."}]},
           {"id":"fixture-idle","type":"idle","time":{"created":5},"outcome":"succeeded"}

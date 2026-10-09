@@ -55,10 +55,12 @@ struct SessionContextTimelineRow: View {
                 Text(entry.title)
                     .font(isRetroChat ? RetroChatStyle.headerFont : .subheadline.weight(.medium))
                     .foregroundStyle(ink)
+                    .multilineTextAlignment(.leading)
                 if !entry.summary.isEmpty {
                     Text(entry.summary)
                         .font(isRetroChat ? RetroChatStyle.smallFont : .caption)
                         .foregroundStyle(secondaryInk)
+                        .multilineTextAlignment(.leading)
                         .lineLimit(isExpanded ? nil : 2)
                 }
             }
