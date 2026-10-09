@@ -75,16 +75,17 @@ Verified after both reviews with 546 passing tests in 57 suites on the dedicated
 
 ## 09: Show running and completed V2 subagent tools
 
-Commit: `7e179e6`, including the ticket's done status.
+Commits: `7e179e6`, including the ticket's done status, corrected after review in `c030ad8`.
 
 - Legacy `task` tools and V2 `subagent` tools show the same delegated-work cards in streamed and reopened conversations.
-- A successful background launch stays Working while its child metadata says running, even after the parent's reply ends. Completed children show Done; failed calls show Error.
-- A launch shows a Subagent card before its agent or task details arrive. Its Working label remains visible even without a detail line.
+- Cards preserve child state reported by tool progress/results. A successful background launch shows Working after the parent's reply ends. Done applies when completion is reported in the tool result itself; failed calls show Error.
+- Background cards do not follow later child completion yet. With only launch-time running evidence they remain Working, including the shimmer and after reopening history, even once the child finishes. Ticket 11 must deliver the later synthetic result.
+- A launch with a known tool state shows a Subagent card before its agent or task details arrive. Its Working label remains visible even without a detail line. An unknown tool status without useful details stays hidden instead of inventing a Working card.
 - Unknown or malformed child metadata leaves the tool and transcript readable. Supported status values and validated child-session identifiers survive stream safety preparation; unsafe identifiers are dropped rather than shortened or used as session links.
 - Permissions and forms from linked children retain their owning session. Unrelated requests and links from a previous parent do not become requests for the newly opened chat.
 - Later delivery of synthetic background results remains ticket 11; opening child conversations remains ticket 23.
 
-Verified with 554 passing tests in 58 suites on the dedicated AFK simulator on 2026-10-09. Screenshots show [Working, Done and Error cards](screenshots/09-subagent-tools.png) and [a launch before input arrives](screenshots/09-subagent-pending.png), with the chat tab bar hidden. No live V2 server/two-device run, physical-device run or manual iPad navigation was performed. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
+Verified after review with 556 passing tests in 58 suites on the dedicated AFK simulator on 2026-10-09, including parent-turn completion followed by child permissions/forms and malformed native V2 progress/success metadata. Screenshots show [Working, Done and Error cards](screenshots/09-subagent-tools.png), [a launch before input arrives](screenshots/09-subagent-pending.png), and [an unknown status without an invented Working card](screenshots/09-subagent-unknown.png), with the chat tab bar hidden. No live V2 server/two-device run, physical-device run or manual iPad navigation was performed. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
 
 ## 13: Send screenshots and supported photos in V2 prompts
 
