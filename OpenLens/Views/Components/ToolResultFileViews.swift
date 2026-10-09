@@ -129,12 +129,16 @@ struct ToolResultFilePreview: View {
                     }
                 }
         }
-        .task(id: file.id) {
+        .task(id: "\(file.id):\(sessionDirectory ?? "")") {
+            loadState = .loading
             do {
-                loadState = .loaded(try await workspaceService.loadToolResultFile(file, sessionDirectory: sessionDirectory))
+                let content = try await workspaceService.loadToolResultFile(file, sessionDirectory: sessionDirectory)
+                guard !Task.isCancelled else { return }
+                loadState = .loaded(content)
             } catch is CancellationError {
                 return
             } catch {
+                guard !Task.isCancelled else { return }
                 loadState = .failed((error as? LocalizedError)?.errorDescription ?? AppText.toolFileCouldNotOpen)
             }
         }

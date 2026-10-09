@@ -1,6 +1,14 @@
 import Foundation
 
 enum ScreenshotFixtures {
+    static var showsSessionMove: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_MOVE") || failsSessionRebind
+    }
+
+    static var failsSessionRebind: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_REBIND_FAILED")
+    }
+
     static var showsExecutionOutcomes: Bool {
         ProcessInfo.processInfo.arguments.contains("SCREENSHOT_EXECUTION_OUTCOMES")
     }
@@ -128,9 +136,9 @@ enum ScreenshotFixtures {
     }
 
     static let projectID = "proj_openlens_ios"
-    static let projectName = "OpenLens"
-    static let projectPath = "/workspace/OpenLens"
-    static let branchName = "feature/app-store-assets"
+    static let projectName = showsSessionMove && !failsSessionRebind ? "OpenLens-feature" : "OpenLens"
+    static let projectPath = "/workspace/" + projectName
+    static let branchName = showsSessionMove && !failsSessionRebind ? "feature/session-move" : "feature/app-store-assets"
 
     private static let nowMilliseconds = Date().timeIntervalSince1970 * 1000
     private static let hourMilliseconds = 60.0 * 60.0 * 1000.0
@@ -357,7 +365,11 @@ enum ScreenshotFixtures {
     }
 
     static var defaultSession: OCSession {
-        session(withID: defaultSessionID) ?? sessions[0]
+        if showsSessionMove {
+            return OCSession(id: defaultSessionID, directory: "/workspace/OpenLens-feature",
+                             title: "Continue the moved session", time: .init(created: nowMilliseconds, updated: nowMilliseconds))
+        }
+        return session(withID: defaultSessionID) ?? sessions[0]
     }
 
     static func reviewSnapshot(sessionID: String) -> SessionReviewSnapshot {
@@ -443,7 +455,9 @@ enum ScreenshotFixtures {
         time: OCProjectTime(created: nowMilliseconds - (42 * dayMilliseconds), initialized: nowMilliseconds - (42 * dayMilliseconds))
     )
 
-    private static let commands: [WorkspaceCommandItem] = [
+    private static let commands: [WorkspaceCommandItem] = showsSessionMove && !failsSessionRebind ? [
+        WorkspaceCommandItem(id: "feature-test", title: "/feature-test", description: "Run tests in the feature worktree.", prompt: "/feature-test")
+    ] : [
         WorkspaceCommandItem(id: "review", title: "/review", description: "Summarize the current diff with risks and open questions.", prompt: "/review"),
         WorkspaceCommandItem(id: "test", title: "/test", description: "Run the focused test target for the selected changes.", prompt: "/test OpenLensTests"),
         WorkspaceCommandItem(id: "ship", title: "/ship", description: "Prepare release notes and final polish tasks.", prompt: "/ship")
@@ -545,6 +559,9 @@ enum ScreenshotFixtures {
     }
 
     static func repositoryEntries(at relativePath: String) -> [RepositoryEntry] {
+        if showsSessionMove && !failsSessionRebind, relativePath.isEmpty {
+            return [RepositoryEntry(path: "Feature.swift", name: "Feature.swift", isDirectory: false)]
+        }
         switch relativePath {
         case "":
             return [
@@ -593,6 +610,10 @@ enum ScreenshotFixtures {
     }
 
     private static func fileItems(for path: String) -> [WorkspaceFileItem] {
+        if showsSessionMove && !failsSessionRebind, path == "." {
+            return [WorkspaceFileItem(path: "Feature.swift", name: "Feature.swift",
+                                      absolutePath: projectPath + "/Feature.swift", kind: .file)]
+        }
         switch path {
         case ".":
             return rootFileItems

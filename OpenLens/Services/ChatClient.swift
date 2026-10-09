@@ -10,6 +10,12 @@ enum ChatResponseState: Equatable {
     case failed
 }
 
+enum SessionLocationState: Equatable {
+    case ready
+    case rebinding
+    case failed(String)
+}
+
 struct QueuedPrompt: Identifiable, Equatable {
     enum State: Equatable {
         /// Sent by this client; the server has not confirmed admission yet.
@@ -134,6 +140,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     var isUndoingMessage: Bool = false
     var responseState: ChatResponseState = .idle
     var errorMessage: String?
+    private(set) var sessionLocationState: SessionLocationState = .ready
+    var sessionLocationError: String? {
+        if case .failed(let error) = sessionLocationState { return error }
+        return nil
+    }
 
     /// Incremented when the chat should programmatically snap to the bottom.
     var scrollAnchor: UInt = 0
@@ -847,7 +858,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     var isRecordedReplayMode: Bool { recordedReplay != nil }
     var isOfflinePreviewMode: Bool { isDemoMode || isRecordedReplayMode }
     var isConnected: Bool { connection?.isConnected ?? isOfflinePreviewMode }
-    var canCompose: Bool { !isRecordedReplayMode }
+    var canCompose: Bool { !isRecordedReplayMode && sessionLocationState == .ready }
     var showsComposer: Bool { !isRecordedReplayMode }
     var isStoppingResponse: Bool { responseState == .stopping }
     var supportsStreamRecording: Bool {
@@ -897,6 +908,8 @@ final class ChatClient: SSEEventHandlerDelegate {
     @ObservationIgnored private var streamSynchronizationTask: Task<Void, Never>?
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
+    @ObservationIgnored private var sessionLoadToken: UUID?
+    @ObservationIgnored private var providerLoadToken = UUID()
     private(set) var isStreamSynchronized = true
 
     /// Duration before a pending question is auto-rejected (5 minutes).
@@ -1416,7 +1429,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             lastCompletedActivity = nil
             errorMessage = nil
             // Auto-start demo playback after session is ready
-            if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
+            if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
+                applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
                 ScreenshotFixtures.applyExecutionOutcome(to: self)
             } else {
                 demoPlayer?.play(demoScript)
@@ -1465,7 +1480,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             currentActivity = nil
             lastCompletedActivity = nil
             errorMessage = nil
-            if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
+            if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
+                applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes {
                 ScreenshotFixtures.applyExecutionOutcome(to: self)
             } else {
                 demoPlayer?.play(demoScript)
@@ -1483,10 +1500,30 @@ final class ChatClient: SSEEventHandlerDelegate {
         // model or agent since the list loaded. v2 sessions own that selection,
         // so open them from a fresh snapshot and fall back to the list entry.
         var session = session
-        if usesV2SessionAPI, let sessionsService,
-           let freshSession = try? await sessionsService.getSession(id: session.id) {
-            guard !Task.isCancelled else { return }
-            session = freshSession
+        let token = UUID()
+        sessionLoadToken = token
+        let reopeningCurrentSession = usesV2SessionAPI && currentSession?.id == session.id
+        let generation = streamSynchronizationGeneration
+        let revision = connection?.projectContextRevision
+        if usesV2SessionAPI, let sessionsService {
+            do {
+                session = try await sessionsService.getSession(id: session.id)
+            } catch {
+                guard !Task.isCancelled, sessionLoadToken == token else { return }
+                // A stale list entry cannot clear a known failed handoff when
+                // the canonical read itself is unavailable.
+                if reopeningCurrentSession, sessionLocationState != .ready {
+                    let message = "Failed to rebind session location: \(error.localizedDescription)"
+                    sessionLocationState = .failed(message)
+                    errorMessage = message
+                    return
+                }
+            }
+        }
+        guard !Task.isCancelled, sessionLoadToken == token else { return }
+        if reopeningCurrentSession {
+            guard currentSession?.id == session.id, generation == streamSynchronizationGeneration,
+                  revision == connection?.projectContextRevision else { return }
         }
 
         // Session-scoped API calls can be read without a location, but the chat
@@ -1494,8 +1531,15 @@ final class ChatClient: SSEEventHandlerDelegate {
         // project context. Switch it before loading the transcript so a session
         // opened from another directory does not inherit the previously viewed
         // project's name, branch, commands, or files.
-        await restoreProjectContext(for: session)
-        guard !Task.isCancelled else { return }
+        if reopeningCurrentSession,
+           currentSession?.directory != session.directory || sessionLocationState != .ready {
+            do {
+                try await applyRecoveredSession(session, generation: generation)
+            } catch { return }
+        } else {
+            await restoreProjectContext(for: session)
+        }
+        guard !Task.isCancelled, sessionLoadToken == token else { return }
 
         // Attachments picked for one session must never be sent to another.
         if currentSession?.id != session.id {
@@ -1527,18 +1571,97 @@ final class ChatClient: SSEEventHandlerDelegate {
         await connection?.setProjectContext(directory: directory)
     }
 
+    private func applyScreenshotSessionLocation() {
+        messages = [
+            ChatMessage(id: "move-fixture-user", role: .user, content: "Continue this session in the feature worktree."),
+            ChatMessage(id: "move-fixture-assistant", role: .assistant,
+                        content: "The conversation is preserved. The desktop moved this session to /workspace/OpenLens-feature.")
+        ]
+        inputText = ScreenshotFixtures.failsSessionRebind ? "Keep working on the feature" : "/"
+        if ScreenshotFixtures.failsSessionRebind {
+            let message = "Failed to rebind session location (/workspace/OpenLens-feature): Access refused (HTTP 403)."
+            sessionLocationState = .failed(message)
+            errorMessage = message
+            isStreamSynchronized = false
+        }
+    }
+
+    /// All canonical reads share the same location handoff. The session keeps
+    /// its identity/history; only authorized workspace context is replaced.
+    private func applyRecoveredSession(_ session: OCSession, generation: UInt) async throws {
+        let isCurrent = { !Task.isCancelled && self.currentSession?.id == session.id
+            && self.streamSynchronizationGeneration == generation }
+        guard isCurrent() else { throw CancellationError() }
+        let oldDirectory = currentSession?.directory
+        let previousDirectory = connection?.selectedProjectDirectory
+        currentSession = session
+        guard usesV2SessionAPI else { return }
+        if previousDirectory != nil, session.directory == nil {
+            let error = OpenCodeError.invalidPayload("The session has no canonical directory.")
+            let message = "Failed to rebind session location: \(error.localizedDescription)"
+            sessionLocationState = .failed(message)
+            errorMessage = message
+            isStreamSynchronized = false
+            throw error
+        }
+        if let previousDirectory,
+           let directory = session.directory, previousDirectory != directory {
+            sessionLocationState = .rebinding
+            do {
+                try await connection?.rebindProjectContext(directory: directory, isCurrent: isCurrent)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard isCurrent() else { throw CancellationError() }
+                let message = "Failed to rebind session location (\(directory)): \(error.localizedDescription)"
+                sessionLocationState = .failed(message)
+                errorMessage = message
+                isStreamSynchronized = false
+                throw error
+            }
+        } else {
+            await restoreProjectContext(for: session)
+        }
+        guard isCurrent() else { throw CancellationError() }
+        if previousDirectory != connection?.selectedProjectDirectory {
+            // Relative server references and cached working-copy diffs belonged
+            // to the previous location. Keep inline phone files and the draft.
+            composerAttachments.removeAll { if case .serverFile = $0 { true } else { false } }
+            turnDiffTasksByAssistantID.values.forEach { $0.cancel() }
+            turnDiffTasksByAssistantID.removeAll()
+            resolvedTurnDiffAssistantIDs.removeAll()
+            turnFileDetailCache.removeAll()
+            turnFileDetailCacheOrder.removeAll()
+            messages.forEach { $0.setTurnFileChanges([]) }
+            providers = []
+            await loadProviders()
+        } else if oldDirectory != session.directory {
+            composerAttachments.removeAll { if case .serverFile = $0 { true } else { false } }
+        }
+        guard isCurrent() else { throw CancellationError() }
+        sessionLocationState = .ready
+        if errorMessage?.hasPrefix("Failed to rebind session location") == true {
+            errorMessage = nil
+        }
+    }
+
     @discardableResult
     func loadMessages(syncModelSelection: Bool = true) async -> Bool {
         guard !isOfflinePreviewMode, let session = currentSession else { return false }
+        let generation = streamSynchronizationGeneration
+        let revision = connection?.projectContextRevision
+        let isCurrent = { !Task.isCancelled && self.currentSession?.id == session.id
+            && self.streamSynchronizationGeneration == generation
+            && self.connection?.projectContextRevision == revision }
 
         // Read the inbox before the transcript: an entry delivered in between
         // then appears in both and is shown once, rather than in neither.
         var inboxRecovered = false
         do {
             inboxRecovered = await recoverSessionInbox() == .current
-            guard !Task.isCancelled, currentSession?.id == session.id else { return false }
+            guard isCurrent() else { return false }
             let loaded = try await messagesService!.loadMessages(sessionID: session.id)
-            guard !Task.isCancelled, currentSession?.id == session.id else { return false }
+            guard isCurrent() else { return false }
             let loadedIDs = Set(loaded.map(\.id))
             queuedPrompts.removeAll { prompt in
                 prompt.state == .queued && loadedIDs.contains(prompt.messageID)
@@ -1567,7 +1690,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         } catch is CancellationError {
             return false
         } catch {
-            guard currentSession?.id == session.id else { return false }
+            guard isCurrent() else { return false }
             self.errorMessage = "Failed to load messages: \(error.localizedDescription)"
             return false
         }
@@ -1579,6 +1702,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func unloadSession(ifMatching sessionID: String) {
         guard currentSession?.id == sessionID else { return }
+        sessionLoadToken = nil
         resetSessionState()
         currentSession = nil
         inputText = ""
@@ -1601,6 +1725,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// for locally simulated and read-only chat modes.
     func canUndo(_ message: ChatMessage) -> Bool {
         message.role == .user
+            && canCompose
             && !isLoading
             && !isQueueingPrompt
             && !isUndoingMessage
@@ -1690,12 +1815,16 @@ final class ChatClient: SSEEventHandlerDelegate {
               let sessionsService
         else { return false }
 
+        let generation = streamSynchronizationGeneration
+        let revision = connection?.projectContextRevision
         do {
             let session = try await sessionsService.getSession(id: sessionID)
-            guard currentSession?.id == sessionID else { return false }
-            currentSession = session
+            guard currentSession?.id == sessionID, revision == connection?.projectContextRevision else { return false }
+            try await applyRecoveredSession(session, generation: generation)
+            let boundRevision = connection?.projectContextRevision
             let didRefresh = await loadMessages()
-            guard currentSession?.id == sessionID else { return false }
+            guard currentSession?.id == sessionID, generation == streamSynchronizationGeneration,
+                  boundRevision == connection?.projectContextRevision else { return false }
             if !didRefresh {
                 discardStaleTranscriptAndDiffState()
             }
@@ -1703,9 +1832,14 @@ final class ChatClient: SSEEventHandlerDelegate {
         } catch is CancellationError {
             return false
         } catch {
-            guard currentSession?.id == sessionID else { return false }
-            discardStaleTranscriptAndDiffState()
-            errorMessage = "Failed to refresh the session: \(error.localizedDescription)"
+            guard currentSession?.id == sessionID, generation == streamSynchronizationGeneration,
+                  revision == connection?.projectContextRevision else { return false }
+            if let locationError = sessionLocationError {
+                errorMessage = locationError
+            } else {
+                discardStaleTranscriptAndDiffState()
+                errorMessage = "Failed to refresh the session: \(error.localizedDescription)"
+            }
             return false
         }
     }
@@ -1730,21 +1864,31 @@ final class ChatClient: SSEEventHandlerDelegate {
               let sessionsService,
               let sessionID = currentSession?.id else { return false }
 
+        let generation = streamSynchronizationGeneration
+        let revision = connection?.projectContextRevision
         do {
             let statuses = try await sessionsService.getSessionStatuses()
-            guard !Task.isCancelled, currentSession?.id == sessionID else { return false }
+            guard !Task.isCancelled, currentSession?.id == sessionID,
+                  generation == streamSynchronizationGeneration,
+                  revision == connection?.projectContextRevision else { return false }
             // The sparse V2 active snapshot proves only that work is absent.
             // Fetch its result before finalizing a response observed as active.
             if usesV2SessionAPI, statuses[sessionID] == nil,
                isLoading || pendingAssistantMessage != nil {
                 let session = try await sessionsService.getSession(id: sessionID)
-                guard !Task.isCancelled, currentSession?.id == sessionID else { return false }
-                currentSession = session
+                guard !Task.isCancelled, currentSession?.id == sessionID,
+                  generation == streamSynchronizationGeneration,
+                  revision == connection?.projectContextRevision else { return false }
+                try await applyRecoveredSession(session, generation: generation)
             }
             reconcileCurrentSessionStatus(statuses[sessionID])
             return true
+        } catch is CancellationError {
+            return false
         } catch {
-            if currentSession?.id == sessionID { errorMessage = "Failed to refresh session status: \(error.localizedDescription)" }
+            guard currentSession?.id == sessionID, generation == streamSynchronizationGeneration,
+                  revision == connection?.projectContextRevision else { return false }
+            errorMessage = "Failed to refresh session status: \(error.localizedDescription)"
             return false
         }
     }
@@ -1786,9 +1930,11 @@ final class ChatClient: SSEEventHandlerDelegate {
                           self.streamSynchronizationToken == token,
                           self.currentSession?.id == sessionID
                     else { break }
-                    self.currentSession = session
+                    guard generation == self.streamSynchronizationGeneration else { continue }
+                    try await self.applyRecoveredSession(session, generation: generation)
 
                     guard await self.loadMessages(), self.currentSession?.id == sessionID else {
+                        if !Task.isCancelled, generation != self.streamSynchronizationGeneration { continue }
                         break
                     }
                     guard await self.recoverPendingPermission(sessionID: sessionID),
@@ -1801,9 +1947,15 @@ final class ChatClient: SSEEventHandlerDelegate {
                           !Task.isCancelled, self.currentSession?.id == sessionID,
                           self.streamSynchronizationToken == token else { break }
                 } catch is CancellationError {
+                    if !Task.isCancelled, self.streamSynchronizationToken == token,
+                       generation != self.streamSynchronizationGeneration { continue }
                     break
                 } catch {
                     guard self.currentSession?.id == sessionID else { break }
+                    guard generation == self.streamSynchronizationGeneration else { continue }
+                    if self.sessionLocationState == .rebinding {
+                        self.sessionLocationState = .failed("Failed to rebind session location: \(error.localizedDescription)")
+                    }
                     self.errorMessage = "Failed to synchronize chat: \(error.localizedDescription)"
                     break
                 }
@@ -1819,6 +1971,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 if let error = self.errorMessage, [
                     "Failed to refresh session status:", "Failed to recover pending interactions:",
                     "Failed to synchronize chat:", "Failed to load messages:",
+                    "Failed to rebind session location",
                     AppText.sessionInboxLoadFailedPrefix
                 ].contains(where: { error.hasPrefix($0) }) {
                     self.errorMessage = nil
@@ -2098,6 +2251,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     @discardableResult
     func submitWorkspaceRequest(_ text: String) async -> Bool {
+        guard canCompose else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
 
@@ -2129,14 +2283,24 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func loadProviders() async {
         guard !isOfflinePreviewMode else { return }
+        let token = UUID()
+        providerLoadToken = token
+        let revision = connection?.projectContextRevision
+        let sessionID = currentSession?.id
+        let isCurrent = { !Task.isCancelled && self.providerLoadToken == token
+            && self.connection?.projectContextRevision == revision
+            && self.currentSession?.id == sessionID }
         isLoadingProviders = true
         defer {
-            isLoadingProviders = false
-            quickModelAssignmentsVersion &+= 1
+            if providerLoadToken == token {
+                isLoadingProviders = false
+                if isCurrent() { quickModelAssignmentsVersion &+= 1 }
+            }
         }
 
         // Load config first — we need filter lists before selecting a model
         let configResult = await providersService!.loadConfig()
+        guard isCurrent() else { return }
         self.enabledProviders = configResult.enabledProviders
         self.disabledProviders = configResult.disabledProviders
 
@@ -2154,6 +2318,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             let result = try await providersService!.loadProviders()
+            guard isCurrent() else { return }
             self.providers = result.providers
             self.connectedProviderIDs = result.connectedProviderIDs
             serverDefault = result.defaultProviderID.flatMap { providerID in
@@ -2161,6 +2326,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
             serverReportedDefault = serverDefault
         } catch {
+            guard isCurrent() else { return }
             Logger.chat.error("loadProviders failed: \(error, privacy: .public)")
         }
 
@@ -2384,7 +2550,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func enqueueSessionSettingsChange(_ change: SessionSettingsChange, for sessionID: String) {
-        guard usesV2SessionAPI,
+        guard canCompose, usesV2SessionAPI,
               !isDemoMode,
               !isRecordedReplayMode,
               currentSession?.id == sessionID,
@@ -2394,7 +2560,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let chainID = UUID()
         let task = Task { [weak self] () -> Bool in
             let previousSucceeded = await previous?.value ?? true
-            guard let self, self.currentSession?.id == sessionID else { return false }
+            guard let self, self.canCompose, self.currentSession?.id == sessionID else { return false }
             do {
                 switch change {
                 case .model(let model):
@@ -2533,7 +2699,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isLoading, !isQueueingPrompt, currentSession != nil else { return }
+        guard canCompose, !text.isEmpty, !isLoading, !isQueueingPrompt, currentSession != nil else { return }
 
         if Self.isUndoCommand(text) {
             inputText = ""
@@ -2660,6 +2826,8 @@ final class ChatClient: SSEEventHandlerDelegate {
                 if tracksAdmission {
                     await reconcileUncertainSubmissions(in: session.id, before: queuedPrompt.messageID)
                 }
+                guard canCompose, currentSession?.id == session.id,
+                      currentSession?.directory == session.directory else { throw CancellationError() }
                 requestStarted = true
                 let admission = try await messagesService.queuePrompt(
                     sessionID: session.id,
@@ -2840,6 +3008,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// The folder the current session runs in on the server; repository
     /// references must stay inside it.
     var sessionDirectory: String? {
+        guard sessionLocationState == .ready else { return nil }
         let directory = currentSession?.directory
         guard let directory, !directory.isEmpty else { return nil }
         return directory
@@ -3134,7 +3303,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     // MARK: - V2 Session Inbox
 
     func canSteerQueuedPrompt(_ prompt: QueuedPrompt) -> Bool {
-        canCancelQueuedPrompt(prompt)
+        canCompose && canCancelQueuedPrompt(prompt)
             && queuedPrompts.first(where: { $0.id == prompt.id })?.delivery == .queue
     }
 
@@ -3418,6 +3587,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             if tracksAdmission, let messageID {
                 await reconcileUncertainSubmissions(in: session.id, before: messageID)
             }
+            guard canCompose, currentSession?.id == session.id,
+                  currentSession?.directory == session.directory else { throw CancellationError() }
             requestStarted = true
             let admission = try await messagesService!.sendPromptAsync(
                 sessionID: session.id,
@@ -3494,6 +3665,8 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             try await awaitSessionSettingsChanges(for: session.id)
+            guard canCompose, currentSession?.id == session.id,
+                  currentSession?.directory == session.directory else { throw CancellationError() }
             try await messagesService!.sendCommand(
                 sessionID: session.id,
                 command: command,
@@ -3699,11 +3872,21 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Routes one event from the session stream. Reconcile and inbox-change
     /// events trigger authoritative reads for the open session only.
     func receiveStreamEvent(_ inboundEvent: SSEInboundEvent) {
+        if usesV2SessionAPI, case .cold(.sessionUpdated(let update), _) = inboundEvent,
+           let update, update.sessionID == currentSession?.id,
+           let directory = update.update?.directory, directory != currentSession?.directory {
+            sessionLocationState = .rebinding
+            synchronizeCurrentSessionFromServer()
+            return
+        }
         if case .raw(let event) = inboundEvent,
            event.type == "session.reconcile" || event.type == V2EventAdapter.inboxChangedEventType {
             let sessionID = (event.properties?.value as? [String: Any])?["sessionID"] as? String
             guard sessionID == nil || sessionID == currentSession?.id else { return }
             if event.type == "session.reconcile" {
+                if (event.properties?.value as? [String: Any])?["locationChanged"] as? Bool == true {
+                    sessionLocationState = .rebinding
+                }
                 synchronizeCurrentSessionFromServer()
             } else {
                 refreshInboxAfterChange()
@@ -3802,6 +3985,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     @discardableResult
     func respondToPermission(requestID: String, reply: OCPermissionReply) async -> Bool {
+        guard sessionLocationState == .ready else { return false }
         guard let questionService else {
             errorMessage = "Failed to respond to permission: Not connected."
             return false
@@ -3924,6 +4108,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     /// Send selected answers back to the server.
     func respondToQuestion(answers: [[String]]) {
+        guard sessionLocationState == .ready else { return }
         cancelInteractiveRequestTimeout()
 
         guard let question = pendingQuestion else {
@@ -3964,6 +4149,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Sends a v2 form reply. Unsupported fields never call this method
     /// because `FormView` disables submission until OpenCode can handle them.
     func respondToForm(answer: [String: OCFormValue]) {
+        guard sessionLocationState == .ready else { return }
         resolvePendingForm(failureMessage: "Failed to submit form") { service, form in
             try await service.respondToForm(form, answer: answer)
         }
@@ -4643,6 +4829,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func resetSessionState() {
+        sessionLocationState = .ready
         sessionSettingsChain = nil
         streamSynchronizationTask?.cancel()
         streamSynchronizationTask = nil

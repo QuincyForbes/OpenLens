@@ -33,8 +33,10 @@ struct ChatView: View {
     @State private var selectedSlashAction: WorkspaceSlashActionItem?
     @State private var attachedSkills: [WorkspaceSkillItem] = []
     @State private var isLoadingCommands = false
+    @State private var commandLoadToken = UUID()
     @State private var availableSkills: [WorkspaceSkillItem] = []
     @State private var isLoadingSkills = false
+    @State private var skillLoadToken = UUID()
     @State private var displayedResponseState: ChatResponseState = .idle
     @State private var isComposerExpanded = false
     @State private var pickedPhotos: [PhotosPickerItem] = []
@@ -62,7 +64,7 @@ struct ChatView: View {
             .environment(\.chatSkillIDs, availableSkills.map(\.id))
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
-            if let error = chatClient.errorMessage {
+            if let error = chatClient.sessionLocationError ?? chatClient.errorMessage {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(isRetroChat ? RetroChatStyle.danger : .orange)
@@ -71,8 +73,12 @@ struct ChatView: View {
                         .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13))
                         .foregroundStyle(secondaryTextColor)
                     Spacer()
-                    Button(AppText.dismiss) {
-                        chatClient.dismissError()
+                    Button(chatClient.sessionLocationError == nil ? AppText.dismiss : AppText.tryAgain) {
+                        if chatClient.sessionLocationError != nil {
+                            chatClient.synchronizeCurrentSessionFromServer()
+                        } else {
+                            chatClient.dismissError()
+                        }
                     }
                     .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
                     .foregroundStyle(primaryTextColor)
@@ -142,11 +148,21 @@ struct ChatView: View {
             if initialSession == nil {
                 await chatClient.ensureSession()
             }
-            await loadCommands(force: true)
             await chatClient.recoverPendingPermission()
             await chatClient.recoverPendingQuestions()
             await chatClient.recoverPendingForms()
-            await loadSkills()
+        }
+        .task(id: catalogContextID) {
+            clearSelectedSlashAction()
+            attachedSkills = []
+            attachmentSource = nil
+            availableSlashActions = []
+            availableSkills = []
+            chatClient.updateSlashCatalog(commands: [], agents: [])
+            chatClient.updateSkillCatalog([])
+            guard chatClient.sessionLocationState == .ready else { return }
+            await loadCommands(force: true)
+            await loadSkills(force: true)
         }
 
         // Foreground recovery: stream events may have been missed while iOS
@@ -161,7 +177,7 @@ struct ChatView: View {
                     await chatClient.recoverPendingPermission()
                     await chatClient.recoverPendingQuestions()
                     await chatClient.recoverPendingForms()
-                    await loadSkills()
+                    await loadSkills(force: true)
                 }
             }
         }
@@ -239,6 +255,10 @@ struct ChatView: View {
 
     private var visualMode: ChatVisualMode {
         chatEasterEgg.visualMode
+    }
+
+    private var catalogContextID: String {
+        "\(connection.projectContextRevision):\(chatClient.currentSession?.id ?? ""):\(chatClient.sessionLocationState == .ready)"
     }
 
     private var headerSession: OCSession? {
@@ -729,8 +749,10 @@ struct ChatView: View {
         .sheet(isPresented: attachmentSourceBinding(.repository)) {
             if let directory = chatClient.sessionDirectory {
                 RepositoryFilePicker(directory: directory) { path, lines in
+                    guard directory == chatClient.sessionDirectory else { return }
                     chatClient.attachComposerServerFile(relativePath: path, lines: lines)
                 }
+                .id(directory)
             }
         }
         .sheet(item: $previewedTextFile) { file in
@@ -1260,30 +1282,38 @@ struct ChatView: View {
     @MainActor
     private func loadCommands(force: Bool = false) async {
         guard force || availableSlashActions.isEmpty else { return }
-        guard !isLoadingCommands else { return }
+        guard chatClient.sessionLocationState == .ready, force || !isLoadingCommands else { return }
+        let context = catalogContextID
+        let token = UUID()
+        commandLoadToken = token
 
         isLoadingCommands = true
+        defer { if commandLoadToken == token { isLoadingCommands = false } }
         let workspaceSlashActions = await workspaceService.loadSlashActions()
+        guard !Task.isCancelled, context == catalogContextID, commandLoadToken == token else { return }
         let slashActions = [Self.undoSlashAction] + workspaceSlashActions
         availableSlashActions = slashActions
         chatClient.updateSlashCatalog(
             commands: slashActions.filter { $0.kind == .command }.map(\.token),
             agents: slashActions.filter { $0.kind == .agent }.map(\.token)
         )
-        isLoadingCommands = false
     }
 
     /// Only v2 servers list skills here; older ones include them among the
     /// slash commands, so the list stays empty and `@` is plain text.
     @MainActor
-    private func loadSkills() async {
-        guard !isLoadingSkills else { return }
+    private func loadSkills(force: Bool = false) async {
+        guard chatClient.sessionLocationState == .ready, force || !isLoadingSkills else { return }
+        let context = catalogContextID
+        let token = UUID()
+        skillLoadToken = token
 
         isLoadingSkills = true
+        defer { if skillLoadToken == token { isLoadingSkills = false } }
         let skills = await workspaceService.loadSkills()
+        guard !Task.isCancelled, context == catalogContextID, skillLoadToken == token else { return }
         availableSkills = skills
         chatClient.updateSkillCatalog(skills.map(\.id))
-        isLoadingSkills = false
     }
 
     private func applySkillMention(_ skill: WorkspaceSkillItem) {

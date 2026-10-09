@@ -24,6 +24,18 @@ nonisolated struct V2EventAdapter {
         if type == "server.connected" || type == "server.heartbeat" {
             return OCEvent(type: type, properties: AnyCodable([String: String]()))
         }
+        // A move can be published from its destination. Let the open chat
+        // reconcile by identity across the directory filter; only REST may
+        // choose and authorize the new workspace, never the event payload.
+        if type == "session.moved" {
+            guard let sessionID = data["sessionID"] as? String,
+                  StreamDisplayValue.fitsIdentifier(sessionID) else {
+                throw OpenCodeError.invalidPayload("Invalid native v2 move identity.")
+            }
+            return OCEvent(type: "session.reconcile", properties: AnyCodable([
+                "sessionID": sessionID, "locationChanged": true
+            ]))
+        }
         if let directory {
             guard let location = envelope["location"] as? [String: Any],
                   let eventDirectory = location["directory"] as? String else {
@@ -47,7 +59,7 @@ nonisolated struct V2EventAdapter {
         case "permission.replied", "session.inbox.delivered",
              "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
              "session.revert.committed", "session.revert.staged", "session.revert.cleared",
-             "session.message.content.updated", "session.moved", "session.deleted", "session.idle":
+             "session.message.content.updated", "session.deleted", "session.idle":
             return reconcile()
         case "session.execution.started":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }

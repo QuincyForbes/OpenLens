@@ -100,6 +100,7 @@ final class WorkspaceService {
     }
 
     func loadWorkspace(path: String? = nil, sessionID: String? = nil) async throws -> WorkspaceSnapshot {
+        let revision = connection.projectContextRevision
         if ScreenshotFixtures.isEnabled {
             return ScreenshotFixtures.workspaceSnapshot(path: path)
         }
@@ -122,6 +123,9 @@ final class WorkspaceService {
         let commands = await commandsTask
         let fileItems = await filesTask
         let workingTreeSnapshot = await workingTreeTask
+        guard !Task.isCancelled, connection.projectContextRevision == revision else {
+            throw CancellationError()
+        }
 
         return WorkspaceSnapshot(
             currentProject: currentProject,

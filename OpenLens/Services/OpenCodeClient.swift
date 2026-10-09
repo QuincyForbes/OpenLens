@@ -11,6 +11,7 @@ actor OpenCodeClient {
     private var baseURL: URL
     private var authHeader: String?
     private var contextDirectory: String?
+    private var contextRevision: UInt = 0
     private(set) var capabilities: OpenCodeServerCapabilities?
 
     init(
@@ -27,6 +28,7 @@ actor OpenCodeClient {
     }
 
     func updateConnection(baseURL: URL, authHeader: String?, contextDirectory: String? = nil) {
+        contextRevision &+= 1
         self.baseURL = baseURL
         self.authHeader = authHeader
         self.contextDirectory = contextDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
@@ -34,6 +36,7 @@ actor OpenCodeClient {
     }
 
     func updateContextDirectory(_ directory: String?) {
+        contextRevision &+= 1
         let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         Logger.api.debug("OpenCode client context directory changed from \(self.contextDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         self.contextDirectory = normalizedDirectory
@@ -831,6 +834,14 @@ actor OpenCodeClient {
 
     // MARK: - Project
 
+    /// Resolve a destination without changing the active request context.
+    func resolveLocation(directory: String) async throws -> OCV2LocationInfo {
+        guard usesV2 else { throw OpenCodeError.invalidPayload("Location resolution requires OpenCode v2.") }
+        return try await getV2("/api/location", queryItems: [
+            URLQueryItem(name: "location[directory]", value: directory)
+        ], includesLocation: false)
+    }
+
     func listProjects() async throws -> [OCProject] {
         if usesV2 {
             return try await getV2("/api/project")
@@ -841,7 +852,9 @@ actor OpenCodeClient {
 
     func getCurrentProject() async throws -> OCProject {
         if usesV2 {
+            let revision = contextRevision
             let location: OCV2LocationInfo = try await getV2("/api/location")
+            guard !Task.isCancelled, contextRevision == revision else { throw CancellationError() }
             contextDirectory = location.directory
             guard let project = location.project else {
                 throw OpenCodeError.invalidPayload("The v2 location response did not contain a project.")
@@ -854,7 +867,9 @@ actor OpenCodeClient {
 
     func getPath() async throws -> OCPathInfo {
         if usesV2 {
+            let revision = contextRevision
             let location: OCV2LocationInfo = try await getV2("/api/location")
+            guard !Task.isCancelled, contextRevision == revision else { throw CancellationError() }
             contextDirectory = location.directory
             return OCPathInfo(
                 state: nil,

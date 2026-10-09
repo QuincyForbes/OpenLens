@@ -75,6 +75,7 @@ struct WorkspaceRootView: View {
         workingTreeSource: .unavailable
     )
     @State private var browserPath: String?
+    @State private var workspaceLoadGeneration: UInt = 0
     @State private var commandSearch = ""
     @State private var switchingProjectID: String?
     @State private var showsFiles = false
@@ -103,8 +104,13 @@ struct WorkspaceRootView: View {
         .toolbar {
             projectToolbarItem
         }
-        .task(id: browserPath) {
+        .task(id: "\(connection.projectContextRevision):\(browserPath ?? ".")") {
             await loadWorkspace()
+        }
+        .onChange(of: connection.projectContextRevision) { _, _ in
+            browserPath = "."
+            selectedDiffFile = nil
+            pendingWorkspaceAction = nil
         }
         .task(id: chatClient.currentSession?.id) {
             guard chatClient.currentSession != nil else { return }
@@ -784,36 +790,54 @@ struct WorkspaceRootView: View {
     }
 
     private func loadWorkspace() async {
+        workspaceLoadGeneration &+= 1
+        let generation = workspaceLoadGeneration
+        let revision = connection.projectContextRevision
         viewState = .loading
         do {
             let loadedSnapshot = try await workspaceService.loadWorkspace(
                 path: browserPath,
                 sessionID: chatClient.currentSession?.id
             )
+            guard !Task.isCancelled, generation == workspaceLoadGeneration,
+                  revision == connection.projectContextRevision else { return }
             applySnapshot(loadedSnapshot)
             if browserPath == nil {
                 browserPath = loadedSnapshot.currentPath
             }
             activityRefreshToken += 1
             viewState = .loaded
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled, generation == workspaceLoadGeneration,
+                  revision == connection.projectContextRevision else { return }
             viewState = .error(error.localizedDescription)
         }
     }
 
     private func refreshWorkspace() async {
+        workspaceLoadGeneration &+= 1
+        let generation = workspaceLoadGeneration
+        let revision = connection.projectContextRevision
         do {
             let loadedSnapshot = try await workspaceService.loadWorkspace(
                 path: browserPath,
                 sessionID: chatClient.currentSession?.id
             )
+            guard !Task.isCancelled, generation == workspaceLoadGeneration,
+                  revision == connection.projectContextRevision else { return }
             applySnapshot(loadedSnapshot)
             if browserPath == nil {
                 browserPath = loadedSnapshot.currentPath
             }
             activityRefreshToken += 1
             viewState = .loaded
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled, generation == workspaceLoadGeneration,
+                  revision == connection.projectContextRevision else { return }
             viewState = .error(error.localizedDescription)
         }
     }

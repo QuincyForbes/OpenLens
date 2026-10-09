@@ -20,6 +20,8 @@ final class ConnectionManager: ConnectionProviding {
     private(set) var projectName: String?
     private(set) var branch: String?
     private(set) var selectedProjectDirectory: String?
+    private(set) var projectContextRevision: UInt = 0
+    private var projectContextGeneration: UInt = 0
     private(set) var connectionMethod: ConnectionMethod?
     private(set) var serverURL: URL?
     private(set) var localNetworkAccessRequired: Bool = false
@@ -211,6 +213,8 @@ final class ConnectionManager: ConnectionProviding {
     // MARK: - Disconnect
 
     func disconnect() {
+        projectContextGeneration &+= 1
+        projectContextRevision &+= 1
         sseConnectionContinuation?.resume()
         sseConnectionContinuation = nil
         stopHeartbeatWatchdog()
@@ -280,17 +284,24 @@ final class ConnectionManager: ConnectionProviding {
     }
 
     func setProjectContext(directory: String?) async {
+        projectContextGeneration &+= 1
+        let generation = projectContextGeneration
         let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         Logger.connection.debug("OpenLens changing active project directory from \(self.selectedProjectDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         guard let client else {
             selectedProjectDirectory = normalizedDirectory
+            projectContextRevision &+= 1
             return
         }
 
         await client.updateContextDirectory(normalizedDirectory)
+        guard !Task.isCancelled, generation == projectContextGeneration else { return }
         selectedProjectDirectory = normalizedDirectory
         sseClient?.updateContextDirectory(normalizedDirectory)
+        projectContextRevision &+= 1
         currentProject = nil
+        projectName = nil
+        branch = nil
 
         if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
             savedConnectionsStore?.updateProjectSelection(
@@ -306,6 +317,24 @@ final class ConnectionManager: ConnectionProviding {
         await setProjectContext(directory: nil)
     }
 
+    /// An externally moved session must resolve successfully before its
+    /// destination becomes the active workspace. A refusal leaves it untouched.
+    func rebindProjectContext(directory: String, isCurrent: () -> Bool = { true }) async throws {
+        guard let client else { throw OpenCodeError.notConnected }
+        let generation = projectContextGeneration
+        guard directory.hasPrefix("/"),
+              let normalized = WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+            throw OpenCodeError.invalidPayload("The session's new location is not an absolute directory.")
+        }
+        let location = try await client.resolveLocation(directory: normalized)
+        try Task.checkCancellation()
+        guard generation == projectContextGeneration, isCurrent() else { throw CancellationError() }
+        guard WorkspaceSelectionBuilder.normalizedDirectory(location.directory) == normalized else {
+            throw OpenCodeError.invalidPayload("The server resolved a different session location.")
+        }
+        await setProjectContext(directory: normalized)
+    }
+
     private func refreshProjectMetadata() async {
         guard let client else {
             currentProject = nil
@@ -314,8 +343,11 @@ final class ConnectionManager: ConnectionProviding {
             return
         }
 
+        let generation = projectContextGeneration
         let pathInfo = try? await client.getPath()
+        guard !Task.isCancelled, generation == projectContextGeneration else { return }
         let project = try? await client.getCurrentProject()
+        guard !Task.isCancelled, generation == projectContextGeneration else { return }
 
         Logger.connection.debug("OpenCode reported directory \(pathInfo?.directory ?? "nil", privacy: .public), worktree \(pathInfo?.worktree ?? "nil", privacy: .public), and project worktree \(project?.worktree ?? "nil", privacy: .public)")
 
@@ -338,6 +370,7 @@ final class ConnectionManager: ConnectionProviding {
 
             if let inferredDirectory {
                 await client.updateContextDirectory(inferredDirectory)
+                guard !Task.isCancelled, generation == projectContextGeneration else { return }
                 sseClient?.updateContextDirectory(inferredDirectory)
 
                 if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
@@ -353,8 +386,10 @@ final class ConnectionManager: ConnectionProviding {
 
         do {
             let vcs = try await client.getVCS()
+            guard !Task.isCancelled, generation == projectContextGeneration else { return }
             branch = vcs.branch
         } catch {
+            guard !Task.isCancelled, generation == projectContextGeneration else { return }
             branch = nil
             Logger.connection.warning("Failed to fetch VCS info: \(error, privacy: .public)")
         }
