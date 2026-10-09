@@ -105,9 +105,7 @@ struct SessionActiveContextView: View {
                 }
             case .unavailable:
                 ContentUnavailableView("Context unavailable", systemImage: "text.bubble",
-                    description: Text(chatClient.activeContextScope.isReady
-                        ? "This server cannot provide active context. You can still read the full conversation in Chat."
-                        : "Wait for the session and its location to finish refreshing, then try again."))
+                    description: Text("This server cannot provide active context. You can still read the full conversation in Chat."))
             }
         }
     }
@@ -130,6 +128,7 @@ struct SessionActiveContextView: View {
                 switch ScreenshotFixtures.activeContextState {
                 case "loading": return
                 case "failed": throw OpenCodeError.invalidPayload("The connection was interrupted. Try again to read current context.")
+                case "changed": throw OpenCodeError.invalidPayload(ChatClient.activeContextChangedMessage)
                 case "unavailable": transcript = nil
                 default: transcript = try ScreenshotFixtures.activeContextProjection()
                 }

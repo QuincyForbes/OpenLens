@@ -1014,6 +1014,8 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     // MARK: - Context Inspection
 
+    static let activeContextChangedMessage = "Context changed while it was loading. Try again."
+
     var contextUsageSummary: ContextUsageSummary? {
         // V2 reply usage is historical work, not occupancy of the active projection.
         guard !showsActiveContext else { return nil }
@@ -1041,7 +1043,6 @@ final class ChatClient: SSEEventHandlerDelegate {
         let clientID: ObjectIdentifier?
         let sessionGeneration: UInt
         let transcriptRevision: UInt
-        let isReady: Bool
     }
 
     /// Also changes on Old → New → Old, canonical refresh, and rebind recovery.
@@ -1050,8 +1051,7 @@ final class ChatClient: SSEEventHandlerDelegate {
               projectRevision: connection?.projectContextRevision,
               clientID: connection?.client.map(ObjectIdentifier.init),
               sessionGeneration: activeContextSessionGeneration,
-              transcriptRevision: activeContextTranscriptRevision,
-              isReady: sessionLocationState == .ready && isStreamSynchronized)
+              transcriptRevision: activeContextTranscriptRevision)
     }
 
     var showsActiveContext: Bool {
@@ -1063,14 +1063,22 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Reads without installing active records into the full conversation.
     func loadActiveContext() async throws -> SessionTranscript? {
         let scope = activeContextScope
-        guard let sessionID = scope.sessionID, scope.isReady,
-              let messagesService else { return nil }
+        guard let sessionID = scope.sessionID else {
+            throw OpenCodeError.invalidPayload("Select a session to inspect its active context.")
+        }
+        guard let messagesService else { throw OpenCodeError.notConnected }
         do {
             let transcript = try await messagesService.loadActiveContext(sessionID: sessionID)
             guard !Task.isCancelled, activeContextScope == scope else { throw CancellationError() }
             return transcript
         } catch {
             guard !Task.isCancelled, activeContextScope == scope else { throw CancellationError() }
+            // The client can invalidate its internal directory binding without
+            // changing the sheet's read key. Surface that as a retryable failure;
+            // only a superseded scope/task should silently discard a read.
+            if error is CancellationError {
+                throw OpenCodeError.invalidPayload(Self.activeContextChangedMessage)
+            }
             throw error
         }
     }

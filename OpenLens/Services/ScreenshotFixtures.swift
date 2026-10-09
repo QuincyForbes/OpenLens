@@ -24,10 +24,7 @@ enum ScreenshotFixtures {
         ]
         """#
         let entries = try JSONDecoder().decode([OCV2SessionMessage].self, from: Data(wire.utf8))
-        return SessionTranscript(
-            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
-            contextEntries: entries.compactMap(\.contextEntry), entryOrder: entries.map(\.id)
-        )
+        return MessagesService.transcript(from: OCTranscriptEntry.projectV2(entries, sessionID: defaultSession.id))
     }
 
     static var showsSubagentResults: Bool {
@@ -81,10 +78,7 @@ enum ScreenshotFixtures {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: records),
               let entries = try? JSONDecoder().decode([OCV2SessionMessage].self, from: data) else { return }
-        chat.replaceTranscript(SessionTranscript(
-            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
-            contextEntries: entries.compactMap(\.contextEntry), entryOrder: entries.map(\.id)
-        ))
+        chat.replaceTranscript(MessagesService.transcript(from: OCTranscriptEntry.projectV2(entries, sessionID: defaultSession.id)))
         if let queuedEntry, let pending = chat.queuedPrompt(for: queuedEntry) {
             chat.queuedPrompts = [pending]
         }
@@ -133,11 +127,7 @@ enum ScreenshotFixtures {
         ]
         """#
         guard let entries = try? JSONDecoder().decode([OCV2SessionMessage].self, from: Data(records.utf8)) else { return }
-        chat.replaceTranscript(SessionTranscript(
-            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
-            contextEntries: entries.compactMap(\.contextEntry),
-            entryOrder: entries.map(\.id)
-        ))
+        chat.replaceTranscript(MessagesService.transcript(from: OCTranscriptEntry.projectV2(entries, sessionID: defaultSession.id)))
     }
 
     static var showsSubagentTools: Bool {

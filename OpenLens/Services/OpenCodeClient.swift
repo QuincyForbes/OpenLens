@@ -313,11 +313,7 @@ actor OpenCodeClient {
                 "/api/session/\(sessionID)/context", includesLocation: false
             )
             guard !Task.isCancelled, revision == contextRevision else { throw CancellationError() }
-            return response.data.compactMap { entry in
-                if let message = entry.asMessage(sessionID: sessionID) { return .message(message) }
-                if let context = entry.contextEntry { return .context(context) }
-                return nil
-            }
+            return OCTranscriptEntry.projectV2(response.data, sessionID: sessionID)
         } catch {
             guard !Task.isCancelled, revision == contextRevision else { throw CancellationError() }
             // A structured SessionNotFoundError remains a failure, not an
@@ -342,27 +338,7 @@ actor OpenCodeClient {
                 order: "asc",
                 includesLocation: false
             )
-            var result: [OCTranscriptEntry] = []
-            var positions: [String: Int] = [:]
-            for entry in entries {
-                let projected: OCTranscriptEntry
-                if let message = entry.asMessage(sessionID: sessionID) {
-                    projected = .message(message)
-                } else if let context = entry.contextEntry {
-                    projected = .context(context)
-                } else {
-                    continue
-                }
-                if let position = positions[projected.id] {
-                    // A continuation may overlap a mutable entry. Its newest
-                    // value replaces the record at the original ordered slot.
-                    result[position] = projected
-                } else {
-                    positions[projected.id] = result.count
-                    result.append(projected)
-                }
-            }
-            return result
+            return OCTranscriptEntry.projectV2(entries, sessionID: sessionID)
         }
         var path = "/session/\(sessionID)/message"
         if let limit { path += "?limit=\(limit)" }

@@ -12,6 +12,30 @@ nonisolated enum OCTranscriptEntry: Sendable {
         case .context(let entry): entry.id
         }
     }
+
+    /// One projection for active context, paged history and screenshot fixtures.
+    /// Repeated records keep their first position and their latest value.
+    static func projectV2(_ entries: [OCV2SessionMessage], sessionID: String) -> [OCTranscriptEntry] {
+        var result: [OCTranscriptEntry] = []
+        var positions: [String: Int] = [:]
+        for entry in entries {
+            let projected: OCTranscriptEntry
+            if let message = entry.asMessage(sessionID: sessionID) {
+                projected = .message(message)
+            } else if let context = entry.contextEntry {
+                projected = .context(context)
+            } else {
+                continue
+            }
+            if let position = positions[projected.id] {
+                result[position] = projected
+            } else {
+                positions[projected.id] = result.count
+                result.append(projected)
+            }
+        }
+        return result
+    }
 }
 
 struct SessionTranscript {

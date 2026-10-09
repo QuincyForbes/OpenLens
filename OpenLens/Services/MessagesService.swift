@@ -28,17 +28,7 @@ final class MessagesService {
         guard !Task.isCancelled, connection.client === client,
               connection.projectContextRevision == revision else { throw CancellationError() }
         guard let entries else { return nil }
-        return SessionTranscript(
-            messages: entries.compactMap {
-                guard case .message(let message) = $0 else { return nil }
-                return Self.convert(message)
-            },
-            contextEntries: entries.compactMap {
-                guard case .context(let context) = $0 else { return nil }
-                return context
-            },
-            entryOrder: entries.map(\.id)
-        )
+        return Self.transcript(from: entries)
     }
 
     /// Fetch all messages for a session, converted to local ChatMessage models.
@@ -55,6 +45,11 @@ final class MessagesService {
     func loadTranscript(sessionID: String) async throws -> SessionTranscript {
         guard let client = connection.client else { throw OpenCodeError.notConnected }
         let entries = try await client.listTranscript(sessionID: sessionID)
+        return Self.transcript(from: entries)
+    }
+
+    /// Share domain conversion across both reads and fixture presentation.
+    static func transcript(from entries: [OCTranscriptEntry]) -> SessionTranscript {
         return SessionTranscript(
             messages: entries.compactMap {
                 guard case .message(let message) = $0 else { return nil }

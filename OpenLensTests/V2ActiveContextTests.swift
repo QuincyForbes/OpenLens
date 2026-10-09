@@ -4,6 +4,60 @@ import Testing
 
 @MainActor
 struct V2ActiveContextTests {
+    @Test(arguments: [false, true])
+    func activeContextAndHistoryKeepUniqueIDsInOriginalOrderWithLatestValues(active: Bool) async throws {
+        let wire = #"""
+        {"data":[
+          {"id":"msg_system","type":"system","text":"Old instruction"},
+          {"id":"msg_user","type":"user","text":"Old prompt"},
+          {"type":"future","text":{}},
+          {"id":"msg_system","type":"system","text":"Current instruction"},
+          {"id":"msg_user","type":"user","text":"Current prompt"},
+          {"id":"msg_reply","type":"assistant","content":[{"type":"text","text":"Current reply"}]}
+        ],"cursor":{"next":null}}
+        """#
+        let transport = ActiveContextTransport()
+        await transport.setContext(wire)
+        await transport.setHistory(wire)
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let service = MessagesService(connection: connection)
+        let result = try #require(try await (active
+            ? service.loadActiveContext(sessionID: "ses_1")
+            : service.loadTranscript(sessionID: "ses_1")))
+        #expect(result.entryOrder == ["msg_system", "msg_user", "msg_reply"])
+        #expect(result.contextEntries.map(\.details) == ["Current instruction"])
+        #expect(result.messages.map(\.content) == ["Current prompt", "Current reply"])
+    }
+
+    @Test func missingSessionSelectionIsAFailureRatherThanUnsupportedContext() async throws {
+        let transport = ActiveContextTransport()
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let chat = makeChat(connection)
+        await #expect(throws: OpenCodeError.self) { try await chat.loadActiveContext() }
+        #expect(await transport.contextRequests().isEmpty)
+    }
+
+    @Test func failedChatSynchronizationDoesNotBlockContextReadOrRetry() async throws {
+        let transport = ActiveContextTransport()
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let chat = makeChat(connection)
+        chat.currentSession = session("ses_1")
+        chat.synchronizeCurrentSessionFromServer()
+        for _ in 0..<300 where chat.errorMessage == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(chat.errorMessage?.hasPrefix("Failed to synchronize chat:") == true)
+        #expect(!chat.isStreamSynchronized)
+        await transport.setContext(#"{"_tag":"UnknownError","message":"Context temporarily offline"}"#, status: 500)
+        await #expect(throws: OpenCodeError.self) { try await chat.loadActiveContext() }
+        await transport.setContext(#"{"data":[{"id":"msg_current","type":"user","text":"Current context"}]}"#)
+        let result = try #require(try await chat.loadActiveContext())
+        #expect(result.messages.first?.content == "Current context")
+        #expect(!chat.isStreamSynchronized)
+        #expect(await transport.contextRequests().count == 2)
+    }
+
     @Test func legacyContextReadIsUnavailableAndExistingUsageStaysAvailable() async throws {
         let transport = OpenCodeContractTransport(routes: [
             "/api/info": .init(statusCode: 404, body: Data()),
@@ -72,13 +126,14 @@ struct V2ActiveContextTests {
         #expect(active.messages.first?.persistedToolSteps.first?.outputPreview == "App.swift")
     }
 
-    @Test(arguments: ["session", "roundTrip", "unload", "location", "binding", "disconnect", "cancel", "refresh", "model"], [false, true])
+    @Test(arguments: ["none", "session", "roundTrip", "unload", "location", "binding", "disconnect", "cancel", "refresh", "model"], [false, true])
     func delayedContextCannotEscapeItsSelectedSessionAndBinding(_ change: String, failed: Bool) async throws {
         let transport = ActiveContextTransport()
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, contextDirectory: "/work", transport: transport)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
         let chat = makeChat(connection)
         chat.currentSession = session("ses_1")
+        let scope = chat.activeContextScope
         if failed { await transport.setContext(#"{"_tag":"UnknownError","message":"Provider offline"}"#, status: 500) }
         await transport.holdContext()
         let read = Task { try await chat.loadActiveContext() }
@@ -100,7 +155,29 @@ struct V2ActiveContextTests {
         default: break
         }
         await transport.releaseContext()
-        await #expect(throws: CancellationError.self) { try await read.value }
+        if change == "none" {
+            #expect(chat.activeContextScope == scope)
+            if failed {
+                await #expect(throws: OpenCodeError.self) { try await read.value }
+            } else {
+                let result = try #require(try await read.value)
+                #expect(result.entryOrder == ["msg_summary", "msg_user", "msg_reply"])
+                #expect(result.messages.map(\.content) == ["Continue.", "Ready."])
+            }
+        } else if change == "binding" {
+            #expect(chat.activeContextScope == scope)
+            do {
+                _ = try await read.value
+                Issue.record("Expected a retryable context failure")
+            } catch {
+                #expect(error is OpenCodeError)
+                #expect(error.localizedDescription == "Context changed while it was loading. Try again.")
+            }
+            await transport.setContext(#"{"data":[{"id":"msg_retried","type":"user","text":"Fresh context"}]}"#)
+            #expect(try await chat.loadActiveContext()?.entryOrder == ["msg_retried"])
+        } else {
+            await #expect(throws: CancellationError.self) { try await read.value }
+        }
         #expect(chat.contextEntries.isEmpty)
         #expect(chat.messages.isEmpty)
     }
@@ -201,6 +278,7 @@ struct V2ActiveContextTests {
 private actor ActiveContextTransport: OpenCodeTransport {
     private var context = #"{"data":[{"id":"msg_summary","type":"compaction","status":"completed","summary":"Keep the feature branch."},{"id":"msg_user","type":"user","text":"Continue."},{"type":"future","text":{}},{"id":"msg_reply","type":"assistant","content":[{"type":"text","text":"Ready."}]}]}"#
     private var requests: [URLRequest] = []
+    private var history = #"{"data":[{"id":"msg_old","type":"user","text":"Old history."}],"cursor":{"next":null}}"#
     private var status = 200
     private var holds = false
     private var waiter: CheckedContinuation<Void, Never>?
@@ -208,6 +286,7 @@ private actor ActiveContextTransport: OpenCodeTransport {
     func holdContext() { holds = true }
     func releaseContext() { holds = false; waiter?.resume(); waiter = nil }
     func setContext(_ body: String, status: Int = 200) { context = body; self.status = status }
+    func setHistory(_ body: String) { history = body }
     func contextRequests() -> [URLRequest] { requests.filter { $0.url?.path.hasSuffix("/context") == true } }
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         requests.append(request)
@@ -216,12 +295,15 @@ private actor ActiveContextTransport: OpenCodeTransport {
         var responseStatus = 200
         switch url.path {
         case "/api/info": body = #"{"version":"2.0.23"}"#
+        case "/api/session/ses_1":
+            body = #"{"_tag":"UnknownError","message":"Session temporarily offline"}"#
+            responseStatus = 503
         case "/api/session/ses_1/context":
             body = context
             responseStatus = status
             if holds { await withCheckedContinuation { waiter = $0 } }
         case "/api/session/ses_2/context": body = #"{"data":[{"id":"msg_other","type":"user","text":"Another session."}]}"#
-        case "/api/session/ses_1/message": body = #"{"data":[{"id":"msg_old","type":"user","text":"Old history."}],"cursor":{"next":null}}"#
+        case "/api/session/ses_1/message": body = history
         default: throw URLError(.unsupportedURL)
         }
         return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: responseStatus, httpVersion: nil, headerFields: nil)!)
