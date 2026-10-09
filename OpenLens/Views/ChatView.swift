@@ -163,6 +163,7 @@ struct ChatView: View {
         .onAppear {
             isOnScreen = true
             displayedResponseState = chatClient.responseState
+            if ScreenshotFixtures.opensActiveContext { showContextStatus = true }
         }
         .onDisappear {
             isOnScreen = false
@@ -223,7 +224,9 @@ struct ChatView: View {
             modelPickerSheet
         }
         .sheet(isPresented: $showContextStatus) {
-            if let contextUsage = chatClient.contextUsageSummary {
+            if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
+                SessionActiveContextView(chatClient: chatClient)
+            } else if let contextUsage = chatClient.contextUsageSummary {
                 ChatContextStatusSheet(summary: contextUsage, visualMode: visualMode)
                     .presentationDetents([.fraction(0.34), .medium])
                     .presentationDragIndicator(.visible)
@@ -593,7 +596,19 @@ struct ChatView: View {
                 if !chatClient.todos.isEmpty {
                     todoChip
                 }
-                if let contextUsage = chatClient.contextUsageSummary {
+                if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
+                    Button {
+                        showContextStatus = true
+                    } label: {
+                        Label("Context", systemImage: "text.bubble")
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.medium))
+                            .foregroundStyle(primaryTextColor)
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Inspect active context")
+                    .accessibilityIdentifier("inspect-active-context")
+                } else if let contextUsage = chatClient.contextUsageSummary {
                     Button {
                         showContextStatus = true
                     } label: {

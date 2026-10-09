@@ -1,6 +1,35 @@
 import Foundation
 
 enum ScreenshotFixtures {
+    static var showsActiveContextButton: Bool {
+        opensActiveContext || (isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_ACTIVE_CONTEXT_BUTTON"))
+    }
+
+    static var opensActiveContext: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_ACTIVE_CONTEXT")
+    }
+
+    static var activeContextState: String {
+        ProcessInfo.processInfo.arguments.first { $0.hasPrefix("SCREENSHOT_ACTIVE_CONTEXT_STATE=") }?
+            .split(separator: "=").last.map(String.init) ?? "loaded"
+    }
+
+    /// Uses the production tagged-entry decoder and message conversion.
+    @MainActor static func activeContextProjection() throws -> SessionTranscript {
+        let wire = activeContextState == "empty" ? "[]" : #"""
+        [
+          {"id":"active-summary","type":"compaction","status":"completed","reason":"manual","summary":"Model selection is saved on the server. The tests pass. Keep the current branch for review."},
+          {"id":"active-user","type":"user","text":"Continue with active context inspection."},
+          {"id":"active-reply","type":"assistant","content":[{"type":"text","text":"I’ll keep the context view separate from the full conversation."}]}
+        ]
+        """#
+        let entries = try JSONDecoder().decode([OCV2SessionMessage].self, from: Data(wire.utf8))
+        return SessionTranscript(
+            messages: entries.compactMap { $0.asMessage(sessionID: defaultSession.id) }.map { MessagesService.convert($0) },
+            contextEntries: entries.compactMap(\.contextEntry), entryOrder: entries.map(\.id)
+        )
+    }
+
     static var showsSubagentResults: Bool {
         ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SUBAGENT_RESULTS")
     }

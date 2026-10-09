@@ -302,6 +302,31 @@ actor OpenCodeClient {
 
     // MARK: - Messages
 
+    /// The server's active projection, independent of paged conversation history.
+    /// Session routes resolve their own location; never send the workspace picker
+    /// location as an override. The revision still protects against a changed binding.
+    func getActiveContext(sessionID: String) async throws -> [OCTranscriptEntry]? {
+        guard usesV2 else { return nil }
+        let revision = contextRevision
+        do {
+            let response: OCV2Envelope<[OCV2SessionMessage]> = try await getV2(
+                "/api/session/\(sessionID)/context", includesLocation: false
+            )
+            guard !Task.isCancelled, revision == contextRevision else { throw CancellationError() }
+            return response.data.compactMap { entry in
+                if let message = entry.asMessage(sessionID: sessionID) { return .message(message) }
+                if let context = entry.contextEntry { return .context(context) }
+                return nil
+            }
+        } catch {
+            guard !Task.isCancelled, revision == contextRevision else { throw CancellationError() }
+            // A structured SessionNotFoundError remains a failure, not an
+            // unsupported endpoint. Never hide auth/network/server errors.
+            if case OpenCodeError.httpError(let status) = error, [404, 405, 501].contains(status) { return nil }
+            throw error
+        }
+    }
+
     func listMessages(sessionID: String, limit: Int? = nil) async throws -> [OCMessageWithParts] {
         try await listTranscript(sessionID: sessionID, limit: limit).compactMap { entry in
             guard case .message(let message) = entry else { return nil }

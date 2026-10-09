@@ -12,6 +12,35 @@ final class MessagesService {
 
     // MARK: - Fetch Messages
 
+    /// `nil` means the negotiated protocol cannot supply active context.
+    /// Historical usage and history pages are never fallback context data.
+    func loadActiveContext(sessionID: String) async throws -> SessionTranscript? {
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let revision = connection.projectContextRevision
+        let entries: [OCTranscriptEntry]?
+        do {
+            entries = try await client.getActiveContext(sessionID: sessionID)
+        } catch {
+            guard !Task.isCancelled, connection.client === client,
+                  connection.projectContextRevision == revision else { throw CancellationError() }
+            throw error
+        }
+        guard !Task.isCancelled, connection.client === client,
+              connection.projectContextRevision == revision else { throw CancellationError() }
+        guard let entries else { return nil }
+        return SessionTranscript(
+            messages: entries.compactMap {
+                guard case .message(let message) = $0 else { return nil }
+                return Self.convert(message)
+            },
+            contextEntries: entries.compactMap {
+                guard case .context(let context) = $0 else { return nil }
+                return context
+            },
+            entryOrder: entries.map(\.id)
+        )
+    }
+
     /// Fetch all messages for a session, converted to local ChatMessage models.
     func loadMessages(sessionID: String) async throws -> [ChatMessage] {
         guard let client = connection.client else {

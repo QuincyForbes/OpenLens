@@ -140,10 +140,14 @@ final class ChatClient: SSEEventHandlerDelegate {
     private(set) var transcriptEntryOrder: [String] = []
     private(set) var displayedContextEntries: [SessionContextEntry] = []
     private(set) var displayedEntryOrder: [String] = []
+    private var activeContextSessionGeneration: UInt = 0
+    private var activeContextTranscriptRevision: UInt = 0
+    private var activeContextWasV2 = false
 
     /// Install one canonical snapshot atomically with respect to presentation.
     /// Live assistant reconciliation still runs through the existing message setter.
     func replaceTranscript(_ transcript: SessionTranscript) {
+        activeContextTranscriptRevision &+= 1
         contextEntries = transcript.contextEntries
         transcriptEntryOrder = transcript.entryOrder
         messages = transcript.messages
@@ -216,6 +220,15 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Current session being viewed.
     var currentSession: OCSession? {
         didSet {
+            if currentSession == nil {
+                activeContextWasV2 = false
+            } else if let version = connection?.serverCapabilities?.protocolVersion {
+                activeContextWasV2 = version == .v2
+            }
+            if currentSession?.id != oldValue?.id || currentSession?.directory != oldValue?.directory
+                || currentSession?.model != oldValue?.model || currentSession?.agent != oldValue?.agent {
+                activeContextSessionGeneration &+= 1
+            }
             guard currentSession?.id != oldValue?.id
                     || currentSession?.model != oldValue?.model
                     || currentSession?.agent != oldValue?.agent else { return }
@@ -999,12 +1012,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     static let stoppedResponseDisplayDuration: Duration = .milliseconds(1500)
     private static let statusRefreshIdleGraceInterval: TimeInterval = 1.5
 
-    // MARK: - Streaming Text Buffer
-    //
-    // Text deltas from SSE accumulate in a lightweight projection on the
-    // pending message. A flush timer coalesces rapid deltas into ~40ms UI updates, bumping
+    // MARK: - Context Inspection
 
     var contextUsageSummary: ContextUsageSummary? {
+        // V2 reply usage is historical work, not occupancy of the active projection.
+        guard !showsActiveContext else { return nil }
         guard let sourceMessage = latestAssistantMessageWithUsage(),
               let tokens = sourceMessage.tokens else { return nil }
 
@@ -1021,7 +1033,52 @@ final class ChatClient: SSEEventHandlerDelegate {
             modelLabel: sourceMessage.modelDisplayName
         )
     }
-    // `contentVersion` on each flush so the view can decide whether to scroll.
+
+    struct ActiveContextScope: Hashable {
+        let sessionID: String?
+        let directory: String?
+        let projectRevision: UInt?
+        let clientID: ObjectIdentifier?
+        let sessionGeneration: UInt
+        let transcriptRevision: UInt
+        let isReady: Bool
+    }
+
+    /// Also changes on Old → New → Old, canonical refresh, and rebind recovery.
+    var activeContextScope: ActiveContextScope {
+        .init(sessionID: currentSession?.id, directory: currentSession?.directory,
+              projectRevision: connection?.projectContextRevision,
+              clientID: connection?.client.map(ObjectIdentifier.init),
+              sessionGeneration: activeContextSessionGeneration,
+              transcriptRevision: activeContextTranscriptRevision,
+              isReady: sessionLocationState == .ready && isStreamSynchronized)
+    }
+
+    var showsActiveContext: Bool {
+        if let version = connection?.serverCapabilities?.protocolVersion { return version == .v2 }
+        // Losing the connection must not reinterpret V2 history as V1 occupancy.
+        return activeContextWasV2
+    }
+
+    /// Reads without installing active records into the full conversation.
+    func loadActiveContext() async throws -> SessionTranscript? {
+        let scope = activeContextScope
+        guard let sessionID = scope.sessionID, scope.isReady,
+              let messagesService else { return nil }
+        do {
+            let transcript = try await messagesService.loadActiveContext(sessionID: sessionID)
+            guard !Task.isCancelled, activeContextScope == scope else { throw CancellationError() }
+            return transcript
+        } catch {
+            guard !Task.isCancelled, activeContextScope == scope else { throw CancellationError() }
+            throw error
+        }
+    }
+    // MARK: - Streaming Text Buffer
+    //
+    // Text deltas from SSE accumulate in a lightweight projection on the
+    // pending message. A flush timer coalesces rapid deltas into ~40ms UI updates,
+    // bumping `contentVersion` on each flush so the view can decide whether to scroll.
     // The pending message is visible in `displayedMessages` during streaming
     // and committed to `messages` on `finishLoading()`.
 
