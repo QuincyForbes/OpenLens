@@ -43,13 +43,6 @@ struct ChatView: View {
     @State private var attachmentSource: ComposerAttachmentSource?
     @State private var previewedTextFile: PromptTextFileAttachment?
 
-    private enum ResultViewingState {
-        case awaitingResult
-        case observed(sessionID: String)
-    }
-
-    @State private var resultViewingState: ResultViewingState = .awaitingResult
-
     private struct ResultViewingContext: Equatable {
         let sessionID: String?
         let idle: Double?
@@ -85,7 +78,7 @@ struct ChatView: View {
             .environment(\.chatSkillIDs, availableSkills.map(\.id))
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
-            if let error = chatClient.sessionLocationError ?? chatClient.errorMessage {
+            if let error = chatClient.sessionLocationError ?? chatClient.resultViewingError ?? chatClient.errorMessage {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(isRetroChat ? RetroChatStyle.danger : .orange)
@@ -97,8 +90,8 @@ struct ChatView: View {
                     Button(chatClient.sessionLocationError == nil && chatClient.resultViewingError == nil ? AppText.dismiss : AppText.tryAgain) {
                         if chatClient.sessionLocationError != nil {
                             chatClient.synchronizeCurrentSessionFromServer()
-                        } else if chatClient.resultViewingError != nil, let observed = chatClient.currentSession {
-                            Task { await chatClient.viewCurrentResult(observed) }
+                        } else if chatClient.resultViewingError != nil {
+                            chatClient.retryViewingDisplayedResult()
                         } else {
                             chatClient.dismissError()
                         }
@@ -167,7 +160,7 @@ struct ChatView: View {
             displayedResponseState = chatClient.responseState
         }
         .onDisappear {
-            resultViewingState = .awaitingResult
+            chatClient.stopViewingResults()
         }
         // Initial load: ensure session is loaded when view appears
         .task {
@@ -191,23 +184,11 @@ struct ChatView: View {
             await loadCommands(force: true)
             await loadSkills(force: true)
         }
-        .task(id: resultViewingContext) {
-            guard scenePhase == .active else {
-                resultViewingState = .awaitingResult
-                return
-            }
-            guard chatClient.isStreamSynchronized, let observed = chatClient.currentSession,
-                  let idle = observed.time.idle, idle.isFinite, idle > 0 else { return }
-            if !observed.hasUnreadResult {
-                resultViewingState = .observed(sessionID: observed.id)
-                await chatClient.viewCurrentResult(observed)
-                return
-            }
-            // A visit acknowledges its captured completion once. A result
-            // arriving during that request belongs to a later viewing visit.
-            if case .observed(let sessionID) = resultViewingState, sessionID == observed.id { return }
-            resultViewingState = .observed(sessionID: observed.id)
-            await chatClient.viewCurrentResult(observed)
+        .onChange(of: resultViewingContext, initial: true) { _, _ in
+            chatClient.updateDisplayedResult(
+                chatClient.isStreamSynchronized ? chatClient.currentSession : nil,
+                isForeground: scenePhase == .active
+            )
         }
 
         // Foreground recovery: stream events may have been missed while iOS

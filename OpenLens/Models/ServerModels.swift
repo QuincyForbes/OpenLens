@@ -36,10 +36,20 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
     }
 
     /// Read attention belongs to the server's last idle transition, not updated time.
+    var completedResultMarker: Double? {
+        guard let idle = time.idle, idle.isFinite, idle > 0 else { return nil }
+        return idle
+    }
+
+    func hasViewedResult(at idle: Double) -> Bool {
+        guard idle.isFinite, idle > 0, let viewed = time.viewed,
+              viewed.isFinite, viewed >= 0 else { return false }
+        return viewed >= idle
+    }
+
     var hasUnreadResult: Bool {
-        guard let idle = time.idle, idle.isFinite, idle > 0 else { return false }
-        guard let viewed = time.viewed, viewed.isFinite, viewed >= 0 else { return true }
-        return idle > viewed
+        guard let idle = completedResultMarker else { return false }
+        return !hasViewedResult(at: idle)
     }
 
     /// Merge only a recovered read marker without overwriting a newer execution.

@@ -113,7 +113,8 @@ enum ScreenshotFixtures {
             ChatMessage(id: "fixture-assistant", role: .assistant, content: reply)
         ]
         if showsViewAcknowledgementFailure {
-            chat.errorMessage = "Failed to confirm viewed result: The network connection was lost."
+            chat.resultViewingState = .failed(sessionID: defaultSessionID, idle: defaultSession.time.idle ?? 0,
+                message: "Failed to confirm viewed result: The network connection was lost.")
         }
         switch executionState {
         case .working:

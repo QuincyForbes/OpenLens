@@ -1855,43 +1855,151 @@ final class ChatClient: SSEEventHandlerDelegate {
         await undo(message)
     }
 
-    var resultViewingError: String? {
-        errorMessage?.hasPrefix("Failed to confirm viewed result:") == true ? errorMessage : nil
+    enum ResultViewingState: Equatable {
+        case idle
+        case viewing(sessionID: String, idle: Double)
+        case failed(sessionID: String, idle: Double, message: String)
     }
 
-    /// Called by the visible chat, using the snapshot it presented. Background
-    /// synchronization alone never marks a completion read.
-    func viewCurrentResult(_ observed: OCSession) async {
-        guard !isOfflinePreviewMode, usesV2SessionAPI, isStreamSynchronized,
-              !Task.isCancelled, currentSession?.id == observed.id,
-              let sessionsService else { return }
-        guard observed.hasUnreadResult else {
-            // A later canonical refresh can confirm an earlier lost response.
-            // Clear its retry banner without repeating the view operation.
-            if let idle = observed.time.idle, idle.isFinite, idle > 0,
-               let viewed = observed.time.viewed, viewed.isFinite, viewed >= idle,
-               resultViewingError != nil {
-                errorMessage = nil
+    var resultViewingState: ResultViewingState = .idle
+    var resultViewingError: String? {
+        if case .failed(_, _, let message) = resultViewingState { return message }
+        return nil
+    }
+
+    @ObservationIgnored private var displayedResult: OCSession?
+    @ObservationIgnored private var resultViewingSessionID: String?
+    @ObservationIgnored private var resultViewingTask: Task<Void, Never>?
+    @ObservationIgnored private var resultViewingToken: UUID?
+
+    /// Visibility/display evidence comes from the view; acknowledgement policy
+    /// and the single-flight request survive transcript re-synchronization here.
+    func updateDisplayedResult(_ displayed: OCSession?, isForeground: Bool) {
+        guard !isOfflinePreviewMode, usesV2SessionAPI else { return }
+        guard isForeground else { stopViewingResults(); return }
+        if resultViewingSessionID != currentSession?.id { stopViewingResults() }
+        resultViewingSessionID = currentSession?.id
+        displayedResult = displayed
+        if let displayed { clearConfirmedViewingError(using: displayed) }
+        startViewingDisplayedResult()
+    }
+
+    func stopViewingResults() {
+        resultViewingTask?.cancel()
+        resultViewingTask = nil
+        resultViewingToken = nil
+        resultViewingSessionID = nil
+        displayedResult = nil
+        resultViewingState = .idle
+    }
+
+    func retryViewingDisplayedResult() {
+        guard resultViewingSessionID == currentSession?.id, displayedResult != nil else { return }
+        resultViewingState = .idle
+        startViewingDisplayedResult()
+    }
+
+    private func startViewingDisplayedResult() {
+        guard !isOfflinePreviewMode, usesV2SessionAPI, resultViewingTask == nil, let displayed = displayedResult,
+              displayed.id == currentSession?.id, displayed.hasUnreadResult else { return }
+        if case .failed(let sessionID, let idle, _) = resultViewingState,
+           sessionID == displayed.id, idle == displayed.completedResultMarker { return }
+        let token = UUID()
+        resultViewingToken = token
+        resultViewingTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.resultViewingToken == token {
+                    self.resultViewingTask = nil
+                    self.resultViewingToken = nil
+                    self.startViewingDisplayedResult()
+                }
             }
-            return
+            while !Task.isCancelled, self.resultViewingToken == token,
+                  let observed = self.displayedResult, observed.hasUnreadResult,
+                  observed.id == self.currentSession?.id {
+                guard await self.viewCurrentResult(observed) else { break }
+            }
         }
-        let generation = streamSynchronizationGeneration
-        let revision = connection?.projectContextRevision
+    }
+
+    private func clearConfirmedViewingError(using session: OCSession) {
+        if case .failed(let sessionID, let idle, _) = resultViewingState,
+           sessionID == session.id, session.hasViewedResult(at: idle) {
+            resultViewingState = .idle
+        }
+    }
+
+    /// Acknowledge exactly one displayed snapshot. Only the server's recovered
+    /// marker can cover it; a newer displayed result gets a separate request.
+    @discardableResult
+    func viewCurrentResult(_ observed: OCSession) async -> Bool {
+        guard !isOfflinePreviewMode, usesV2SessionAPI, !Task.isCancelled,
+              currentSession?.id == observed.id, let sessionsService else { return false }
+        clearConfirmedViewingError(using: observed)
+        guard observed.hasUnreadResult, let idle = observed.completedResultMarker else { return true }
+        let client = connection?.client
+        let loadToken = sessionLoadToken
         let isCurrent = { !Task.isCancelled && self.currentSession?.id == observed.id
-            && self.streamSynchronizationGeneration == generation
-            && self.connection?.projectContextRevision == revision }
+            && self.connection?.client === client && self.sessionLoadToken == loadToken }
+        resultViewingState = .viewing(sessionID: observed.id, idle: idle)
         do {
             let recovered = try await sessionsService.viewResult(observed)
-            guard isCurrent(), let viewed = recovered.time.viewed else { return }
-            // An SSE update may have already presented a newer idle transition.
-            // Do not replace its result/title/location with the view response.
+            guard isCurrent(), let viewed = recovered.time.viewed else { return false }
             currentSession = currentSession?.withViewedMarker(viewed)
-            if resultViewingError != nil { errorMessage = nil }
+            if displayedResult?.id == observed.id {
+                displayedResult = displayedResult?.withViewedMarker(viewed)
+            }
+            resultViewingState = .idle
+            return true
         } catch is CancellationError {
-            return
+            return false
         } catch {
-            guard isCurrent() else { return }
-            errorMessage = "Failed to confirm viewed result: \(error.localizedDescription)"
+            guard isCurrent() else { return false }
+            resultViewingState = .failed(sessionID: observed.id, idle: idle,
+                message: "Failed to confirm viewed result: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @ObservationIgnored private var viewedMarkerRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var viewedMarkerRefreshToken: UUID?
+    @ObservationIgnored private var viewedMarkerRefreshGeneration: UInt = 0
+
+    private func refreshViewedResultMarker() {
+        viewedMarkerRefreshGeneration &+= 1
+        guard viewedMarkerRefreshTask == nil, usesV2SessionAPI,
+              let sessionID = currentSession?.id, let sessionsService else { return }
+        let client = connection?.client
+        let token = UUID()
+        viewedMarkerRefreshToken = token
+        viewedMarkerRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.viewedMarkerRefreshToken == token {
+                    self.viewedMarkerRefreshTask = nil
+                    self.viewedMarkerRefreshToken = nil
+                }
+            }
+            repeat {
+                let generation = self.viewedMarkerRefreshGeneration
+                do {
+                    let recovered = try await sessionsService.refreshViewedMarker(id: sessionID)
+                    guard !Task.isCancelled, self.viewedMarkerRefreshToken == token,
+                          self.currentSession?.id == sessionID, self.connection?.client === client else { return }
+                    if let viewed = recovered.time.viewed {
+                        self.currentSession = self.currentSession?.withViewedMarker(viewed)
+                        if self.displayedResult?.id == sessionID {
+                            self.displayedResult = self.displayedResult?.withViewedMarker(viewed)
+                        }
+                        if let session = self.currentSession { self.clearConfirmedViewingError(using: session) }
+                    }
+                } catch {
+                    // This advisory read cannot invalidate outcomes or confirm
+                    // an acknowledgement. Explicit viewing retains its retry.
+                }
+                if generation == self.viewedMarkerRefreshGeneration { return }
+            } while !Task.isCancelled && self.viewedMarkerRefreshToken == token
         }
     }
 
@@ -4009,10 +4117,14 @@ final class ChatClient: SSEEventHandlerDelegate {
             return
         }
         if case .raw(let event) = inboundEvent,
-           event.type == "session.reconcile" || event.type == V2EventAdapter.inboxChangedEventType {
+           event.type == "session.reconcile" || event.type == V2EventAdapter.inboxChangedEventType
+            || event.type == V2EventAdapter.viewedChangedEventType {
             let sessionID = (event.properties?.value as? [String: Any])?["sessionID"] as? String
             guard sessionID == nil || sessionID == currentSession?.id else { return }
-            if event.type == "session.reconcile" {
+            if event.type == V2EventAdapter.viewedChangedEventType {
+                guard sessionID == currentSession?.id else { return }
+                refreshViewedResultMarker()
+            } else if event.type == "session.reconcile" {
                 if (event.properties?.value as? [String: Any])?["locationChanged"] as? Bool == true {
                     sessionLocationState = .rebinding
                 }
@@ -4958,6 +5070,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func resetSessionState() {
+        stopViewingResults()
+        viewedMarkerRefreshTask?.cancel()
+        viewedMarkerRefreshTask = nil
+        viewedMarkerRefreshToken = nil
+        viewedMarkerRefreshGeneration &+= 1
         sessionLocationState = .ready
         sessionSettingsChain = nil
         streamSynchronizationTask?.cancel()

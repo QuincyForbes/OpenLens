@@ -7,6 +7,7 @@ nonisolated struct V2EventAdapter {
     private static let maximumTools = 256
     /// Emitted when a session's pending inbox changed but its transcript did not.
     static let inboxChangedEventType = "session.inbox.changed"
+    static let viewedChangedEventType = "session.viewed.changed"
 
     private static let contentEvents: Set<String> = [
         "session.step.started", "session.step.streamed", "session.step.ended", "session.step.failed",
@@ -56,10 +57,15 @@ nonisolated struct V2EventAdapter {
         case "session.inbox.enqueued", "session.inbox.cancelled", "session.inbox.delivery.changed":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }
             return make(Self.inboxChangedEventType, ["sessionID": sessionID])
+        case "session.viewed":
+            guard let sessionID = data["sessionID"] as? String, StreamDisplayValue.fitsIdentifier(sessionID) else {
+                throw OpenCodeError.invalidPayload("Invalid native v2 viewed identity.")
+            }
+            return make(Self.viewedChangedEventType, ["sessionID": sessionID])
         case "permission.replied", "session.inbox.delivered",
              "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
              "session.revert.committed", "session.revert.staged", "session.revert.cleared",
-             "session.message.content.updated", "session.deleted", "session.idle", "session.viewed":
+             "session.message.content.updated", "session.deleted", "session.idle":
             return reconcile()
         case "session.execution.started":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }

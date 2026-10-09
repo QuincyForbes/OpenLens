@@ -190,6 +190,9 @@ struct SessionsListView: View {
             // Queue affected rows for the existing poll without restarting catalog recovery.
             openedSessionIDs.formUnion([previousID, currentID].compactMap { $0 })
         }
+        .onChange(of: sessionsService.confirmedViewedMarkers, initial: true) { _, _ in
+            sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
+        }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await loadSessionStatuses(refreshInactive: true)
@@ -202,7 +205,7 @@ struct SessionsListView: View {
                 // Desktop viewing can change idle rows without an active-entry
                 // transition. Reconcile attention periodically while visible.
                 let refreshAttention = Date().timeIntervalSince(lastAttentionRefresh) >= 30
-                await loadSessionStatuses(refreshInactive: refreshAttention)
+                await loadSessionStatuses(refreshAttention: refreshAttention)
                 if refreshAttention { lastAttentionRefresh = Date() }
             }
         }
@@ -485,7 +488,7 @@ struct SessionsListView: View {
         }
     }
 
-    private func loadSessionStatuses(refreshInactive: Bool = false) async {
+    private func loadSessionStatuses(refreshInactive: Bool = false, refreshAttention: Bool = false) async {
         guard !sessions.isEmpty, !Task.isCancelled, !isLoading else { return }
         outcomeRefreshGeneration &+= 1
         let generation = outcomeRefreshGeneration
@@ -495,10 +498,15 @@ struct SessionsListView: View {
         )
         guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
         applyExecutionSnapshot(snapshot, requestedIDs: requestedIDs)
+        if refreshAttention {
+            let refreshed = await sessionsService.refreshUnreadResults(in: sessions, statuses: sessionStatuses)
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+            sessions = sessionsService.applyingConfirmedViewedMarkers(to: refreshed)
+        }
     }
 
     private func applyExecutionSnapshot(_ snapshot: SessionExecutionSnapshot, requestedIDs: Set<String>) {
-        sessions = snapshot.sessions
+        sessions = sessionsService.applyingConfirmedViewedMarkers(to: snapshot.sessions)
         sessionStatuses = snapshot.statuses
         failedOutcomeSessionIDs = snapshot.failedOutcomeSessionIDs
         openedSessionIDs.subtract(requestedIDs)

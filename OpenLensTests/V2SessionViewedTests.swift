@@ -5,6 +5,7 @@ import UIKit
 @testable import OpenLens
 
 @MainActor
+@Suite(.serialized)
 struct V2SessionViewedTests {
     @Test func canonicalViewedMarkerSurvivesDecodingAndSessionCopies() throws {
         let session = try JSONDecoder().decode(OCSession.self, from: Data(#"{"id":"ses_1","outcome":"failed","time":{"created":1000,"updated":2100,"idle":2000,"viewed":1900}}"#.utf8))
@@ -85,12 +86,81 @@ struct V2SessionViewedTests {
         #expect(await server.viewRequests.isEmpty)
     }
 
-    @Test func aDesktopViewedEventReconcilesRatherThanGuessingFromItsPayload() throws {
+    @Test func confirmedViewingImmediatelyUpdatesMatchingSidebarRowsAndSurvivesAnOlderPoll() async throws {
+        let server = ViewedTransport()
+        let service = try await makeService(server)
+        let row = try await service.getSession(id: "ses_1")
+        let other = OCSession(id: "ses_other", title: "Other", time: row.time, outcome: "succeeded")
+        _ = try await service.viewResult(row)
+        let updated = service.applyingConfirmedViewedMarkers(to: [row, other])
+        #expect(updated[0].time.viewed == 2000)
+        #expect(!updated[0].hasUnreadResult)
+        #expect(updated[0].outcome == row.outcome)
+        #expect(updated[1] == other)
+        // A poll captured before confirmation cannot bring its badge back.
+        #expect(service.applyingConfirmedViewedMarkers(to: [row])[0].hasUnreadResult == false)
+        let newer = OCSession(id: "ses_1", title: "New", time: .init(created: 1000, updated: 3000, idle: 3000))
+        #expect(service.applyingConfirmedViewedMarkers(to: [newer])[0].hasUnreadResult)
+    }
+
+    @Test func periodicAttentionRefreshReadsOnlyUnreadInactiveRowsAndPreservesOutcomesOnFailure() async throws {
+        let server = ViewedTransport()
+        let service = try await makeService(server)
+        let unread = try await service.getSession(id: "ses_1")
+        let other = OCSession(id: "ses_unread", title: "Unread", time: unread.time, outcome: "succeeded")
+        let active = OCSession(id: "ses_active", title: "Running", time: unread.time, outcome: "succeeded")
+        let readRows = (1...200).map {
+            OCSession(id: "ses_read_\($0)", title: "Read", time: .init(created: 1000, updated: 2000, idle: 2000, viewed: 2000))
+        }
+        let rows = [unread, other, active] + readRows
+        await server.desktopViewed(2000)
+        await server.resetSessionReads()
+        let statuses = [active.id: OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil)]
+        let refreshed = await service.refreshUnreadResults(in: rows, statuses: statuses)
+        #expect(Set(await server.sessionReads) == ["ses_1", "ses_unread"])
+        #expect(await server.sessionReads.count == 2)
+        #expect(refreshed[0].hasUnreadResult == false)
+        #expect(refreshed[1].hasUnreadResult == false)
+        #expect(refreshed[1].outcome == "succeeded")
+        #expect(refreshed[2] == active)
+        await server.failAllReads()
+        let failed = await service.refreshUnreadResults(in: [
+            OCSession(id: "ses_1", title: "New result", time: .init(created: 1000, updated: 3000, idle: 3000), outcome: "succeeded")
+        ], statuses: [:])
+        #expect(failed[0].outcome == "succeeded")
+        #expect(failed[0].hasUnreadResult)
+    }
+
+    @Test func aDesktopViewedEventRequestsOnlyReadMarkerRecovery() throws {
         var adapter = V2EventAdapter()
         let event = try #require(try adapter.event(["type": "session.viewed", "data": ["sessionID": "ses_1", "idle": 2000]], directory: nil))
-        #expect(event.type == "session.reconcile")
+        #expect(event.type == "session.viewed.changed")
         let data = try #require(event.properties?.value as? [String: Any])
         #expect(data["sessionID"] as? String == "ses_1")
+    }
+
+    @Test(arguments: ["ses_1", "ses_other"])
+    func viewedEventsRefreshOnlyTheMatchingMarkerWithoutReloadingHistory(sessionID: String) async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        let original = try #require(chat.currentSession)
+        chat.currentSession = OCSession(id: original.id, title: "Displayed title", time: original.time, outcome: original.outcome)
+        chat.messages = [ChatMessage(id: "displayed", role: .assistant, content: "Keep this history")]
+        await server.desktopViewed(2000)
+        await server.resetRequests()
+        var adapter = V2EventAdapter()
+        let event = try #require(try adapter.event(["type": "session.viewed", "data": ["sessionID": sessionID, "idle": 2000]], directory: nil))
+        chat.receiveStreamEvent(.raw(event))
+        if sessionID == "ses_1" {
+            try await waitUntil { chat.currentSession?.time.viewed == 2000 }
+            #expect(await server.requestPaths == ["/api/session/ses_1"])
+        } else {
+            #expect(await server.requestPaths.isEmpty)
+            #expect(chat.currentSession?.hasUnreadResult == true)
+        }
+        #expect(chat.currentSession?.title == "Displayed title")
+        #expect(chat.messages.map(\.id) == ["displayed"])
+        #expect(chat.isStreamSynchronized)
     }
 
     @Test func chatDoesNotReplaceANewerVisibleCompletionWithAnOldViewResponse() async throws {
@@ -229,7 +299,7 @@ struct V2SessionViewedTests {
             .environment(\.workspaceService, WorkspaceService(connection: connection)))
         window.isHidden = false
         defer { window.isHidden = true; window.rootViewController = nil }
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitUntil { visibility.renderedActive == false }
         #expect(await server.viewRequests.isEmpty)
         visibility.isActive = true
         for _ in 0..<200 {
@@ -240,7 +310,7 @@ struct V2SessionViewedTests {
         #expect(await server.viewRequests.count == 1)
     }
 
-    @Test func aNewCompletionDuringVisibleViewingWaitsUntilTheNextVisit() async throws {
+    @Test func visibleCompletionsAreAcknowledgedSeriallyWithTheirOwnObservedMarkers() async throws {
         let server = ViewedTransport()
         let chat = try await makeChat(server)
         let visibility = ViewedChatVisibility()
@@ -258,22 +328,99 @@ struct V2SessionViewedTests {
         try await waitForView(server)
         await server.complete(3000)
         chat.currentSession = try await makeService(server).getSession(id: "ses_1")
-        // Let the updated view react while the old acknowledgement is held.
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(await server.viewRequests.count == 1)
         await server.releaseView()
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(chat.currentSession?.hasUnreadResult == true)
-        #expect(try await makeService(server).getSession(id: "ses_1").time.viewed == 2000)
-        visibility.isActive = false
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitUntil { chat.currentSession?.time.viewed == 3000 || chat.resultViewingError != nil }
+        #expect(chat.currentSession?.time.viewed == 3000)
+        #expect(await server.observedMarkers == [2000, 3000])
+        #expect(await server.maximumConcurrentViews == 1)
+        #expect(chat.currentSession?.hasUnreadResult == false)
+        // A third result watched after the previous request settles also gets read.
+        await server.complete(4000)
+        chat.currentSession = try await makeService(server).getSession(id: "ses_1")
+        try await waitUntil { chat.currentSession?.time.viewed == 4000 }
+        #expect(await server.observedMarkers == [2000, 3000, 4000])
+    }
+
+    @Test(arguments: ["post", "canonical-read"])
+    func aResyncDoesNotDropAnInFlightVisibleAcknowledgement(phase: String) async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        let visibility = ViewedChatVisibility()
         visibility.isActive = true
-        for _ in 0..<200 {
-            if chat.currentSession?.time.viewed == 3000 { break }
+        if phase == "post" { await server.holdView() } else { await server.holdAcknowledgementRead() }
+        let window = try await showChat(chat, visibility: visibility, server: server)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitUntil {
+            let waiting = await server.isWaiting
+            let reading = await server.isWaitingForRead
+            return waiting || reading
+        }
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil {
+            let reads = await server.statusReads
+            return chat.isStreamSynchronized && reads > 0
+        }
+        await server.releaseView()
+        await server.releaseRead()
+        try await waitUntil { chat.currentSession?.time.viewed == 2000 || chat.resultViewingError != nil }
+        #expect(chat.currentSession?.time.viewed == 2000)
+        #expect(chat.resultViewingError == nil)
+        #expect(await server.observedMarkers == [2000])
+    }
+
+    @Test func acknowledgementErrorsKeepTheirRetryRouteWhenOtherErrorsChange() async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        let observed = try #require(chat.currentSession)
+        await server.loseResponse(committed: false)
+        await chat.viewCurrentResult(observed)
+        chat.errorMessage = "Another operation failed"
+        #expect(chat.resultViewingError != nil)
+        await server.allowView()
+        chat.updateDisplayedResult(observed, isForeground: true)
+        chat.retryViewingDisplayedResult()
+        try await waitUntil { chat.currentSession?.time.viewed == 2000 }
+        #expect(chat.resultViewingError == nil)
+        #expect(chat.errorMessage == "Another operation failed")
+    }
+
+    @Test func displayedMarkersCoalesceWhileOneAcknowledgementIsHeld() async throws {
+        let server = ViewedTransport()
+        let chat = try await makeChat(server)
+        await server.holdView()
+        chat.updateDisplayedResult(chat.currentSession, isForeground: true)
+        try await waitForView(server)
+        await server.complete(3000)
+        chat.currentSession = try await makeService(server).getSession(id: "ses_1")
+        chat.updateDisplayedResult(chat.currentSession, isForeground: true)
+        await server.complete(4000)
+        chat.currentSession = try await makeService(server).getSession(id: "ses_1")
+        chat.updateDisplayedResult(chat.currentSession, isForeground: true)
+        await server.releaseView()
+        try await waitUntil { chat.currentSession?.time.viewed == 4000 }
+        #expect(await server.observedMarkers == [2000, 4000])
+        #expect(await server.maximumConcurrentViews == 1)
+        chat.stopViewingResults()
+    }
+
+    private func showChat(_ chat: ChatClient, visibility: ViewedChatVisibility, server: ViewedTransport) async throws -> UIWindow {
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: server)
+        let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: ViewedChatHarness(chat: chat, visibility: visibility)
+            .environment(\.connection, connection)
+            .environment(\.workspaceService, WorkspaceService(connection: connection)))
+        window.isHidden = false
+        return window
+    }
+
+    private func waitUntil(_ condition: @MainActor () async -> Bool) async throws {
+        for _ in 0..<500 {
+            if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(chat.currentSession?.hasUnreadResult == false)
-        #expect(await server.viewRequests.count == 2)
+        throw ViewedTestTimeout()
     }
 
     private func makeChat(_ server: ViewedTransport) async throws -> ChatClient {
@@ -309,6 +456,15 @@ private actor ViewedTransport: OpenCodeTransport {
     var idle: Double = 2000
     var viewed: Double?
     var viewRequests: [URLRequest] = []
+    var concurrentViews = 0
+    var maximumConcurrentViews = 0
+    var observedMarkers: [Double] {
+        viewRequests.compactMap { request in
+            guard let data = request.httpBody,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Double] else { return nil }
+            return json["idle"]
+        }
+    }
     var completesDuringView = false
     var commitsView = true
     var losesResponse = false
@@ -316,6 +472,12 @@ private actor ViewedTransport: OpenCodeTransport {
     var failsReadAfterView = false
     var failsReads = false
     var usesV2 = true
+    var holdsAcknowledgementRead = false
+    var readWaiter: CheckedContinuation<Void, Never>?
+    var isWaitingForRead: Bool { readWaiter != nil }
+    var statusReads = 0
+    var sessionReads: [String] = []
+    var requestPaths: [String] = []
     var waiters: [CheckedContinuation<Void, Never>] = []
     var isWaiting: Bool { !waiters.isEmpty }
 
@@ -326,13 +488,19 @@ private actor ViewedTransport: OpenCodeTransport {
     func loseResponse(committed: Bool) { losesResponse = true; commitsView = committed }
     func allowView() { losesResponse = false; commitsView = true }
     func holdView() { holdsView = true }
+    func holdAcknowledgementRead() { holdsAcknowledgementRead = true }
+    func releaseRead() { readWaiter?.resume(); readWaiter = nil }
     func releaseView() { holdsView = false; waiters.forEach { $0.resume() }; waiters = [] }
     func failReadAfterView() { failsReadAfterView = true }
+    func resetRequests() { requestPaths = [] }
+    func resetSessionReads() { sessionReads = [] }
+    func failAllReads() { failsReads = true }
     func allowReads() { failsReads = false; failsReadAfterView = false }
     func useLegacy() { usesV2 = false }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         let url = request.url!
+        requestPaths.append(url.path)
         let body: String
         var status = 200
         switch url.path {
@@ -342,6 +510,9 @@ private actor ViewedTransport: OpenCodeTransport {
         case "/global/health": body = #"{"healthy":true,"version":"1.2.0"}"#
         case "/api/session/ses_1/view":
             viewRequests.append(request)
+            concurrentViews += 1
+            maximumConcurrentViews = max(maximumConcurrentViews, concurrentViews)
+            defer { concurrentViews -= 1 }
             if holdsView { await withCheckedContinuation { waiters.append($0) } }
             if completesDuringView { idle = 3000 }
             let requestBody = try #require(request.httpBody)
@@ -351,14 +522,20 @@ private actor ViewedTransport: OpenCodeTransport {
             if losesResponse { throw URLError(.networkConnectionLost) }
             body = ""
             status = 204
-        case "/api/session/ses_1", "/api/session":
+        case let path where path == "/api/session" || (path.hasPrefix("/api/session/") && request.httpMethod == "GET"
+            && !["active", "message", "inbox", "permission", "form"].contains(url.lastPathComponent)):
+            if path != "/api/session" { sessionReads.append(url.lastPathComponent) }
+            if holdsAcknowledgementRead, !viewRequests.isEmpty {
+                holdsAcknowledgementRead = false
+                await withCheckedContinuation { readWaiter = $0 }
+            }
             if failsReads { throw URLError(.networkConnectionLost) }
             var time: [String: Double] = ["created": 1000, "updated": 2100, "idle": idle]
             time["viewed"] = viewed
-            let session: [String: Any] = ["id": "ses_1", "title": "Result", "time": time, "outcome": "failed"]
+            let session: [String: Any] = ["id": url.path == "/api/session" ? "ses_1" : url.lastPathComponent, "title": "Result", "time": time, "outcome": "failed"]
             let response: [String: Any] = url.path == "/api/session" ? ["data": [session], "cursor": ["next": NSNull()]] : ["data": session]
             body = String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self)
-        case "/api/session/active": body = #"{"data":{}}"#
+        case "/api/session/active": statusReads += 1; body = #"{"data":{}}"#
         case "/api/session/ses_1/message": body = #"{"data":[],"cursor":{"next":null}}"#
         case "/api/session/ses_1/inbox", "/api/session/ses_1/permission", "/api/session/ses_1/form": body = #"{"data":[]}"#
         default: throw URLError(.unsupportedURL)
@@ -378,6 +555,7 @@ private final class ViewedUnusedStream: OpenCodeEventStream, @unchecked Sendable
 @MainActor @Observable
 private final class ViewedChatVisibility {
     var isActive = false
+    var renderedActive: Bool?
 }
 
 private struct ViewedChatHarness: View {
@@ -386,5 +564,8 @@ private struct ViewedChatHarness: View {
     var body: some View {
         ChatView(chatClient: chat, initialSession: chat.currentSession)
             .environment(\.scenePhase, visibility.isActive ? .active : .background)
+            .onChange(of: visibility.isActive, initial: true) { _, active in visibility.renderedActive = active }
     }
 }
+
+private struct ViewedTestTimeout: Error {}
