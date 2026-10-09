@@ -73,6 +73,19 @@ Commits: `8fee5d0`, corrected after AFK review in `2dba41c`, with post-commit ca
 
 Verified after both reviews with 546 passing tests in 57 suites on the dedicated AFK simulator on 2026-10-09. Ticket 08 has 20 tests with 59 cases, including real SSE parsing/filter/reconnect callbacks over an injected stream transport, navigation restoration, cancelled recovery (including nine post-commit metadata/model cancellation cases), and ten settings-wait/send cases that also assert active response and Live Activity preservation for queued work. Screenshots show [the rebound chat and command catalog](screenshots/08-rebound-chat.png), [the restored Workspace project and branch](screenshots/08-rebound-files.png), [a refused rebind with its bound header and retry](screenshots/08-rebind-failed.png), [restored unsent text and an inline phone file](screenshots/08-unsent-move.png), and [a restored queued command alongside the running response](screenshots/08-queued-command-move.png). This supersedes the original 538-test completion claims and the earlier 545-test repair verification. A live V2 server/two-device move or prompt execution and manual iPad navigation remain unverified; raw stream behavior and the navigation service helper are covered through injected transports. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
 
+## 09: Show running and completed V2 subagent tools
+
+Commit: `7e179e6`, including the ticket's done status.
+
+- Legacy `task` tools and V2 `subagent` tools show the same delegated-work cards in streamed and reopened conversations.
+- A successful background launch stays Working while its child metadata says running, even after the parent's reply ends. Completed children show Done; failed calls show Error.
+- A launch shows a Subagent card before its agent or task details arrive. Its Working label remains visible even without a detail line.
+- Unknown or malformed child metadata leaves the tool and transcript readable. Supported status values and validated child-session identifiers survive stream safety preparation; unsafe identifiers are dropped rather than shortened or used as session links.
+- Permissions and forms from linked children retain their owning session. Unrelated requests and links from a previous parent do not become requests for the newly opened chat.
+- Later delivery of synthetic background results remains ticket 11; opening child conversations remains ticket 23.
+
+Verified with 554 passing tests in 58 suites on the dedicated AFK simulator on 2026-10-09. Screenshots show [Working, Done and Error cards](screenshots/09-subagent-tools.png) and [a launch before input arrives](screenshots/09-subagent-pending.png), with the chat tab bar hidden. No live V2 server/two-device run, physical-device run or manual iPad navigation was performed. Remote and its gateway were removed in `77b72ac`, so this follows the current direct-connection scope.
+
 ## 13: Send screenshots and supported photos in V2 prompts
 
 Commits: `c685bb2`, marked done in `b61ed5a`.
