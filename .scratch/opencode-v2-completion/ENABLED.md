@@ -150,3 +150,15 @@ Commits: `dbc37f0`, marked done in `cb1a25c`.
 - Limitations:
   - Withheld files can't be fetched on demand.
   - Server files open only inside the session folder, up to 8 MiB.
+
+## 10: Preserve useful V2 context changes in the timeline
+
+Commit: `f6e020b`, including the ticket's done status.
+
+- Your conversation now shows model, agent and location changes, system updates and activated skills in their original position, as compact context rows.
+- You can expand rows to read previous selections/location, system instructions and skill text. Saved shell results expose output and exit codes; compaction rows expose the saved summary, recent context and failure details.
+- Idle entries show where an execution succeeded, failed or was interrupted. Unknown outcomes keep a neutral completion label.
+- Refreshing, reconnecting and receiving context changes from the desktop restore the same ordered history without duplicate rows. Overlapping pages retain the latest record in its original position, and unknown entry kinds leave the rest of history usable.
+- Load earlier history restores older context alongside messages and tool results. A staged revert hides both at the same canonical boundary. Existing V1 chat and chat tab bar hiding remain available.
+
+Verified with **590 passing tests in 60 suites** on the dedicated AFK simulator on 2026-10-09. Screenshots show [context changes](screenshots/10-context-changes.png), [compact results alongside a reply](screenshots/10-context-results.png), and [expanded shell/compaction details](screenshots/10-context-details.png). Live two-client server and physical-device behavior remain unverified; injected transport/native-event tests and simulator captures cover the implemented behavior. Per-token compaction summary updates, compaction admission, active-context inspection, shell output paging/PTY and synthetic background-child delivery remain outside this ticket. Remote and its gateway were removed in `77b72ac`.
