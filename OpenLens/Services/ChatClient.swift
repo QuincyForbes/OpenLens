@@ -1855,6 +1855,46 @@ final class ChatClient: SSEEventHandlerDelegate {
         await undo(message)
     }
 
+    var resultViewingError: String? {
+        errorMessage?.hasPrefix("Failed to confirm viewed result:") == true ? errorMessage : nil
+    }
+
+    /// Called by the visible chat, using the snapshot it presented. Background
+    /// synchronization alone never marks a completion read.
+    func viewCurrentResult(_ observed: OCSession) async {
+        guard !isOfflinePreviewMode, usesV2SessionAPI, isStreamSynchronized,
+              !Task.isCancelled, currentSession?.id == observed.id,
+              let sessionsService else { return }
+        guard observed.hasUnreadResult else {
+            // A later canonical refresh can confirm an earlier lost response.
+            // Clear its retry banner without repeating the view operation.
+            if let idle = observed.time.idle, idle.isFinite, idle > 0,
+               let viewed = observed.time.viewed, viewed.isFinite, viewed >= idle,
+               resultViewingError != nil {
+                errorMessage = nil
+            }
+            return
+        }
+        let generation = streamSynchronizationGeneration
+        let revision = connection?.projectContextRevision
+        let isCurrent = { !Task.isCancelled && self.currentSession?.id == observed.id
+            && self.streamSynchronizationGeneration == generation
+            && self.connection?.projectContextRevision == revision }
+        do {
+            let recovered = try await sessionsService.viewResult(observed)
+            guard isCurrent(), let viewed = recovered.time.viewed else { return }
+            // An SSE update may have already presented a newer idle transition.
+            // Do not replace its result/title/location with the view response.
+            currentSession = currentSession?.withViewedMarker(viewed)
+            if resultViewingError != nil { errorMessage = nil }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrent() else { return }
+            errorMessage = "Failed to confirm viewed result: \(error.localizedDescription)"
+        }
+    }
+
     /// Reloads the active session projection and transcript after a user-driven
     /// mutation whose server result may be incomplete or conflict with ongoing
     /// work. The REST snapshot keeps the chat and turn-diff state recoverable.

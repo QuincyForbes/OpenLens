@@ -59,7 +59,7 @@ nonisolated struct V2EventAdapter {
         case "permission.replied", "session.inbox.delivered",
              "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
              "session.revert.committed", "session.revert.staged", "session.revert.cleared",
-             "session.message.content.updated", "session.deleted", "session.idle":
+             "session.message.content.updated", "session.deleted", "session.idle", "session.viewed":
             return reconcile()
         case "session.execution.started":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }

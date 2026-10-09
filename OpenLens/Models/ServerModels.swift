@@ -35,6 +35,24 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         return state
     }
 
+    /// Read attention belongs to the server's last idle transition, not updated time.
+    var hasUnreadResult: Bool {
+        guard let idle = time.idle, idle.isFinite, idle > 0 else { return false }
+        guard let viewed = time.viewed, viewed.isFinite, viewed >= 0 else { return true }
+        return idle > viewed
+    }
+
+    /// Merge only a recovered read marker without overwriting a newer execution.
+    func withViewedMarker(_ viewed: Double) -> OCSession {
+        OCSession(
+            id: id, projectID: projectID, directory: directory, parentID: parentID,
+            title: title, version: version,
+            time: .init(created: time.created, updated: time.updated, compacting: time.compacting,
+                        idle: time.idle, viewed: max(time.viewed ?? 0, viewed)),
+            share: share, revert: revert, agent: agent, model: model, outcome: outcome
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, projectID, directory, location, parentID, title, version, time, share, revert, agent, model, outcome
     }
@@ -115,6 +133,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
             && lhs.model == rhs.model
             && lhs.outcome == rhs.outcome
             && lhs.time.idle == rhs.time.idle
+            && lhs.time.viewed == rhs.time.viewed
     }
 
     /// Returns a copy with v2 canonical selection fields replaced.
@@ -180,12 +199,14 @@ nonisolated struct OCSessionTime: Codable, Hashable, Sendable {
     let updated: Double
     let compacting: Double?
     let idle: Double?
+    let viewed: Double?
 
-    init(created: Double, updated: Double, compacting: Double? = nil, idle: Double? = nil) {
+    init(created: Double, updated: Double, compacting: Double? = nil, idle: Double? = nil, viewed: Double? = nil) {
         self.created = created
         self.updated = updated
         self.compacting = compacting
         self.idle = idle
+        self.viewed = viewed
     }
 
     init(from decoder: Decoder) throws {
@@ -194,10 +215,11 @@ nonisolated struct OCSessionTime: Codable, Hashable, Sendable {
         updated = try container.decodeIfPresent(Double.self, forKey: .updated) ?? 0
         compacting = try container.decodeIfPresent(Double.self, forKey: .compacting)
         idle = try? container.decodeIfPresent(Double.self, forKey: .idle)
+        viewed = try? container.decodeIfPresent(Double.self, forKey: .viewed)
     }
 
     enum CodingKeys: String, CodingKey {
-        case created, updated, compacting, idle
+        case created, updated, compacting, idle, viewed
     }
 }
 

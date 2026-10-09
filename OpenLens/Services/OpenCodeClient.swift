@@ -259,6 +259,17 @@ actor OpenCodeClient {
         return try await patch("/session/\(id)", body: ["title": title])
     }
 
+    /// Advance only the idle watermark the viewer actually observed.
+    func viewSessionResult(id: String, idle: Double) async throws {
+        guard usesV2, idle.isFinite, idle > 0 else {
+            throw OpenCodeError.invalidPayload("Viewing results requires a V2 session idle marker.")
+        }
+        try await sendV2RequestDiscardingResponse(
+            method: "POST", path: "/api/session/\(id)/view",
+            body: ["idle": idle], includesLocation: false
+        )
+    }
+
     func getSessionStatus() async throws -> [String: OCSessionStatus] {
         if usesV2 {
             let response: OCV2Envelope<[String: OCV2ActiveSession]> = try await getV2(

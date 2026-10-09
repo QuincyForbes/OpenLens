@@ -287,6 +287,29 @@ final class SessionsService {
         resolvingProjectDirectories(in: [session])[0]
     }
 
+    /// The response can be lost after the server commits. Always reconcile the
+    /// canonical watermark; never persist a locally guessed acknowledgement.
+    func viewResult(_ observed: OCSession) async throws -> OCSession {
+        guard connection.serverCapabilities?.protocolVersion == .v2,
+              observed.hasUnreadResult, let idle = observed.time.idle else { return observed }
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        try Task.checkCancellation()
+        var acknowledgementError: Error?
+        do {
+            try await client.viewSessionResult(id: observed.id, idle: idle)
+        } catch {
+            acknowledgementError = error
+        }
+        try Task.checkCancellation()
+        let recovered = try await getSession(id: observed.id)
+        try Task.checkCancellation()
+        guard recovered.id == observed.id,
+              let viewed = recovered.time.viewed, viewed.isFinite, viewed >= idle else {
+            throw acknowledgementError ?? OpenCodeError.invalidPayload("The server has not confirmed viewing this result.")
+        }
+        return recovered
+    }
+
     // MARK: - Abort
 
     /// Abort the active generation on a session.

@@ -67,7 +67,15 @@ enum ScreenshotFixtures {
     }
 
     static var showsExecutionOutcomes: Bool {
-        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_EXECUTION_OUTCOMES")
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_EXECUTION_OUTCOMES") || showsUnreadResults
+    }
+
+    static var showsUnreadResults: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_UNREAD_RESULTS") || showsViewAcknowledgementFailure
+    }
+
+    static var showsViewAcknowledgementFailure: Bool {
+        ProcessInfo.processInfo.arguments.contains("SCREENSHOT_VIEW_ACK_FAILED")
     }
 
     static var simulatesOutcomeRefresh: Bool {
@@ -104,6 +112,9 @@ enum ScreenshotFixtures {
             ChatMessage(id: "fixture-user", role: .user, content: "Run the test suite and report the result."),
             ChatMessage(id: "fixture-assistant", role: .assistant, content: reply)
         ]
+        if showsViewAcknowledgementFailure {
+            chat.errorMessage = "Failed to confirm viewed result: The network connection was lost."
+        }
         switch executionState {
         case .working:
             chat.beginExternalResponse()
@@ -240,7 +251,10 @@ enum ScreenshotFixtures {
         let idle = nowMilliseconds - minutesAgo * 60 * 1000
         return OCSession(
             id: id, projectID: projectID, directory: projectPath, title: title,
-            time: .init(created: nowMilliseconds - dayMilliseconds, updated: idle, idle: outcome == nil ? nil : idle),
+            time: .init(created: nowMilliseconds - dayMilliseconds, updated: idle,
+                        idle: outcome == nil ? nil : idle,
+                        viewed: showsUnreadResults && (id == "session-screenshot-4"
+                            || ProcessInfo.processInfo.arguments.contains("SCREENSHOT_RESULT_VIEWED")) ? idle : nil),
             outcome: outcome
         )
     }

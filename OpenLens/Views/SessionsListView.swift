@@ -195,10 +195,15 @@ struct SessionsListView: View {
             await loadSessionStatuses(refreshInactive: true)
             guard connection.serverCapabilities?.protocolVersion == .v2
                     || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
+            var lastAttentionRefresh = Date()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
-                await loadSessionStatuses()
+                // Desktop viewing can change idle rows without an active-entry
+                // transition. Reconcile attention periodically while visible.
+                let refreshAttention = Date().timeIntervalSince(lastAttentionRefresh) >= 30
+                await loadSessionStatuses(refreshInactive: refreshAttention)
+                if refreshAttention { lastAttentionRefresh = Date() }
             }
         }
     }
@@ -379,6 +384,18 @@ struct SessionsListView: View {
             }
 
             Spacer()
+
+            if !isBusy, session.hasUnreadResult,
+               connection.serverCapabilities?.protocolVersion == .v2 || ScreenshotFixtures.showsExecutionOutcomes {
+                Text(AppText.unreadResult)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.appAccent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.appAccent.opacity(0.12), in: Capsule())
+                    .accessibilityLabel(AppText.unreadResultAccessibility)
+                    .accessibilityIdentifier("session.unreadResult.\(session.id)")
+            }
 
             if !isSidebar {
                 Image(systemName: "chevron.right")

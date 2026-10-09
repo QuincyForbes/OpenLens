@@ -14,6 +14,8 @@ enum AppText {
     static let autoReconnectErrorTitle = "Could not reach the saved server"
     static let autoReconnectSubtitle = "Connect to your last computer when you open OpenLens"
     static let back = "Back"
+    static let unreadResult = "Unread"
+    static let unreadResultAccessibility = "Unread result"
     static let basicAuth = "Basic Auth"
     static let branch = "Branch"
     static let browseCaptures = "Browse Captures"
