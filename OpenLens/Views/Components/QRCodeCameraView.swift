@@ -134,8 +134,7 @@ struct QRCodeCameraView: View {
         guard isActive && scenePhase == .active else { return }
         guard !hasScanned else { return }
 
-        guard let url = URL(string: code.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let scannedCode = ScannedOpenLensCode(url: url) else {
+        guard let scannedCode = ScannedOpenLensCode(rawValue: code) else {
             errorMessage = AppText.qrInvalid
             return
         }

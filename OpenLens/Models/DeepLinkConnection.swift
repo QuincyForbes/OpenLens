@@ -1,7 +1,7 @@
 import Foundation
 
 /// Parsed connection data from an `openlens://connect` deep link or QR code scan.
-struct DeepLinkConnection: Equatable {
+struct DeepLinkConnection: Equatable, Sendable {
     let serverURL: String
     let username: String
     let password: String

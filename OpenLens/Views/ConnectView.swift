@@ -643,9 +643,7 @@ struct ConnectView: View {
     // MARK: - Connection Actions
 
     private func startConnect(auto: Bool) {
-        if !auto,
-           let url = URL(string: manualURL.trimmingCharacters(in: .whitespacesAndNewlines)),
-           let link = OpenCodePairingLink(url: url) {
+        if !auto, let link = OpenCodePairingLink(rawValue: manualURL) {
             startOpenCodePairing(link)
             return
         }
@@ -705,7 +703,7 @@ struct ConnectView: View {
                 manualURL = credential.serverURL
                 username = credential.username
                 password = credential.password
-                connectionStatus?.phase = .connecting
+                showConnectionStatus(.connecting, serverURL: credential.serverURL)
                 await connection.connect(
                     url: credential.serverURL,
                     username: credential.username,
