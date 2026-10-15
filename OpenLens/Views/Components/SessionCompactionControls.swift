@@ -13,60 +13,65 @@ struct SessionCompactionControls: View {
     private var canRequest: Bool {
         ScreenshotFixtures.canRequestCompaction ?? chatClient.canRequestCompaction
     }
+    private var isWorking: Bool { state == .submitting || state == .pending || state == .running }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: "archivebox")
-                .font(isRetro ? RetroChatStyle.headerFont : .headline)
-            Text(explanation)
-                .foregroundStyle(isRetro ? RetroChatStyle.secondaryInk : .secondary)
-                .lineLimit(4)
-            if state == .submitting || state == .running {
-                ProgressView()
-                    .accessibilityLabel(title)
+        VStack(spacing: 10) {
+            if let status {
+                Text(status)
+                    .font(isRetro ? RetroChatStyle.smallFont : .footnote)
+                    .foregroundStyle(statusColor)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Button(state == .uncertain ? "Retry Request" : "Compact Conversation") {
+
+            Button {
                 Task { await chatClient.requestCompaction() }
+            } label: {
+                HStack(spacing: 8) {
+                    if isWorking { ProgressView() }
+                    Text(buttonTitle)
+                        .font(isRetro ? RetroChatStyle.bodyFont : .body.weight(.semibold))
+                }
+                .frame(maxWidth: .infinity, minHeight: 24)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .disabled(!canRequest)
             .accessibilityIdentifier("active-context-compact")
         }
-        .foregroundStyle(isRetro ? RetroChatStyle.ink : .primary)
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isRetro ? RetroChatStyle.paper : Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
         .accessibilityIdentifier("active-context-compaction-status")
     }
 
-    private var title: String {
+    private var statusColor: Color {
+        if case .failed = state {
+            return isRetro ? RetroChatStyle.danger : .appDanger
+        }
+        return isRetro ? RetroChatStyle.secondaryInk : .secondary
+    }
+
+    private var buttonTitle: String {
         switch state {
-        case .ready: "Compaction"
-        case .submitting: "Requesting compaction…"
+        case .submitting: "Requesting…"
         case .pending: "Compaction pending"
-        case .running: "Compacting context…"
-        case .completed: "Compaction completed"
-        case .failed: "Compaction failed"
-        case .interrupted: "Execution interrupted"
-        case .uncertain: "Compaction status unconfirmed"
-        case .unavailable: "Compaction unavailable"
+        case .running: "Compacting…"
+        case .uncertain: "Retry compaction"
+        default: "Compact"
         }
     }
 
-    private var explanation: String {
+    private var status: String? {
         switch state {
         case .ready:
             canRequest
-                ? "Request a summary at the next step boundary. The result appears in Chat."
-                : "Reconnect and refresh Chat before requesting compaction."
-        case .submitting: "Waiting for the server to admit the request. You can close this view."
-        case .pending: "Accepted in the shared inbox. Waiting for the server’s result."
-        case .running: "The server is creating a summary. You can close this view."
-        case .completed: "The summary and full conversation are available in Chat."
-        case .failed(let reason): reason
-        case .interrupted: "No successful compaction result was recorded. Inspect the timeline for details."
-        case .uncertain: "Refresh to check whether the request was admitted or finished. A retry keeps the same request identity."
-        case .unavailable: "This connection cannot request supported V2 compaction. You can still read the conversation in Chat."
+                ? nil
+                : "Reconnect and refresh Chat to compact this conversation."
+        case .submitting, .pending, .running: nil
+        case .completed: "Compaction completed. The estimate updates after the next response."
+        case .failed(let reason): "Compaction failed: \(reason)"
+        case .interrupted: "Compaction was interrupted. You can try again."
+        case .uncertain: "The request may still be pending. Retrying won't create another compaction."
+        case .unavailable: "This connection doesn't support compaction."
         }
     }
 }

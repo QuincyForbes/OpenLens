@@ -41,6 +41,7 @@ enum ScreenshotFixtures {
         case "running": return .running
         case "completed": return .completed
         case "failed": return .failed("The provider is offline. Try compaction again when it is available.")
+        case "modelUnavailable": return .failed("Model unavailable: openai/gpt-5.4. Choose an available model for this session and try again.")
         case "interrupted": return .interrupted
         case "uncertain": return .uncertain
         case "unavailable": return .unavailable
@@ -94,7 +95,7 @@ enum ScreenshotFixtures {
 
     /// Uses the production tagged-entry decoder and message conversion.
     @MainActor static func activeContextProjection() throws -> SessionTranscript {
-        if showsCompaction { return try compactionProjection() }
+        if showsCompaction && !showsContextUsage { return try compactionProjection() }
         let wire = activeContextState == "empty" ? "[]" : #"""
         [
           {"id":"active-summary","type":"compaction","status":"completed","reason":"manual","summary":"Model selection is saved on the server. The tests pass. Keep the current branch for review."},

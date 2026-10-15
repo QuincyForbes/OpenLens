@@ -6,6 +6,7 @@ struct SessionActiveContextView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var isRetro: Bool { chatEasterEgg.visualMode.isRetro }
     private var ink: Color { isRetro ? RetroChatStyle.ink : .primary }
@@ -14,82 +15,71 @@ struct SessionActiveContextView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let title = chatClient.currentSession?.title, !title.isEmpty {
-                            Text(title)
-                                .font(isRetro ? RetroChatStyle.headerFont : .headline)
-                                .foregroundStyle(ink)
-                        }
-                        contextUsage
-                    }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(isRetro ? RetroChatStyle.paper : Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-
-                    SessionCompactionControls()
-                        .environment(chatClient)
-                }
-                .font(isRetro ? RetroChatStyle.bodyFont : .subheadline)
-                .padding(16)
+                contextUsage
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 16)
             }
-            .background(isRetro ? RetroChatStyle.screenBottom : Color(.systemGroupedBackground))
-            .refreshable { await refreshContext() }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                SessionCompactionControls()
+                    .environment(chatClient)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(isRetro ? RetroChatStyle.paper : Color.appBackground)
+            }
+            .background(isRetro ? RetroChatStyle.paper : Color.appBackground)
             .navigationTitle("Active Context")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Refresh", systemImage: "arrow.clockwise") { Task { await refreshContext() } }
-                        .accessibilityIdentifier("active-context-refresh")
+                    Button(role: .close) { dismiss() }
                 }
             }
         }
-        .tint(isRetro ? RetroChatStyle.ink : Color.accentColor)
+        .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.height(340), .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(isRetro ? RetroChatStyle.paper : Color.appBackground)
+        .tint(isRetro ? RetroChatStyle.ink : Color.appPrimary)
         .environment(\.colorScheme, isRetro ? .light : colorScheme)
     }
 
-    @ViewBuilder
+    private var usagePercent: Int? { chatClient.contextUsageSummary?.usagePercent }
+
     private var contextUsage: some View {
-        if let usage = chatClient.contextUsageSummary {
-            Text("Approximate context usage")
-                .font(isRetro ? RetroChatStyle.bodyFont : .subheadline.weight(.medium))
-                .foregroundStyle(ink)
-            if let percent = usage.usagePercent, let limit = usage.limitTokens {
-                Text("About \(percent)% · \(usage.usedTokens.formatted()) of \(limit.formatted()) tokens")
-                    .font(isRetro ? RetroChatStyle.bodyFont : .headline)
-                    .foregroundStyle(ink)
-                ProgressView(value: min(max(Double(percent) / 100, 0), 1))
-                    .tint(isRetro ? RetroChatStyle.magentaAccent : .accentColor)
-                    .accessibilityLabel("Approximate context usage")
-                    .accessibilityValue("\(percent) percent")
-            } else {
-                Text("About \(usage.usedTokens.formatted()) tokens · model limit unavailable")
-                    .foregroundStyle(ink)
-            }
-            if let model = usage.modelLabel {
-                Text(model)
-                    .font(isRetro ? RetroChatStyle.smallFont : .caption)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Estimated usage")
+                    .font(isRetro ? RetroChatStyle.bodyFont : .subheadline)
                     .foregroundStyle(secondaryInk)
+                Spacer(minLength: 12)
+                Text(usagePercent.map { "≈\($0)%" } ?? "—")
+                    .font(isRetro ? RetroChatStyle.headerFont : .title2.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(ink)
             }
-            Text("Based on token usage reported for the last request, including cached tokens and the response. New messages and tool results may increase usage before the next update. After compaction, an estimate appears with the next response.")
-                .font(isRetro ? RetroChatStyle.smallFont : .caption)
-                .foregroundStyle(secondaryInk)
-        } else {
-            Label("Estimate unavailable", systemImage: "questionmark.circle")
-                .font(isRetro ? RetroChatStyle.bodyFont : .subheadline.weight(.medium))
+            if let percent = usagePercent {
+                ProgressView(value: min(max(Double(percent) / 100, 0), 1))
+                    .tint(isRetro ? RetroChatStyle.magentaAccent : Color.appPrimary)
+                    .accessibilityHidden(true)
+            }
+            Text(tokensText)
+                .font(isRetro ? RetroChatStyle.smallFont : .subheadline)
+                .monospacedDigit()
                 .foregroundStyle(ink)
-            Text("An estimate appears after a response with token usage. After compaction, wait for the next response. The server does not report live context occupancy.")
-                .font(isRetro ? RetroChatStyle.smallFont : .caption)
+            Text(chatClient.contextUsageSummary == nil
+                 ? "An estimate appears after the next response with token usage."
+                 : "Based on the last response. Current usage may differ.")
+                .font(isRetro ? RetroChatStyle.smallFont : .footnote)
                 .foregroundStyle(secondaryInk)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("active-context-usage-summary")
     }
 
-    private func refreshContext() async {
-        if !ScreenshotFixtures.showsActiveContextButton {
-            await chatClient.refreshCompactionState()
+    private var tokensText: String {
+        guard let usage = chatClient.contextUsageSummary else { return "Usage unavailable" }
+        if let limit = usage.limitTokens {
+            return "\(usage.usedTokens.formatted()) of \(limit.formatted()) tokens"
         }
+        return "\(usage.usedTokens.formatted()) tokens · model limit unavailable"
     }
 }
