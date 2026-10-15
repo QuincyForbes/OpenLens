@@ -1,28 +1,5 @@
 import SwiftUI
 
-/// Pulsing green dot indicating an active/busy session.
-private struct ActivityIndicatorDot: View {
-    @State private var pulsing = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color.green.opacity(0.3))
-                .frame(width: 18, height: 18)
-                .scaleEffect(pulsing ? 1.4 : 1.0)
-                .opacity(pulsing ? 0 : 1)
-            Circle()
-                .fill(Color.green)
-                .frame(width: 10, height: 10)
-        }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: false)) {
-                pulsing = true
-            }
-        }
-    }
-}
-
 /// Session list view with create, delete, and select.
 /// Uses SessionsService directly with view-local state.
 struct SessionsListView: View {
@@ -367,23 +344,15 @@ struct SessionsListView: View {
 
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title.isEmpty ? AppText.titleUntitled : session.title)
-                    .font(.system(size: 16, weight: .regular, design: .rounded))
-                    .foregroundStyle(Color.appPrimary)
-                    .lineLimit(1)
+                SessionWorkingTitle(
+                    title: session.title.isEmpty ? AppText.titleUntitled : session.title,
+                    isWorking: isBusy
+                )
 
-                if isBusy {
-                    HStack(spacing: 6) {
-                        ActivityIndicatorDot()
-                            .frame(width: 10, height: 10)
-                        Text(AppText.working)
-                    }
-                    .font(.system(size: 12, design: .rounded))
-                    .foregroundStyle(.green)
-                } else if showsListExecutionOutcomes,
+                if !isBusy, showsListExecutionOutcomes,
                           let outcome = session.executionOutcomeVisibleOnSessionList() {
                     ExecutionStatusView(state: outcome, idleTime: session.time.idle)
-                } else if !showsListExecutionOutcomes {
+                } else if !isBusy, !showsListExecutionOutcomes {
                     Text(formattedDate(session.updatedAt))
                         .font(.system(size: 14, design: .rounded))
                         .foregroundStyle(Color.appSecondary)
