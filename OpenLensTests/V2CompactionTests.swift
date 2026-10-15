@@ -1,9 +1,28 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import OpenLens
 
 @MainActor
 struct V2CompactionTests {
+    @Test func compactionButtonKeepsItsHeightWhilePendingAndRunning() async throws {
+        let server = CompactionTransport()
+        let chat = try await openChat(server)
+        func controlHeight() -> CGFloat {
+            let host = UIHostingController(rootView: SessionCompactionControls().environment(chat))
+            return host.sizeThatFits(in: CGSize(width: 354, height: 1000)).height
+        }
+        let readyHeight = controlHeight()
+        await chat.requestCompaction()
+        #expect(chat.compactionState == .pending)
+        #expect(abs(controlHeight() - readyHeight) < 0.5)
+        let id = try #require(chat.queuedPrompts.first?.messageID)
+        await server.finish(id: id, outcome: "running")
+        await chat.refreshCompactionState()
+        #expect(chat.compactionState == .running)
+        #expect(abs(controlHeight() - readyHeight) < 0.5)
+    }
+
     @Test func admissionUsesStableIdentityAndSessionLocationWithoutCompletingSynchronously() async throws {
         let server = CompactionTransport()
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, authHeader: "Bearer fixture",

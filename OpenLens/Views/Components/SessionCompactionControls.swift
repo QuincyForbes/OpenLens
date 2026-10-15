@@ -4,6 +4,7 @@ import SwiftUI
 /// not reset a request or turn reopening into another submission.
 struct SessionCompactionControls: View {
     @Environment(ChatClient.self) private var chatClient
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.chatEasterEgg) private var chatEasterEgg
 
     private var state: ChatClient.CompactionState {
@@ -25,15 +26,18 @@ struct SessionCompactionControls: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Button {
-                Task { await chatClient.requestCompaction() }
-            } label: {
-                HStack(spacing: 8) {
-                    if isWorking { ProgressView() }
-                    Text(buttonTitle)
-                        .font(isRetro ? RetroChatStyle.bodyFont : .body.weight(.semibold))
-                }
-                .frame(maxWidth: .infinity, minHeight: 24)
+            Button(action: compactAndDismiss) {
+                Text(buttonTitle)
+                    .font(isRetro ? RetroChatStyle.bodyFont : .body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 24)
+                    .overlay(alignment: .leading) {
+                        if isWorking {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 20, height: 20)
+                                .accessibilityHidden(true)
+                        }
+                    }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -41,6 +45,12 @@ struct SessionCompactionControls: View {
             .accessibilityIdentifier("active-context-compact")
         }
         .accessibilityIdentifier("active-context-compaction-status")
+    }
+
+    private func compactAndDismiss() {
+        let chat = chatClient
+        Task { await chat.requestCompaction() }
+        dismiss()
     }
 
     private var buttonTitle: String {
