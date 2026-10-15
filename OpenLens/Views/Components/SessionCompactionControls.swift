@@ -20,7 +20,7 @@ struct SessionCompactionControls: View {
             if let status {
                 Text(status)
                     .font(isRetro ? RetroChatStyle.smallFont : .footnote)
-                    .foregroundStyle(statusColor)
+                    .foregroundStyle(isRetro ? RetroChatStyle.secondaryInk : .secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -43,13 +43,6 @@ struct SessionCompactionControls: View {
         .accessibilityIdentifier("active-context-compaction-status")
     }
 
-    private var statusColor: Color {
-        if case .failed = state {
-            return isRetro ? RetroChatStyle.danger : .appDanger
-        }
-        return isRetro ? RetroChatStyle.secondaryInk : .secondary
-    }
-
     private var buttonTitle: String {
         switch state {
         case .submitting: "Requesting…"
@@ -66,10 +59,7 @@ struct SessionCompactionControls: View {
             canRequest
                 ? nil
                 : "Reconnect and refresh Chat to compact this conversation."
-        case .submitting, .pending, .running: nil
-        case .completed: "Compaction completed. The estimate updates after the next response."
-        case .failed(let reason): "Compaction failed: \(reason)"
-        case .interrupted: "Compaction was interrupted. You can try again."
+        case .submitting, .pending, .running, .completed, .failed, .interrupted: nil
         case .uncertain: "The request may still be pending. Retrying won't create another compaction."
         case .unavailable: "This connection doesn't support compaction."
         }
