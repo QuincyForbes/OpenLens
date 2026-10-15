@@ -204,6 +204,29 @@ struct V2ExecutionOutcomeTests {
         #expect(sessions.first?.time.updated == 2000)
     }
 
+    @Test func sessionListHidesUnavailableAndDayOldOutcomes() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let recent = now.addingTimeInterval(-23 * 60 * 60)
+        let boundary = now.addingTimeInterval(-OCSession.sessionListOutcomeVisibilityWindow)
+        let stale = boundary.addingTimeInterval(-1)
+
+        #expect(listedSession(outcome: "succeeded", idle: recent).executionOutcomeVisibleOnSessionList(at: now) == .succeeded)
+        #expect(listedSession(outcome: "failed", idle: boundary).executionOutcomeVisibleOnSessionList(at: now) == .failed)
+        #expect(listedSession(outcome: "interrupted", idle: stale).executionOutcomeVisibleOnSessionList(at: now) == nil)
+        #expect(listedSession(outcome: nil, idle: recent).executionOutcomeVisibleOnSessionList(at: now) == nil)
+        #expect(listedSession(outcome: "future-outcome", idle: recent).executionOutcomeVisibleOnSessionList(at: now) == nil)
+        #expect(listedSession(outcome: "succeeded", idle: nil).executionOutcomeVisibleOnSessionList(at: now) == nil)
+    }
+
+    private func listedSession(outcome: String?, idle: Date?) -> OCSession {
+        OCSession(
+            id: "ses",
+            title: "Title",
+            time: .init(created: 0, updated: 0, idle: idle.map { $0.timeIntervalSince1970 * 1000 }),
+            outcome: outcome
+        )
+    }
+
     private func makeChat(_ server: OutcomeTransport, activity: any LiveActivityProviding = TestLiveActivityProvider()) async throws -> ChatClient {
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: server)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())

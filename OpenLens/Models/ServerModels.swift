@@ -35,6 +35,18 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         return state
     }
 
+    /// Session-list rows only surface a fresh terminal result. Unknown outcomes stay hidden.
+    func executionOutcomeVisibleOnSessionList(at now: Date = .now) -> OCExecutionState? {
+        let state = executionOutcome
+        guard state != .unknown else { return nil }
+        guard let idle = time.idle, idle.isFinite, idle > 0 else { return nil }
+        let age = now.timeIntervalSince1970 - (idle / 1000)
+        guard age <= Self.sessionListOutcomeVisibilityWindow else { return nil }
+        return state
+    }
+
+    static let sessionListOutcomeVisibilityWindow: TimeInterval = 24 * 60 * 60
+
     /// Read attention belongs to the server's last idle transition, not updated time.
     var completedResultMarker: Double? {
         guard let idle = time.idle, idle.isFinite, idle > 0 else { return nil }

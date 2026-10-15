@@ -115,18 +115,8 @@ struct ChatView: View {
                 .ignoresSafeArea()
         }
         .overlay(alignment: .top) {
-            if !chatClient.showsExecutionState {
-                responseStatusOverlay
-                    .padding(.top, 8)
-            }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if chatClient.showsExecutionState {
-                ExecutionStatusView(state: chatClient.executionState, idleTime: chatClient.currentSession?.time.idle)
-                    .padding(.vertical, 10)
-                    .frame(maxWidth: .infinity)
-                    .background { chatBackground }
-            }
+            responseStatusOverlay
+                .padding(.top, 8)
         }
         .safeAreaInset(edge: .bottom) {
             if chatClient.showsComposer {
@@ -602,10 +592,17 @@ struct ChatView: View {
                     Button {
                         showContextStatus = true
                     } label: {
-                        Label("Context", systemImage: "text.bubble")
-                            .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.medium))
-                            .foregroundStyle(primaryTextColor)
-                            .frame(minHeight: 44)
+                        HStack(alignment: .center, spacing: 4) {
+                            Image(systemName: "text.bubble")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Context")
+                                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(secondaryTextColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .chatModeChipChrome(visualMode)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Inspect active context")

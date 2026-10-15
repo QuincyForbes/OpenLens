@@ -297,8 +297,8 @@ struct SessionsListView: View {
                 VStack(alignment: .leading) {
                     HStack(alignment: .center) {
                         Image(systemName: "folder")
-                            .font(.system(size: 12, design: .rounded))
-                            .foregroundStyle(Color.appSecondary)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.appPrimary)
 
                         Text(group.title)
                             .font(.system(size: isSidebar ? 15 : 18, weight: .semibold, design: .rounded))
@@ -355,12 +355,15 @@ struct SessionsListView: View {
                     ))
                 }
             }
+            .padding(.leading, 22)
         }
     }
 
     private func sessionRow(_ session: OCSession) -> some View {
         let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
         let isSelected = isSidebar && selectedSessionID == session.id
+        let showsListExecutionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
+            || ScreenshotFixtures.showsExecutionOutcomes
 
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -377,9 +380,10 @@ struct SessionsListView: View {
                     }
                     .font(.system(size: 12, design: .rounded))
                     .foregroundStyle(.green)
-                } else if connection.serverCapabilities?.protocolVersion == .v2 || ScreenshotFixtures.showsExecutionOutcomes {
-                    ExecutionStatusView(state: session.executionOutcome, idleTime: session.time.idle)
-                } else {
+                } else if showsListExecutionOutcomes,
+                          let outcome = session.executionOutcomeVisibleOnSessionList() {
+                    ExecutionStatusView(state: outcome, idleTime: session.time.idle)
+                } else if !showsListExecutionOutcomes {
                     Text(formattedDate(session.updatedAt))
                         .font(.system(size: 14, design: .rounded))
                         .foregroundStyle(Color.appSecondary)
@@ -388,8 +392,7 @@ struct SessionsListView: View {
 
             Spacer()
 
-            if !isBusy, session.hasUnreadResult,
-               connection.serverCapabilities?.protocolVersion == .v2 || ScreenshotFixtures.showsExecutionOutcomes {
+            if !isBusy, session.hasUnreadResult, showsListExecutionOutcomes {
                 Text(AppText.unreadResult)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
                     .foregroundStyle(Color.appAccent)

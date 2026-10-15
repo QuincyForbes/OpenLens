@@ -34,7 +34,7 @@ enum AppText {
     static let connectionSetupNetworkDetail = "Keep your iPhone and computer on the same network, or use a VPN that can reach your computer."
     static let connectionSetupRemoteTitle = "Connect from anywhere"
     static let connectionSetupRemoteDetail = "Run opencode pair --remote to generate a QR code that works outside your computer’s network. Keep OpenCode and its remote tunnel running."
-    static let connectionSetupRemoteHint = "Away from your computer’s network? Use opencode pair --remote."
+    static let connectionSetupRemoteHint = "Away from your computer’s network? \nUse opencode pair --remote"
     static let connectionSetupHostnameTitle = "Listen on your network"
     static let connectionSetupHostnameDetail = "To connect from your iPhone on the same network, run: opencode service set hostname 0.0.0.0."
     static let connectionManualTipsV2Title = "OpenCode v2"

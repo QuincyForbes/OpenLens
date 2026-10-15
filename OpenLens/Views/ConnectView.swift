@@ -26,18 +26,10 @@ func shouldAttemptAutoReconnect(
 
 func connectionFailureMessage(
     localNetworkAccessRequired: Bool,
-    connectionError: String?,
     isAutoReconnect: Bool
 ) -> String {
     if localNetworkAccessRequired {
         return AppText.localNetworkAccessRequiredBody
-    }
-
-    if let connectionError = connectionError?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .nilIfBlank
-    {
-        return connectionError
     }
 
     return isAutoReconnect
@@ -92,7 +84,6 @@ struct ConnectView: View {
 
     /// The attempt shown in place of the setup step; nil while the user is setting up.
     @State private var connectionStatus: ConnectionSetupStatus?
-    @State private var connectionError: String?
     @State private var connectionTask: Task<Void, Never>?
     @State private var isAutoReconnect: Bool = false
     @State private var currentConnectionMethod: ConnectionMethod = .manual
@@ -586,9 +577,6 @@ struct ConnectView: View {
     /// before the app swaps in the main interface.
     private func finishConnectionAttempt() async {
         guard connection.isConnected else {
-            if case .error(let message) = connection.state {
-                connectionError = message
-            }
             showConnectionFailure()
             return
         }
@@ -600,7 +588,7 @@ struct ConnectView: View {
         isFinishingConnection = false
     }
 
-    private func showConnectionFailure(whilePairing: Bool = false) {
+    private func showConnectionFailure(whilePairing: Bool = false, pairingMessage: String? = nil) {
         let needsLocalNetworkAccess = connection.localNetworkAccessRequired
         let title = if needsLocalNetworkAccess {
             AppText.localNetworkAccessRequiredTitle
@@ -612,7 +600,11 @@ struct ConnectView: View {
             AppText.manualConnectErrorTitle
         }
         connectionStatus = ConnectionSetupStatus(
-            phase: .failed(title: title, message: failureMessage, needsLocalNetworkAccess: needsLocalNetworkAccess),
+            phase: .failed(
+                title: title,
+                message: pairingMessage ?? failureMessage,
+                needsLocalNetworkAccess: needsLocalNetworkAccess
+            ),
             serverName: connectionStatus?.serverName
         )
     }
@@ -620,7 +612,6 @@ struct ConnectView: View {
     private var failureMessage: String {
         connectionFailureMessage(
             localNetworkAccessRequired: connection.localNetworkAccessRequired,
-            connectionError: connectionError,
             isAutoReconnect: isAutoReconnect
         )
     }
@@ -631,10 +622,8 @@ struct ConnectView: View {
         switch state {
         case .connected, .reconnecting:
             return
-        case .error(let message):
-            connectionError = message
-        case .disconnected, .connecting:
-            connectionError = nil
+        case .error, .disconnected, .connecting:
+            break
         }
         isFinishingConnection = false
         showConnectionFailure()
@@ -657,7 +646,6 @@ struct ConnectView: View {
 
         connectionTask?.cancel()
         isAutoReconnect = auto
-        connectionError = nil
         focusedManualField = nil
         showConnectionStatus(auto ? .reconnecting : .connecting, serverURL: manualURL)
 
@@ -683,7 +671,6 @@ struct ConnectView: View {
         username = "opencode"
         password = ""
         isAutoReconnect = false
-        connectionError = nil
         focusedManualField = nil
         // Links that already carry credentials skip the pairing exchange.
         showConnectionStatus(link.credentials == nil ? .pairing : .connecting, serverURL: manualURL)
@@ -714,14 +701,15 @@ struct ConnectView: View {
                 await finishConnectionAttempt()
             } catch {
                 guard !Task.isCancelled else { return }
-                connectionError = error.localizedDescription
-                showConnectionFailure(whilePairing: true)
+                showConnectionFailure(
+                    whilePairing: true,
+                    pairingMessage: (error as? OpenCodePairingError)?.localizedDescription
+                )
             }
         }
     }
 
     private func retryConnection() {
-        connectionError = nil
         if let pendingOpenCodePairingLink {
             startOpenCodePairing(pendingOpenCodePairingLink)
             return
