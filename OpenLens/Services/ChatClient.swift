@@ -342,6 +342,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let limitTokens: Int?
         let usagePercent: Int?
         let modelLabel: String?
+        let isApproximate: Bool
     }
 
     /// A flat list of selectable models from connected providers.
@@ -1017,9 +1018,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     static let activeContextChangedMessage = "Context changed while it was loading. Try again."
 
     var contextUsageSummary: ContextUsageSummary? {
-        // V2 reply usage is historical work, not occupancy of the active projection.
-        guard !showsActiveContext else { return nil }
-        guard let sourceMessage = latestAssistantMessageWithUsage(),
+        // Like the V2 TUI, use the latest request after compaction, never session totals.
+        let source = showsActiveContext ? latestV2AssistantMessageWithUsage() : latestAssistantMessageWithUsage()
+        guard let sourceMessage = source,
               let tokens = sourceMessage.tokens else { return nil }
 
         let usedTokens = tokens.totalIncludingCache
@@ -1032,7 +1033,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             usedTokens: usedTokens,
             limitTokens: limitTokens,
             usagePercent: usagePercent,
-            modelLabel: sourceMessage.modelDisplayName
+            modelLabel: sourceMessage.modelDisplayName,
+            isApproximate: showsActiveContext
         )
     }
 
@@ -1475,6 +1477,26 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
     }
 
+    private func latestV2AssistantMessageWithUsage() -> ChatMessage? {
+        let knownIDs = Set(transcriptEntryOrder)
+        var order = transcriptEntryOrder + messages.map(\.id).filter { !knownIDs.contains($0) }
+        if let revert = currentSession?.revert {
+            if let boundary = order.firstIndex(of: revert.messageID) {
+                order = Array(order[..<boundary])
+            } else {
+                order.removeAll { $0 >= revert.messageID }
+            }
+        }
+        let completedCompactions = Set(contextEntries.filter {
+            $0.kind == .compaction && $0.compactionStatus == "completed"
+        }.map(\.id))
+        let start = order.lastIndex(where: { completedCompactions.contains($0) }).map { $0 + 1 } ?? 0
+        let messagesByID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        return order[start...].reversed().compactMap { messagesByID[$0] }.first {
+            $0.role == .assistant && ($0.tokens?.totalIncludingCache ?? 0) > 0
+        }
+    }
+
     private func latestAssistantMessageWithUsage() -> ChatMessage? {
         if let pendingAssistantMessage,
            pendingAssistantMessage.role == .assistant,
@@ -1579,6 +1601,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             // Auto-start demo playback after session is ready
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.showsContextUsage {
+                activeContextWasV2 = true
+                ScreenshotFixtures.applyContextUsage(to: self)
             } else if ScreenshotFixtures.showsCompaction {
                 ScreenshotFixtures.applyCompaction(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentResults {
@@ -1638,6 +1663,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = nil
             if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSessionMove {
                 applyScreenshotSessionLocation()
+            } else if ScreenshotFixtures.showsContextUsage {
+                activeContextWasV2 = true
+                ScreenshotFixtures.applyContextUsage(to: self)
             } else if ScreenshotFixtures.showsCompaction {
                 ScreenshotFixtures.applyCompaction(to: self)
             } else if ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsSubagentResults {

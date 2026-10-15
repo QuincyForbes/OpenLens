@@ -57,16 +57,16 @@ struct SessionCompactionControls: View {
         switch state {
         case .ready:
             canRequest
-                ? "Request a summary at the next step boundary. The result appears in Chat and active context."
+                ? "Request a summary at the next step boundary. The result appears in Chat."
                 : "Reconnect and refresh Chat before requesting compaction."
         case .submitting: "Waiting for the server to admit the request. You can close this view."
         case .pending: "Accepted in the shared inbox. Waiting for the server’s result."
         case .running: "The server is creating a summary. You can close this view."
-        case .completed: "Inspect the summary and retained context below. The full conversation remains in Chat."
+        case .completed: "The summary and full conversation are available in Chat."
         case .failed(let reason): reason
         case .interrupted: "No successful compaction result was recorded. Inspect the timeline for details."
         case .uncertain: "Refresh to check whether the request was admitted or finished. A retry keeps the same request identity."
-        case .unavailable: "This connection cannot request supported V2 compaction. You can still inspect context and Chat."
+        case .unavailable: "This connection cannot request supported V2 compaction. You can still read the conversation in Chat."
         }
     }
 }

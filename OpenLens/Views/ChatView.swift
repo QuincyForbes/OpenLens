@@ -563,8 +563,14 @@ struct ChatView: View {
 
     // MARK: - Model Selector
 
+    private enum ModelControlAlignment: AlignmentID {
+        nonisolated static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[VerticalAlignment.center]
+        }
+    }
+
     private var modelSelectionRow: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        HStack(alignment: VerticalAlignment(ModelControlAlignment.self), spacing: 8) {
             ViewThatFits {
                 HStack(spacing: 6) {
                     modelSelectorButton
@@ -588,7 +594,18 @@ struct ChatView: View {
                 if !chatClient.todos.isEmpty {
                     todoChip
                 }
-                if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
+                if let contextUsage = chatClient.contextUsageSummary {
+                    Button {
+                        showContextStatus = true
+                    } label: {
+                        ChatContextUsageRing(summary: contextUsage)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
+                    .accessibilityIdentifier("context-usage")
+                } else if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
                     Button {
                         showContextStatus = true
                     } label: {
@@ -605,15 +622,9 @@ struct ChatView: View {
                         .chatModeChipChrome(visualMode)
                     }
                     .buttonStyle(.plain)
+                    .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
                     .accessibilityLabel("Inspect active context")
                     .accessibilityIdentifier("inspect-active-context")
-                } else if let contextUsage = chatClient.contextUsageSummary {
-                    Button {
-                        showContextStatus = true
-                    } label: {
-                        ChatContextUsageRing(summary: contextUsage)
-                    }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -641,6 +652,7 @@ struct ChatView: View {
             .padding(.vertical, 5)
             .chatModeChipChrome(visualMode)
         }
+        .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
     }
 
     private var thinkingEffortMenu: some View {
@@ -2320,7 +2332,7 @@ private struct ChatContextUsageRing: View {
                 .stroke(tintColor, style: StrokeStyle(lineWidth: 4, lineCap: chatEasterEgg.visualMode.isRetro ? .butt : .round))
                 .rotationEffect(.degrees(-90))
 
-            Text("%")
+            Text(summary.usagePercent == nil ? "?" : "%")
                 .font(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.smallFont : .system(size: 10, weight: .bold, design: .rounded))
                 .foregroundStyle(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.ink : Color.appPrimary)
         }
@@ -2337,6 +2349,12 @@ private struct ChatContextUsageRing: View {
     }
 
     private var accessibilityLabel: String {
+        if summary.isApproximate {
+            if let percent = summary.usagePercent {
+                return "Approximate context usage, \(percent) percent, based on the last request"
+            }
+            return "Approximate context usage, \(summary.usedTokens) tokens, based on the last request"
+        }
         if let usagePercent = summary.usagePercent,
            let limitTokens = summary.limitTokens,
            limitTokens > 0

@@ -213,7 +213,7 @@ struct V2ActiveContextTests {
         #expect(chat.messages.isEmpty)
     }
 
-    @Test func historicalReplyUsageNeverBecomesV2ContextOccupancy() async throws {
+    @Test func latestRequestUsageEstimatesV2ContextUsingItsOwnModelLimit() async throws {
         let transport = ActiveContextTransport()
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
@@ -222,11 +222,56 @@ struct V2ActiveContextTests {
         chat.providers = ScreenshotFixtures.providersResult.providers
         let reply = try JSONDecoder().decode(OCV2SessionMessage.self, from: Data(#"{"id":"msg_reply","type":"assistant","model":{"providerID":"anthropic","id":"claude-sonnet-4-20250514"},"tokens":{"input":90000,"output":10000,"cache":{"read":50000,"write":5000}},"content":[{"type":"text","text":"Old reply"}]}"#.utf8))
         chat.messages = [MessagesService.convert(try #require(reply.asMessage(sessionID: "ses_1")))]
-        #expect(chat.contextUsageSummary == nil)
+        let usage = try #require(chat.contextUsageSummary)
+        #expect(usage.usedTokens == 155000)
+        #expect(usage.limitTokens == 200000)
+        #expect(usage.usagePercent == 78)
+        #expect(usage.isApproximate)
         #expect(chat.showsActiveContext)
     }
 
-    @Test func disconnectedV2SessionKeepsUnknownOccupancyAndItsContextInspector() async throws {
+    @Test(arguments: ["completed", "failed", "running"])
+    func onlyCompletedCompactionClearsTheEstimateUntilANewReply(status: String) async throws {
+        let transport = ActiveContextTransport()
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let chat = makeChat(ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        chat.currentSession = session("ses_1")
+        let wire = """
+        [
+          {"id":"old","type":"assistant","tokens":{"input":100,"output":20}},
+          {"id":"compact","type":"compaction","status":"\(status)","summary":"Keep this."},
+          {"id":"user","type":"user","text":"Continue"}
+        ]
+        """
+        let records = try JSONDecoder().decode([OCV2SessionMessage].self, from: Data(wire.utf8))
+        chat.replaceTranscript(MessagesService.transcript(from: OCTranscriptEntry.projectV2(records, sessionID: "ses_1")))
+        #expect(chat.contextUsageSummary?.usedTokens == (status == "completed" ? nil : 120))
+        chat.messages.append(ChatMessage(id: "new", role: .assistant, content: "New reply",
+            tokens: .init(input: 50, output: 10, reasoning: 5, cache: .init(read: 20, write: 5))))
+        #expect(chat.contextUsageSummary?.usedTokens == 90)
+    }
+
+    @Test func revertedCompactionAndRepliesDoNotAffectTheEstimate() async throws {
+        let transport = ActiveContextTransport()
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
+        let chat = makeChat(ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities()))
+        let records = try JSONDecoder().decode([OCV2SessionMessage].self, from: Data(#"""
+        [
+          {"id":"msg_1","type":"assistant","tokens":{"input":100,"output":20}},
+          {"id":"msg_2","type":"user","text":"Discard this"},
+          {"id":"msg_3","type":"compaction","status":"completed","summary":"Discard this too"},
+          {"id":"msg_4","type":"assistant","tokens":{"input":500,"output":100}}
+        ]
+        """#.utf8))
+        chat.replaceTranscript(MessagesService.transcript(from: OCTranscriptEntry.projectV2(records, sessionID: "ses_1")))
+        chat.currentSession = OCSession(id: "ses_1", title: "Reverted", time: .init(created: 0, updated: 0),
+            revert: .init(messageID: "msg_2"))
+        #expect(chat.contextUsageSummary?.usedTokens == 120)
+        chat.currentSession = session("ses_1")
+        #expect(chat.contextUsageSummary?.usedTokens == 600)
+    }
+
+    @Test func disconnectedV2SessionKeepsItsLastRequestEstimateAndContextInspector() async throws {
         let transport = ActiveContextTransport()
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
@@ -236,7 +281,8 @@ struct V2ActiveContextTests {
             tokens: .init(input: 90000, output: 10000, reasoning: nil, cache: nil))]
         connection.disconnect()
         #expect(chat.showsActiveContext)
-        #expect(chat.contextUsageSummary == nil)
+        #expect(chat.contextUsageSummary?.usedTokens == 100000)
+        #expect(chat.contextUsageSummary?.isApproximate == true)
         await #expect(throws: OpenCodeError.self) { try await chat.loadActiveContext() }
     }
 

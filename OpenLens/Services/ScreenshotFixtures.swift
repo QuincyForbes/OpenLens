@@ -2,7 +2,17 @@ import Foundation
 
 enum ScreenshotFixtures {
     static var showsActiveContextButton: Bool {
-        opensActiveContext || (isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_ACTIVE_CONTEXT_BUTTON"))
+        showsContextUsage || opensActiveContext || (isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_ACTIVE_CONTEXT_BUTTON"))
+    }
+
+    static var showsContextUsage: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_CONTEXT_USAGE")
+    }
+
+    @MainActor static func applyContextUsage(to chat: ChatClient) {
+        guard let transcript = try? activeContextProjection() else { return }
+        chat.providers = providersResult.providers
+        chat.replaceTranscript(transcript)
     }
 
     static var opensActiveContext: Bool {
@@ -89,7 +99,7 @@ enum ScreenshotFixtures {
         [
           {"id":"active-summary","type":"compaction","status":"completed","reason":"manual","summary":"Model selection is saved on the server. The tests pass. Keep the current branch for review."},
           {"id":"active-user","type":"user","text":"Continue with active context inspection."},
-          {"id":"active-reply","type":"assistant","content":[{"type":"text","text":"I’ll keep the context view separate from the full conversation."}]}
+          {"id":"active-reply","type":"assistant","model":{"providerID":"anthropic","id":"claude-sonnet-4-20250514"},"tokens":{"input":90000,"output":10000,"reasoning":1000,"cache":{"read":40000,"write":3000}},"content":[{"type":"text","text":"I’ll keep the context view separate from the full conversation."}]}
         ]
         """#
         let entries = try JSONDecoder().decode([OCV2SessionMessage].self, from: Data(wire.utf8))

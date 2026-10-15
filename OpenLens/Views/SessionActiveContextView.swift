@@ -1,34 +1,15 @@
 import SwiftUI
 
-/// Inspection and compaction of the server projection. Loading and disclosure
-/// state belong to this sheet; the shared chat service owns scoped IO.
+/// Approximate context usage and compaction controls, without transcript content.
 struct SessionActiveContextView: View {
     @Bindable var chatClient: ChatClient
     @Environment(\.dismiss) private var dismiss
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(\.colorScheme) private var colorScheme
 
-    private enum LoadState {
-        case loading
-        case loaded(SessionTranscript)
-        case failed(String)
-        case unavailable
-    }
-
-    private struct ReadID: Hashable {
-        let scope: ChatClient.ActiveContextScope
-        let refresh: UInt
-    }
-
-    @State private var state: LoadState = .loading
-    @State private var loadedScope: ChatClient.ActiveContextScope?
-    @State private var refresh: UInt = 0
-    @State private var requestToken = UUID()
-
     private var isRetro: Bool { chatEasterEgg.visualMode.isRetro }
     private var ink: Color { isRetro ? RetroChatStyle.ink : .primary }
     private var secondaryInk: Color { isRetro ? RetroChatStyle.secondaryInk : .secondary }
-    private var readID: ReadID { .init(scope: chatClient.activeContextScope, refresh: refresh) }
 
     var body: some View {
         NavigationStack {
@@ -40,14 +21,7 @@ struct SessionActiveContextView: View {
                                 .font(isRetro ? RetroChatStyle.headerFont : .headline)
                                 .foregroundStyle(ink)
                         }
-                        Text("Current server context, separate from the full conversation in Chat. Older entries may be replaced by a compaction summary.")
-                            .foregroundStyle(secondaryInk)
-                        Label("Occupancy unknown", systemImage: "questionmark.circle")
-                            .font(isRetro ? RetroChatStyle.bodyFont : .subheadline.weight(.medium))
-                            .foregroundStyle(ink)
-                        Text("The server does not report current context occupancy.")
-                            .font(isRetro ? RetroChatStyle.smallFont : .caption)
-                            .foregroundStyle(secondaryInk)
+                        contextUsage
                     }
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -55,7 +29,6 @@ struct SessionActiveContextView: View {
 
                     SessionCompactionControls()
                         .environment(chatClient)
-                    content
                 }
                 .font(isRetro ? RetroChatStyle.bodyFont : .subheadline)
                 .padding(16)
@@ -73,118 +46,50 @@ struct SessionActiveContextView: View {
                         .accessibilityIdentifier("active-context-refresh")
                 }
             }
-            .task(id: readID) { await load(scope: readID.scope) }
         }
         .tint(isRetro ? RetroChatStyle.ink : Color.accentColor)
         .environment(\.colorScheme, isRetro ? .light : colorScheme)
     }
 
     @ViewBuilder
-    private var content: some View {
-        // Do not display the previous session's snapshot while its replacement
-        // task is waiting to start. The service also rejects delayed completions.
-        if loadedScope != chatClient.activeContextScope {
-            loading
-        } else {
-            switch state {
-            case .loading:
-                loading
-            case .loaded(let transcript):
-                if transcript.entryOrder.isEmpty {
-                    ContentUnavailableView("No active entries", systemImage: "text.bubble",
-                        description: Text("The server returned an empty active context."))
-                } else {
-                    ActiveContextEntries(transcript: transcript)
-                }
-            case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn’t load context", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try Again") { refresh &+= 1 }
-                        .accessibilityIdentifier("active-context-retry")
-                }
-            case .unavailable:
-                ContentUnavailableView("Context unavailable", systemImage: "text.bubble",
-                    description: Text("This server cannot provide active context. You can still read the full conversation in Chat."))
+    private var contextUsage: some View {
+        if let usage = chatClient.contextUsageSummary {
+            Text("Approximate context usage")
+                .font(isRetro ? RetroChatStyle.bodyFont : .subheadline.weight(.medium))
+                .foregroundStyle(ink)
+            if let percent = usage.usagePercent, let limit = usage.limitTokens {
+                Text("About \(percent)% · \(usage.usedTokens.formatted()) of \(limit.formatted()) tokens")
+                    .font(isRetro ? RetroChatStyle.bodyFont : .headline)
+                    .foregroundStyle(ink)
+                ProgressView(value: min(max(Double(percent) / 100, 0), 1))
+                    .tint(isRetro ? RetroChatStyle.magentaAccent : .accentColor)
+                    .accessibilityLabel("Approximate context usage")
+                    .accessibilityValue("\(percent) percent")
+            } else {
+                Text("About \(usage.usedTokens.formatted()) tokens · model limit unavailable")
+                    .foregroundStyle(ink)
             }
+            if let model = usage.modelLabel {
+                Text(model)
+                    .font(isRetro ? RetroChatStyle.smallFont : .caption)
+                    .foregroundStyle(secondaryInk)
+            }
+            Text("Based on token usage reported for the last request, including cached tokens and the response. New messages and tool results may increase usage before the next update. After compaction, an estimate appears with the next response.")
+                .font(isRetro ? RetroChatStyle.smallFont : .caption)
+                .foregroundStyle(secondaryInk)
+        } else {
+            Label("Estimate unavailable", systemImage: "questionmark.circle")
+                .font(isRetro ? RetroChatStyle.bodyFont : .subheadline.weight(.medium))
+                .foregroundStyle(ink)
+            Text("An estimate appears after a response with token usage. After compaction, wait for the next response. The server does not report live context occupancy.")
+                .font(isRetro ? RetroChatStyle.smallFont : .caption)
+                .foregroundStyle(secondaryInk)
         }
-    }
-
-    private var loading: some View {
-        ProgressView("Loading active context…")
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 40)
-            .accessibilityIdentifier("active-context-loading")
     }
 
     private func refreshContext() async {
-        let sessionID = chatClient.currentSession?.id
-        if !ScreenshotFixtures.showsActiveContextButton { await chatClient.refreshCompactionState() }
-        guard !Task.isCancelled, chatClient.currentSession?.id == sessionID else { return }
-        await load(scope: chatClient.activeContextScope)
-    }
-
-    private func load(scope: ChatClient.ActiveContextScope) async {
-        let token = UUID()
-        requestToken = token
-        loadedScope = scope
-        state = .loading
-        do {
-            let transcript: SessionTranscript?
-            if ScreenshotFixtures.showsActiveContextButton {
-                switch ScreenshotFixtures.activeContextState {
-                case "loading": return
-                case "failed": throw OpenCodeError.invalidPayload("The connection was interrupted. Try again to read current context.")
-                case "changed": throw OpenCodeError.invalidPayload(ChatClient.activeContextChangedMessage)
-                case "unavailable": transcript = nil
-                default: transcript = try ScreenshotFixtures.activeContextProjection()
-                }
-            } else {
-                transcript = try await chatClient.loadActiveContext()
-            }
-            guard !Task.isCancelled, token == requestToken, scope == chatClient.activeContextScope else { return }
-            state = transcript.map(LoadState.loaded) ?? .unavailable
-        } catch is CancellationError {
-            return
-        } catch {
-            guard !Task.isCancelled, token == requestToken, scope == chatClient.activeContextScope else { return }
-            state = .failed(error.localizedDescription)
+        if !ScreenshotFixtures.showsActiveContextButton {
+            await chatClient.refreshCompactionState()
         }
-    }
-}
-
-private struct ActiveContextEntries: View {
-    let transcript: SessionTranscript
-    private let messagesByID: [String: ChatMessage]
-    private let contextByID: [String: SessionContextEntry]
-    @Environment(\.chatEasterEgg) private var chatEasterEgg
-
-    init(transcript: SessionTranscript) {
-        self.transcript = transcript
-        messagesByID = Dictionary(transcript.messages.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
-        contextByID = Dictionary(transcript.contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
-    }
-
-    var body: some View {
-        LazyVStack(alignment: .leading, spacing: 16) {
-            Text("Active entries")
-                .font(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.headerFont : .headline)
-            ForEach(transcript.entryOrder, id: \.self) { id in
-                if let context = contextByID[id] {
-                    SessionContextTimelineRow(entry: context, initiallyExpanded: context.compactionStatus == "completed" || ScreenshotFixtures.opensActiveContext)
-                } else if let message = messagesByID[id] {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(message.role == .user ? "You" : "Assistant")
-                            .font(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.smallFont : .caption.weight(.semibold))
-                            .foregroundStyle(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.secondaryInk : Color.secondary)
-                        MessageBubbleView(message: message)
-                    }
-                    .accessibilityIdentifier("active-context-\(id)")
-                }
-            }
-        }
-        .foregroundStyle(chatEasterEgg.visualMode.isRetro ? RetroChatStyle.ink : Color.primary)
     }
 }
