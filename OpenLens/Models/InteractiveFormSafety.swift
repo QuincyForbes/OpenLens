@@ -16,6 +16,10 @@ nonisolated enum InteractiveFormSafety {
     static let maximumURLBytes = 2_048
     static let maximumPatternBytes = 1_024
 
+    static func fitsGlobalDirectory(_ directory: String) -> Bool {
+        directory.hasPrefix("/") && directory.utf8.count <= 4_096 && !directory.contains("\0")
+    }
+
     static func sanitize(_ request: OCFormRequest) -> OCFormRequest? {
         guard fitsIdentifier(request.id),
               fitsIdentifier(request.sessionID),
@@ -47,6 +51,14 @@ nonisolated enum InteractiveFormSafety {
                 return nil
             }
 
+            if let conditions = field.conditions {
+                guard conditions.count <= maximumFieldCount,
+                      conditions.allSatisfy({ condition in
+                          fitsIdentifier(condition.key) && fits(condition.op, maximumBytes: 80)
+                              && conditionValueFits(condition.value)
+                      }) else { return nil }
+            }
+
             var optionValues = Set<String>()
             for option in field.options {
                 guard fits(option.value, maximumBytes: maximumOptionValueBytes),
@@ -65,14 +77,73 @@ nonisolated enum InteractiveFormSafety {
         return request
     }
 
+    /// Validate the dependency graph without inferring unknown visibility semantics.
+    static func supportsConditions(in request: OCFormRequest) -> Bool {
+        var earlier: [String: OCFormField] = [:]
+        for field in request.fields {
+            guard let conditions = field.conditions else { return false }
+            for condition in conditions {
+                guard ["eq", "neq"].contains(condition.op),
+                      let target = earlier[condition.key], target.isSupported,
+                      !target.hidden,
+                      target.kind != .external else { return false }
+                switch (target.kind, condition.value) {
+                case (.boolean, .boolean), (.number, .number), (.integer, .number):
+                    break
+                case (.string, .string(let value)), (.multiselect, .string(let value)):
+                    if !target.custom && (target.kind == .multiselect || target.hasDeclaredOptions),
+                       !target.options.contains(where: { $0.value == value }) { return false }
+                default:
+                    return false
+                }
+            }
+            earlier[field.key] = field
+        }
+        return true
+    }
+
+    /// Only active earlier answers participate, so a hidden branch cannot keep
+    /// its descendants active through stale draft values.
+    static func activeFields(for request: OCFormRequest, answer: [String: OCFormValue]) -> [OCFormField] {
+        guard !request.hasUnsupportedFields else { return request.fields.filter { !$0.hidden } }
+        var active: [OCFormField] = []
+        var earlierAnswers: [String: OCFormValue] = [:]
+        for field in request.fields where !field.hidden {
+            guard field.conditions?.allSatisfy({ $0.matches(earlierAnswers[$0.key]) }) == true else { continue }
+            active.append(field)
+            earlierAnswers[field.key] = answer[field.key]
+        }
+        return active
+    }
+
+    /// Services drop only known inactive fields. Unknown keys and unsupported
+    /// forms still fail rather than becoming a guessed, superficially valid reply.
+    static func submissionAnswer(_ answer: [String: OCFormValue], for request: OCFormRequest) -> [String: OCFormValue]? {
+        guard sanitize(request) != nil, !request.hasUnsupportedFields,
+              answer.keys.allSatisfy({ key in request.fields.contains { $0.key == key } }) else { return nil }
+        let activeKeys = Set(activeFields(for: request, answer: answer).map(\.key))
+        let reply = answer.filter { activeKeys.contains($0.key) }
+        return accepts(answer: reply, for: request) ? reply : nil
+    }
+
+    private static func conditionValueFits(_ value: OCFormValue) -> Bool {
+        switch value {
+        case .string(let text): return fits(text, maximumBytes: maximumDescriptionBytes)
+        case .number(let number): return number.isFinite
+        case .boolean: return true
+        case .strings: return false
+        }
+    }
+
     static func accepts(answer: [String: OCFormValue], for request: OCFormRequest) -> Bool {
-        guard request.state == .pending,
+        guard sanitize(request) != nil,
+              request.state == .pending,
               fitsIdentifier(request.id),
               fitsIdentifier(request.sessionID),
               !request.hasUnsupportedFields
         else { return false }
 
-        let visibleFields = request.fields.filter { !$0.hidden }
+        let visibleFields = activeFields(for: request, answer: answer)
         let fieldsByKey = Dictionary(uniqueKeysWithValues: visibleFields.map { ($0.key, $0) })
         guard answer.keys.allSatisfy({ fieldsByKey[$0] != nil }) else { return false }
 
@@ -114,7 +185,7 @@ nonisolated enum InteractiveFormSafety {
         case (.string, .string(let text)):
             let count = text.count
             guard fits(text, maximumBytes: maximumDescriptionBytes),
-                  field.required || !text.isEmpty,
+                  !text.isEmpty,
                   field.stringMinimum.map({ count >= $0 }) ?? true,
                   field.stringMaximum.map({ count <= $0 }) ?? true,
                   matchesStringConstraints(text, field: field)
@@ -138,7 +209,7 @@ nonisolated enum InteractiveFormSafety {
             return true
 
         case (.multiselect, .strings(let values)):
-            guard field.required || !values.isEmpty,
+            guard !values.isEmpty,
                   values.count == Set(values).count,
                   values.count <= maximumOptionCount,
                   field.multiselectMinimum.map({ values.count >= $0 }) ?? true,

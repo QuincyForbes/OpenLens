@@ -397,6 +397,13 @@ final class ChatMessage: Identifiable {
         let outputPreview: String?
         let isError: Bool
         let toolCategory: ToolCategory
+        /// Output a failed tool produced before its error, when the preview
+        /// above shows the error.
+        var partialOutputPreview: String? = nil
+        /// Files the tool returned, inspected from its row.
+        var files: [ToolResultFile] = []
+        /// Returned files beyond what one row shows.
+        var omittedFileCount = 0
     }
 
     struct PersistedQuestionStep: Identifiable {
@@ -424,6 +431,7 @@ final class ChatMessage: Identifiable {
         let isCompleted: Bool
         let isError: Bool
         let cost: Double?
+        var resultState: SubagentResultState? = nil
 
         /// A task/subagent card should animate only while it is actively working.
         /// Completed and failed work stays visually stable in the timeline.
@@ -621,6 +629,17 @@ final class ChatMessage: Identifiable {
     var modelDisplayName: String? {
         guard let modelID, !modelID.isEmpty else { return nil }
         return modelID
+    }
+
+    /// Image files carried inline as data URLs, from the phone or the desktop.
+    var imageAttachments: [OCPart] {
+        parts.filter { $0.isInlineImageFile }
+    }
+
+    /// Other files on a user prompt, shown by name only.
+    var fileAttachments: [OCPart] {
+        guard role == .user else { return [] }
+        return parts.filter { $0.type == .file && !$0.isInlineImageFile }
     }
 
     /// Extract all tool call parts from this message.
@@ -1427,6 +1446,25 @@ final class ChatMessage: Identifiable {
         return normalizeStreamingPlaceholder() || removedSegment
     }
 
+    @ObservationIgnored private var subagentResultsByChildID: [String: SubagentResultState] = [:]
+
+    /// Apply canonical background outcomes without rewriting launch-tool facts.
+    /// Later tool progress rebuilds the same projection with this evidence.
+    func reconcileSubagentResults(_ results: [String: SubagentResultState]) {
+        guard role == .assistant else { return }
+        // Fresh history already derived every message. Only a matching child
+        // outcome may invalidate that projection; unrelated results are cheap.
+        var relevant: [String: SubagentResultState] = [:]
+        for part in parts {
+            guard let state = subagentToolState(from: part) else { continue }
+            let childID = OCSubagentMetadata.childID(in: state.metadata)
+            if let childID, let result = results[childID] { relevant[childID] = result }
+        }
+        guard subagentResultsByChildID != relevant else { return }
+        subagentResultsByChildID = relevant
+        rebuildDerivedState()
+    }
+
     func rebuildDerivedState() {
         hasRenderableTextPart = parts.contains { part in
             guard part.type == .text, part.isRenderableText else { return false }
@@ -1998,12 +2036,17 @@ final class ChatMessage: Identifiable {
                 ? toolPathPreview(from: state)
                 : nil
             let outputPreview: String?
+            var partialOutputPreview: String?
             if isTodoTool {
                 outputPreview = nil
             } else if state.status == .error {
                 outputPreview = inlineDetailPreview
                     ?? ToolOutputPreview.make(from: state.error)
                     ?? ToolOutputPreview.make(from: state.output)
+                let partialOutput = ToolOutputPreview.make(from: state.output)
+                if partialOutput != outputPreview {
+                    partialOutputPreview = partialOutput
+                }
             } else {
                 outputPreview = inlineDetailPreview
                     ?? ToolOutputPreview.make(from: state.output)
@@ -2016,7 +2059,12 @@ final class ChatMessage: Identifiable {
                 label: ToolLabelFormatter.label(toolName: toolName, state: state),
                 outputPreview: outputPreview,
                 isError: state.status == .error,
-                toolCategory: ToolCategory.from(toolName: toolName)
+                toolCategory: ToolCategory.from(toolName: toolName),
+                partialOutputPreview: partialOutputPreview,
+                files: state.files.enumerated().map { index, file in
+                    ToolResultFile(file: file, id: "\(part.id)-file-\(index)")
+                },
+                omittedFileCount: state.omittedFileCount
             )
         }
     }
@@ -2081,29 +2129,43 @@ final class ChatMessage: Identifiable {
         let title = agentName ?? fallbackName ?? "Subagent"
         let detail = description ?? prompt ?? stateTitle ?? source ?? stateError ?? ""
 
-        guard title != "Subagent" || !detail.isEmpty else { return nil }
+        guard (taskState != nil && taskState?.status != .unknown)
+            || title != "Subagent" || !detail.isEmpty else { return nil }
 
+        let childID = OCSubagentMetadata.childID(in: taskState?.metadata)
+        let result = childID.flatMap { subagentResultsByChildID[$0] }
         return PersistedSubagentStep(
             id: part.id,
             agentName: agentName,
             title: title,
             detail: detail,
             prompt: prompt,
-            isCompleted: isSubagentPartCompleted(part, taskState: taskState),
-            isError: taskState?.status == .error,
-            cost: part.cost
+            isCompleted: result != nil || isSubagentPartCompleted(part, taskState: taskState),
+            isError: result.map { $0 == .error } ?? (taskState?.status == .error),
+            cost: part.cost,
+            resultState: result
         )
     }
 
     private func subagentToolState(from part: OCPart) -> OCToolState? {
         guard part.type == .tool,
-              normalizedToolName(part.tool) == "task",
+              ["task", "subagent"].contains(normalizedToolName(part.tool) ?? ""),
               let state = part.state else { return nil }
         return state
     }
 
     private func isSubagentPartCompleted(_ part: OCPart, taskState: OCToolState?) -> Bool {
         if let taskState {
+            if taskState.status == .error { return true }
+            // The tool invocation can succeed while its child keeps working.
+            // Unknown advisory metadata falls back to the ordinary tool state.
+            let childStatus = (taskState.metadata?["status"]?.value as? String)
+                .flatMap(OCSubagentStatus.init(rawValue:))
+            switch childStatus {
+            case .running: return false
+            case .completed: return true
+            case nil: break
+            }
             return taskState.status == .completed || taskState.status == .error
         }
 
@@ -2270,6 +2332,7 @@ final class ChatMessage: Identifiable {
 /// part as its own stable chat row.
 struct ChatTimelineItem: Identifiable {
     enum Content {
+        case context(SessionContextEntry)
         case message(ChatMessage)
         case assistantSegment(message: ChatMessage, segment: ChatMessage.AssistantSegment)
         case streamingAssistantText(
@@ -2300,7 +2363,9 @@ struct ChatTimelineItem: Identifiable {
 enum ChatTimeline {
     static func items(
         from messages: [ChatMessage],
-        showsThinking: Bool
+        showsThinking: Bool,
+        contextEntries: [SessionContextEntry] = [],
+        entryOrder: [String] = []
     ) -> [ChatTimelineItem] {
         let animatedSubagent = messages.reversed().lazy.compactMap { message -> (messageID: String, segmentID: String)? in
             guard let segment = message.assistantSegments.reversed().first(where: { segment in
@@ -2312,7 +2377,7 @@ enum ChatTimeline {
             return (message.id, segment.id)
         }.first
 
-        return messages.flatMap { message -> [ChatTimelineItem] in
+        let chatItems = messages.flatMap { message -> [ChatTimelineItem] in
             guard message.role == .assistant else {
                 return [
                     ChatTimelineItem(
@@ -2363,6 +2428,23 @@ enum ChatTimeline {
             }
 
             return items
+        }
+        guard !contextEntries.isEmpty else { return chatItems }
+        let chatByID = Dictionary(grouping: chatItems) { item in
+            switch item.content {
+            case .context(let entry): entry.id
+            case .message(let message), .assistantSegment(let message, _),
+                 .streamingAssistantText(let message, _), .turnFileChanges(let message): message.id
+            }
+        }
+        let contextByID = Dictionary(contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        var seen = Set<String>()
+        return (entryOrder + messages.map(\.id) + contextEntries.map(\.id)).flatMap { id -> [ChatTimelineItem] in
+            guard seen.insert(id).inserted else { return [] }
+            if let entry = contextByID[id] {
+                return [ChatTimelineItem(id: "context-\(id)", content: .context(entry))]
+            }
+            return chatByID[id] ?? []
         }
     }
 }

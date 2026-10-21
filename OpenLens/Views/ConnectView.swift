@@ -26,18 +26,10 @@ func shouldAttemptAutoReconnect(
 
 func connectionFailureMessage(
     localNetworkAccessRequired: Bool,
-    connectionError: String?,
     isAutoReconnect: Bool
 ) -> String {
     if localNetworkAccessRequired {
         return AppText.localNetworkAccessRequiredBody
-    }
-
-    if let connectionError = connectionError?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .nilIfBlank
-    {
-        return connectionError
     }
 
     return isAutoReconnect
@@ -92,12 +84,9 @@ struct ConnectView: View {
 
     /// The attempt shown in place of the setup step; nil while the user is setting up.
     @State private var connectionStatus: ConnectionSetupStatus?
-    @State private var connectionError: String?
     @State private var connectionTask: Task<Void, Never>?
     @State private var isAutoReconnect: Bool = false
     @State private var currentConnectionMethod: ConnectionMethod = .manual
-    @State private var pendingRemoteOffer: RemotePairingOffer?
-    @State private var pendingRemoteCredential: RemoteDeviceCredential?
     @State private var pendingOpenCodePairingLink: OpenCodePairingLink?
 
     @State private var setupStep: ConnectionSetupStep = .welcome
@@ -161,8 +150,6 @@ struct ConnectView: View {
         switch code {
         case .direct(let deepLink):
             applyDeepLink(deepLink)
-        case .remote(let offer):
-            startRemotePairing(offer)
         case .openCodePairing(let link):
             startOpenCodePairing(link)
         }
@@ -405,7 +392,6 @@ struct ConnectView: View {
         let currentURL = normalizedServerSuggestionKey(query)
 
         return savedConnections.suggestions(for: query)
-            .filter { !$0.isRemote }
             .filter { normalizedServerSuggestionKey($0.serverURL) != currentURL || query.isEmpty }
             .prefix(4)
             .map { $0 }
@@ -591,9 +577,6 @@ struct ConnectView: View {
     /// before the app swaps in the main interface.
     private func finishConnectionAttempt() async {
         guard connection.isConnected else {
-            if case .error(let message) = connection.state {
-                connectionError = message
-            }
             showConnectionFailure()
             return
         }
@@ -605,7 +588,7 @@ struct ConnectView: View {
         isFinishingConnection = false
     }
 
-    private func showConnectionFailure(whilePairing: Bool = false) {
+    private func showConnectionFailure(whilePairing: Bool = false, pairingMessage: String? = nil) {
         let needsLocalNetworkAccess = connection.localNetworkAccessRequired
         let title = if needsLocalNetworkAccess {
             AppText.localNetworkAccessRequiredTitle
@@ -617,7 +600,11 @@ struct ConnectView: View {
             AppText.manualConnectErrorTitle
         }
         connectionStatus = ConnectionSetupStatus(
-            phase: .failed(title: title, message: failureMessage, needsLocalNetworkAccess: needsLocalNetworkAccess),
+            phase: .failed(
+                title: title,
+                message: pairingMessage ?? failureMessage,
+                needsLocalNetworkAccess: needsLocalNetworkAccess
+            ),
             serverName: connectionStatus?.serverName
         )
     }
@@ -625,7 +612,6 @@ struct ConnectView: View {
     private var failureMessage: String {
         connectionFailureMessage(
             localNetworkAccessRequired: connection.localNetworkAccessRequired,
-            connectionError: connectionError,
             isAutoReconnect: isAutoReconnect
         )
     }
@@ -636,10 +622,8 @@ struct ConnectView: View {
         switch state {
         case .connected, .reconnecting:
             return
-        case .error(let message):
-            connectionError = message
-        case .disconnected, .connecting:
-            connectionError = nil
+        case .error, .disconnected, .connecting:
+            break
         }
         isFinishingConnection = false
         showConnectionFailure()
@@ -648,15 +632,11 @@ struct ConnectView: View {
     // MARK: - Connection Actions
 
     private func startConnect(auto: Bool) {
-        if !auto,
-           let url = URL(string: manualURL.trimmingCharacters(in: .whitespacesAndNewlines)),
-           let link = OpenCodePairingLink(url: url) {
+        if !auto, let link = OpenCodePairingLink(rawValue: manualURL) {
             startOpenCodePairing(link)
             return
         }
         pendingOpenCodePairingLink = nil
-        pendingRemoteOffer = nil
-        pendingRemoteCredential = nil
         if auto {
             guard let saved = savedConnections.mostRecent, saved.isConfigured else { return }
             manualURL = saved.serverURL
@@ -666,7 +646,6 @@ struct ConnectView: View {
 
         connectionTask?.cancel()
         isAutoReconnect = auto
-        connectionError = nil
         focusedManualField = nil
         showConnectionStatus(auto ? .reconnecting : .connecting, serverURL: manualURL)
 
@@ -686,15 +665,12 @@ struct ConnectView: View {
 
     private func startOpenCodePairing(_ link: OpenCodePairingLink) {
         connectionTask?.cancel()
-        pendingRemoteOffer = nil
-        pendingRemoteCredential = nil
         pendingOpenCodePairingLink = link
         pendingSessionNavigationID = nil
         manualURL = link.serverURL.absoluteString
         username = "opencode"
         password = ""
         isAutoReconnect = false
-        connectionError = nil
         focusedManualField = nil
         // Links that already carry credentials skip the pairing exchange.
         showConnectionStatus(link.credentials == nil ? .pairing : .connecting, serverURL: manualURL)
@@ -714,7 +690,7 @@ struct ConnectView: View {
                 manualURL = credential.serverURL
                 username = credential.username
                 password = credential.password
-                connectionStatus?.phase = .connecting
+                showConnectionStatus(.connecting, serverURL: credential.serverURL)
                 await connection.connect(
                     url: credential.serverURL,
                     username: credential.username,
@@ -725,52 +701,17 @@ struct ConnectView: View {
                 await finishConnectionAttempt()
             } catch {
                 guard !Task.isCancelled else { return }
-                connectionError = error.localizedDescription
-                showConnectionFailure(whilePairing: true)
-            }
-        }
-    }
-
-    private func startRemotePairing(_ offer: RemotePairingOffer) {
-        pendingOpenCodePairingLink = nil
-        pendingRemoteOffer = offer
-        pendingRemoteCredential = nil
-        connectionTask?.cancel()
-        isAutoReconnect = false
-        connectionError = nil
-        focusedManualField = nil
-        showConnectionStatus(.pairing, serverURL: nil)
-
-        connectionTask = Task {
-            do {
-                let credential = try await RemotePairingClient().pair(using: offer)
-                guard !Task.isCancelled else { return }
-                pendingRemoteCredential = credential
-                pendingRemoteOffer = nil
-                await completeRemoteConnection(credential)
-            } catch {
-                guard !Task.isCancelled else { return }
-                connectionError = error.localizedDescription
-                showConnectionFailure(whilePairing: true)
+                showConnectionFailure(
+                    whilePairing: true,
+                    pairingMessage: (error as? OpenCodePairingError)?.localizedDescription
+                )
             }
         }
     }
 
     private func retryConnection() {
-        connectionError = nil
         if let pendingOpenCodePairingLink {
             startOpenCodePairing(pendingOpenCodePairingLink)
-            return
-        }
-        if let pendingRemoteCredential {
-            connectionTask?.cancel()
-            connectionTask = Task {
-                await completeRemoteConnection(pendingRemoteCredential)
-            }
-            return
-        }
-        if let pendingRemoteOffer {
-            startRemotePairing(pendingRemoteOffer)
             return
         }
         startConnect(auto: isAutoReconnect)
@@ -789,8 +730,6 @@ struct ConnectView: View {
     private func cancelConnection() {
         connectionTask?.cancel()
         connectionTask = nil
-        pendingRemoteOffer = nil
-        pendingRemoteCredential = nil
         pendingOpenCodePairingLink = nil
         if case .connecting = connection.state {
             connection.disconnect()
@@ -801,27 +740,6 @@ struct ConnectView: View {
     private func dismissConnectionStatus() {
         cancelConnection()
         connectionStatus = nil
-    }
-
-    private func completeRemoteConnection(_ credential: RemoteDeviceCredential) async {
-        connectionStatus?.phase = .connecting
-        do {
-            guard RemoteConnectionSecretStore.save(credential) else {
-                throw RemoteProtocolError.remoteError("keychain_write_failed")
-            }
-            savedConnections.saveRemoteConnection(credential)
-            await connection.connect(remoteCredential: credential, method: .qr)
-            guard !Task.isCancelled else { return }
-
-            if connection.isConnected {
-                pendingRemoteCredential = nil
-            }
-            await finishConnectionAttempt()
-        } catch {
-            guard !Task.isCancelled else { return }
-            connectionError = error.localizedDescription
-            showConnectionFailure()
-        }
     }
 
     private func connectToDiscovered(_ server: BonjourDiscovery.DiscoveredServer) {
@@ -880,8 +798,7 @@ struct ConnectView: View {
 
     private func prefillFromMostRecentConnectionIfNeeded() {
         guard manualURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let saved = savedConnections.mostRecent,
-              !saved.isRemote else { return }
+              let saved = savedConnections.mostRecent else { return }
 
         manualURL = saved.serverURL
         username = saved.username

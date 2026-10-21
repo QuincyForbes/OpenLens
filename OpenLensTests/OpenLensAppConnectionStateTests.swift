@@ -70,15 +70,6 @@ struct OpenLensAppConnectionStateTests {
         #expect(readiness.isResolved)
     }
 
-    @Test func screenshotSessionsAreResolvedAtInitialization() {
-        let readiness = InitialSessionsReadiness(
-            initialSessions: ScreenshotFixtures.sessions
-        )
-
-        #expect(readiness.state == .loaded(ScreenshotFixtures.sessions))
-        #expect(readiness.isResolved)
-    }
-
     @Test func treatsInitialConnectedTransitionAsFreshConnect() {
         #expect(shouldHandleConnectionAsFreshConnect(from: .connecting, to: .connected))
     }
@@ -130,12 +121,11 @@ struct OpenLensAppConnectionStateTests {
         ))
     }
 
-    @Test func autoReconnectFailureShowsTheUnderlyingConnectionError() {
+    @Test func manualFailureUsesGenericCopyInsteadOfTheRawError() {
         #expect(connectionFailureMessage(
             localNetworkAccessRequired: false,
-            connectionError: "HTTP error 401.",
-            isAutoReconnect: true
-        ) == "HTTP error 401.")
+            isAutoReconnect: false
+        ) == AppText.manualConnectErrorBody)
     }
 
     @Test func returningToActiveSetupDoesNotReconnectToThePreviousComputer() {
@@ -155,18 +145,16 @@ struct OpenLensAppConnectionStateTests {
         ))
     }
 
-    @Test func autoReconnectFailureUsesGenericCopyWhenNoErrorIsAvailable() {
+    @Test func autoReconnectFailureUsesGenericCopy() {
         #expect(connectionFailureMessage(
             localNetworkAccessRequired: false,
-            connectionError: nil,
             isAutoReconnect: true
         ) == AppText.autoReconnectErrorBody)
     }
 
-    @Test func localNetworkFailureTakesPriorityOverTheTransportError() {
+    @Test func localNetworkFailureTakesPriorityOverGenericCopy() {
         #expect(connectionFailureMessage(
             localNetworkAccessRequired: true,
-            connectionError: "The request timed out.",
             isAutoReconnect: true
         ) == AppText.localNetworkAccessRequiredBody)
     }

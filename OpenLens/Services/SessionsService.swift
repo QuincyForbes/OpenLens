@@ -5,12 +5,50 @@ struct WorkspaceActivityDay: Hashable, Sendable {
     let turnCount: Int
 }
 
-/// Pure service for session CRUD operations.
+struct SessionExecutionSnapshot: Sendable {
+    let sessions: [OCSession]
+    let statuses: [String: OCSessionStatus]
+    let failedOutcomeSessionIDs: Set<String>
+
+    init(sessions: [OCSession], statuses: [String: OCSessionStatus], failedOutcomeSessionIDs: Set<String> = []) {
+        self.sessions = sessions
+        self.statuses = statuses
+        self.failedOutcomeSessionIDs = failedOutcomeSessionIDs
+    }
+}
+
+/// Session CRUD and shared, server-confirmed attention markers.
 /// No SwiftUI imports, no direct UI mutations.
 /// Returns domain models and throws on failure.
+@Observable
 final class SessionsService {
 
     private let connection: ConnectionManager
+    private var viewedMarkers: [String: Double] = [:]
+    private var viewedClientID: ObjectIdentifier?
+
+    var confirmedViewedMarkers: [String: Double] {
+        guard let client = connection.client, viewedClientID == ObjectIdentifier(client) else { return [:] }
+        return viewedMarkers
+    }
+
+    func applyingConfirmedViewedMarkers(to sessions: [OCSession]) -> [OCSession] {
+        let markers = confirmedViewedMarkers
+        return sessions.map { session in
+            markers[session.id].map { session.withViewedMarker($0) } ?? session
+        }
+    }
+
+    private func recordViewedMarker(_ session: OCSession, client: OpenCodeClient) {
+        guard connection.client === client, let viewed = session.time.viewed,
+              viewed.isFinite, viewed >= 0 else { return }
+        let clientID = ObjectIdentifier(client)
+        if viewedClientID != clientID {
+            viewedMarkers = [:]
+            viewedClientID = clientID
+        }
+        viewedMarkers[session.id] = max(viewedMarkers[session.id] ?? 0, viewed)
+    }
 
     init(connection: ConnectionManager) {
         self.connection = connection
@@ -80,6 +118,10 @@ final class SessionsService {
     }
 
     func getSession(id: String) async throws -> OCSession {
+        if ScreenshotFixtures.isEnabled, ScreenshotFixtures.outcomeRefreshHasCompleted,
+           ScreenshotFixtures.failsOutcomeRefresh, id == "session-screenshot-2" {
+            throw URLError(.networkConnectionLost)
+        }
         if ScreenshotFixtures.isEnabled, let session = ScreenshotFixtures.session(withID: id) {
             return session
         }
@@ -95,10 +137,13 @@ final class SessionsService {
     // MARK: - Create
 
     /// Create a new session, optionally with a title and workspace context.
+    /// `model` is the new-session preference; nil lets a v2 server choose its
+    /// default. It never alters an existing session.
     func createSession(
         title: String? = nil,
         workspaceDirectory: String? = nil,
-        clearsWorkspaceContext: Bool = false
+        clearsWorkspaceContext: Bool = false,
+        model: OCV2ModelRef? = nil
     ) async throws -> OCSession {
         if ScreenshotFixtures.isEnabled {
             let now = Date().timeIntervalSince1970 * 1000
@@ -120,7 +165,7 @@ final class SessionsService {
             await connection.setProjectContext(directory: workspaceDirectory)
         }
 
-        let session = try await client.createSession(title: title)
+        let session = try await client.createSession(title: title, model: model)
         return resolvingProjectDirectory(for: session)
     }
 
@@ -152,7 +197,11 @@ final class SessionsService {
                 title: newTitle,
                 version: session.version,
                 time: session.time,
-                share: session.share
+                share: session.share,
+                revert: session.revert,
+                agent: session.agent,
+                model: session.model,
+                outcome: session.outcome
             )
         }
 
@@ -167,7 +216,7 @@ final class SessionsService {
     // MARK: - Ensure Session
 
     /// Returns the most recent session, or creates a new one if none exist.
-    func ensureSession() async throws -> OCSession {
+    func ensureSession(model: OCV2ModelRef? = nil) async throws -> OCSession {
         if ScreenshotFixtures.isEnabled {
             return ScreenshotFixtures.defaultSession
         }
@@ -180,7 +229,25 @@ final class SessionsService {
         if let latest = sorted.first {
             return latest
         }
-        return try await createSession()
+        return try await createSession(model: model)
+    }
+
+    // MARK: - V2 Session Settings
+
+    /// Explicitly switches an existing v2 session's model and variant.
+    func switchModel(sessionID: String, model: OCV2ModelRef) async throws {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+        try await client.switchSessionModel(sessionID: sessionID, model: model)
+    }
+
+    /// Explicitly switches an existing v2 session's agent.
+    func switchAgent(sessionID: String, agent: String) async throws {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+        try await client.switchSessionAgent(sessionID: sessionID, agent: agent)
     }
 
     static func rootSessions(in sessions: [OCSession]) -> [OCSession] {
@@ -227,7 +294,10 @@ final class SessionsService {
                 version: session.version,
                 time: session.time,
                 share: session.share,
-                revert: session.revert
+                revert: session.revert,
+                agent: session.agent,
+                model: session.model,
+                outcome: session.outcome
             )
         }
     }
@@ -241,6 +311,41 @@ final class SessionsService {
 
     private func resolvingProjectDirectory(for session: OCSession) -> OCSession {
         resolvingProjectDirectories(in: [session])[0]
+    }
+
+    /// The response can be lost after the server commits. Always reconcile the
+    /// canonical watermark; never persist a locally guessed acknowledgement.
+    func viewResult(_ observed: OCSession) async throws -> OCSession {
+        guard connection.serverCapabilities?.protocolVersion == .v2,
+              observed.hasUnreadResult, let idle = observed.completedResultMarker else { return observed }
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        try Task.checkCancellation()
+        var acknowledgementError: Error?
+        do {
+            try await client.viewSessionResult(id: observed.id, idle: idle)
+        } catch {
+            acknowledgementError = error
+        }
+        try Task.checkCancellation()
+        let recovered = try await getSession(id: observed.id)
+        try Task.checkCancellation()
+        guard recovered.id == observed.id,
+              recovered.hasViewedResult(at: idle) else {
+            throw acknowledgementError ?? OpenCodeError.invalidPayload("The server has not confirmed viewing this result.")
+        }
+        recordViewedMarker(recovered, client: client)
+        return recovered
+    }
+
+    /// Read-marker events need session info only, without recovering history.
+    func refreshViewedMarker(id: String) async throws -> OCSession {
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let recovered = try await getSession(id: id)
+        try Task.checkCancellation()
+        guard connection.client === client else { throw CancellationError() }
+        guard recovered.id == id else { throw OpenCodeError.invalidPayload("Mismatched viewed session.") }
+        recordViewedMarker(recovered, client: client)
+        return recovered
     }
 
     // MARK: - Abort
@@ -265,6 +370,84 @@ final class SessionsService {
             throw OpenCodeError.notConnected
         }
         return try await client.getSessionStatus()
+    }
+
+    /// Recover terminal and opened-session results independently of the catalog.
+    /// Keep the last active snapshot if status recovery fails; invalidate a result
+    /// if its canonical session cannot be read, and return IDs that need a retry.
+    func refreshSessionOutcomes(
+        in sessions: [OCSession],
+        previousStatuses: [String: OCSessionStatus],
+        openedSessionIDs: Set<String> = [],
+        refreshInactive: Bool = false
+    ) async -> SessionExecutionSnapshot {
+        guard let statuses = try? await getSessionStatuses() else {
+            let retryIDs = refreshInactive ? Set(sessions.map(\.id)) : openedSessionIDs
+            return SessionExecutionSnapshot(sessions: sessions, statuses: previousStatuses, failedOutcomeSessionIDs: retryIDs)
+        }
+        guard !Task.isCancelled else {
+            return SessionExecutionSnapshot(sessions: sessions, statuses: previousStatuses)
+        }
+        guard connection.serverCapabilities?.protocolVersion == .v2
+                || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else {
+            return SessionExecutionSnapshot(sessions: sessions, statuses: statuses)
+        }
+        let activeIDs = Set(statuses.filter { $0.value.type != .idle }.map(\.key))
+        let endedIDs = Set(previousStatuses.filter { $0.value.type != .idle }.map(\.key)).subtracting(activeIDs)
+        var refreshIDs = openedSessionIDs.union(endedIDs)
+        if refreshInactive { refreshIDs.formUnion(sessions.map(\.id).filter { !activeIDs.contains($0) }) }
+        let candidates = sessions.filter { refreshIDs.contains($0.id) }
+        let freshSessions = await readCanonicalSessions(candidates)
+        guard !Task.isCancelled else {
+            return SessionExecutionSnapshot(sessions: sessions, statuses: previousStatuses)
+        }
+        var failures: Set<String> = []
+        let refreshed = sessions.map { session in
+            guard refreshIDs.contains(session.id) else { return session }
+            if let fresh = freshSessions[session.id] { return fresh }
+            failures.insert(session.id)
+            return session.withoutExecutionOutcome()
+        }
+        return SessionExecutionSnapshot(sessions: refreshed, statuses: statuses, failedOutcomeSessionIDs: failures)
+    }
+
+    /// Periodic attention recovery reads only unread, inactive rows. Failure
+    /// leaves their outcome and marker intact instead of entering outcome retries.
+    func refreshUnreadResults(in sessions: [OCSession], statuses: [String: OCSessionStatus]) async -> [OCSession] {
+        guard connection.serverCapabilities?.protocolVersion == .v2, let client = connection.client else { return sessions }
+        let candidates = sessions.filter { $0.hasUnreadResult && (statuses[$0.id]?.type ?? .idle) == .idle }
+        let fresh = await readCanonicalSessions(candidates)
+        guard !Task.isCancelled, connection.client === client else { return sessions }
+        let recovered = sessions.map { session in
+            guard let canonical = fresh[session.id], canonical.hasUnreadResult,
+                  let idle = canonical.completedResultMarker,
+                  idle > (session.completedResultMarker ?? 0) else { return session }
+            // A viewed watermark for an older completion must be compared
+            // against the newly discovered result, not this row's stale idle.
+            return canonical
+        }
+        for session in fresh.values { recordViewedMarker(session, client: client) }
+        return applyingConfirmedViewedMarkers(to: recovered)
+    }
+
+    private func readCanonicalSessions(_ sessions: [OCSession]) async -> [String: OCSession] {
+        return await withTaskGroup(of: (String, OCSession?).self) { group in
+            var remaining = sessions.makeIterator()
+            // Limit concurrent reads; callers choose the total candidate set.
+            for _ in 0..<4 {
+                guard let session = remaining.next() else { break }
+                group.addTask { (session.id, try? await self.getSession(id: session.id)) }
+            }
+            var fresh: [String: OCSession] = [:]
+            for await (id, session) in group {
+                if Task.isCancelled { group.cancelAll(); continue }
+                if let session, session.id == id { fresh[id] = session }
+                if let next = remaining.next() {
+                    group.addTask { (next.id, try? await self.getSession(id: next.id)) }
+                }
+            }
+            return fresh
+        }
     }
 
     // MARK: - Activity

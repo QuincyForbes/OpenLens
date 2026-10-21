@@ -85,6 +85,8 @@ nonisolated struct SSESessionUpdate {
     let presentFields: Set<String>
     let update: OCSession?
     let title: String?
+    /// Only native V2 selection events also add a canonical history record.
+    let refreshesTranscript: Bool
 
     init?(event: OCEvent) {
         guard let properties = event.properties?.value as? [String: Any],
@@ -96,8 +98,10 @@ nonisolated struct SSESessionUpdate {
         }
 
         self.sessionID = sessionID
+        self.refreshesTranscript = info["v2ContextChanged"] as? Bool ?? false
         self.presentFields = Set(info.keys).intersection(Set([
             "projectID", "directory", "parentID", "title", "version", "time", "share", "revert",
+            "agent", "model", "outcome",
         ]))
         self.update = SSEPreparedPayload.decode(OCSession.self, from: info).map(Self.boundedSession)
         self.title = StreamDisplayValue.preview(info["title"] as? String, maximumBytes: 512)
@@ -119,7 +123,15 @@ nonisolated struct SSESessionUpdate {
                 guard StreamDisplayValue.fitsIdentifier($0.messageID),
                       $0.partID == nil || StreamDisplayValue.fitsIdentifier($0.partID) else { return nil }
                 return OCSessionRevert(messageID: $0.messageID, partID: $0.partID)
-            }
+            },
+            agent: StreamDisplayValue.fitsIdentifier(session.agent) ? session.agent : nil,
+            model: session.model.flatMap {
+                guard StreamDisplayValue.fitsIdentifier($0.id),
+                      StreamDisplayValue.fitsIdentifier($0.providerID),
+                      $0.variant == nil || StreamDisplayValue.fitsIdentifier($0.variant) else { return nil }
+                return $0
+            },
+            outcome: StreamDisplayValue.preview(session.outcome, maximumBytes: 64)
         )
     }
 }

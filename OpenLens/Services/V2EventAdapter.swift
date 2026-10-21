@@ -5,6 +5,9 @@ import Foundation
 nonisolated struct V2EventAdapter {
     private var tools: [String: [String: Any]] = [:]
     private static let maximumTools = 256
+    /// Emitted when a session's pending inbox changed but its transcript did not.
+    static let inboxChangedEventType = "session.inbox.changed"
+    static let viewedChangedEventType = "session.viewed.changed"
 
     private static let contentEvents: Set<String> = [
         "session.step.started", "session.step.streamed", "session.step.ended", "session.step.failed",
@@ -22,6 +25,18 @@ nonisolated struct V2EventAdapter {
         if type == "server.connected" || type == "server.heartbeat" {
             return OCEvent(type: type, properties: AnyCodable([String: String]()))
         }
+        // A move can be published from its destination. Let the open chat
+        // reconcile by identity across the directory filter; only REST may
+        // choose and authorize the new workspace, never the event payload.
+        if type == "session.moved" {
+            guard let sessionID = data["sessionID"] as? String,
+                  StreamDisplayValue.fitsIdentifier(sessionID) else {
+                throw OpenCodeError.invalidPayload("Invalid native v2 move identity.")
+            }
+            return OCEvent(type: "session.reconcile", properties: AnyCodable([
+                "sessionID": sessionID, "locationChanged": true
+            ]))
+        }
         if let directory {
             guard let location = envelope["location"] as? [String: Any],
                   let eventDirectory = location["directory"] as? String else {
@@ -37,10 +52,23 @@ nonisolated struct V2EventAdapter {
         switch type {
         case "permission.asked", "form.created", "form.replied", "form.cancelled", "session.status":
             return make(type, data)
-        case "permission.replied", "session.inbox.delivered", "session.inbox.cancelled",
+        // Inbox changes outside delivery leave the transcript as it is, so
+        // only the queue is read again.
+        case "session.inbox.enqueued", "session.inbox.cancelled", "session.inbox.delivery.changed":
+            guard let sessionID = data["sessionID"] as? String else { return reconcile() }
+            return make(Self.inboxChangedEventType, ["sessionID": sessionID])
+        case "session.viewed":
+            guard let sessionID = data["sessionID"] as? String, StreamDisplayValue.fitsIdentifier(sessionID) else {
+                throw OpenCodeError.invalidPayload("Invalid native v2 viewed identity.")
+            }
+            return make(Self.viewedChangedEventType, ["sessionID": sessionID])
+        case "permission.replied", "session.inbox.delivered",
              "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted",
              "session.revert.committed", "session.revert.staged", "session.revert.cleared",
-             "session.message.content.updated", "session.moved", "session.deleted", "session.idle":
+             "session.message.content.updated", "session.deleted", "session.idle",
+             "session.instructions.updated", "session.skill.activated", "session.synthetic",
+             "session.shell.started", "session.shell.ended",
+             "session.compaction.started", "session.compaction.ended", "session.compaction.failed":
             return reconcile()
         case "session.execution.started":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }
@@ -48,6 +76,18 @@ nonisolated struct V2EventAdapter {
         case "session.renamed":
             guard let sessionID = data["sessionID"] as? String, let title = data["title"] as? String else { return reconcile() }
             return make("session.updated", ["info": ["id": sessionID, "title": title]])
+        // Explicit switches from any client change the session's canonical
+        // selection. Merge that field immediately; the chat then refreshes
+        // history to retrieve the switch record's canonical identity/order.
+        case "session.model.selected":
+            guard let sessionID = data["sessionID"] as? String,
+                  let model = data["model"] as? [String: Any],
+                  model["id"] is String, model["providerID"] is String else { return reconcile() }
+            return make("session.updated", ["info": ["id": sessionID, "model": model, "v2ContextChanged": true]])
+        case "session.agent.selected":
+            guard let sessionID = data["sessionID"] as? String,
+                  let agent = data["agent"] as? String else { return reconcile() }
+            return make("session.updated", ["info": ["id": sessionID, "agent": agent, "v2ContextChanged": true]])
         case "location.shutdown", "location.disposed", "location.reloaded":
             tools.removeAll()
             return make("session.reconcile", [:])

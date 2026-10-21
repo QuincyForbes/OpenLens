@@ -4,14 +4,14 @@ import Testing
 
 @MainActor
 struct V2ReconciliationTests {
-    @Test(arguments: ["/api/session/active", "/api/session/ses_1/permission", "/api/session/ses_1/form"])
+    @Test(arguments: ["/api/session/active", "/api/session/ses_1/permission", "/api/session/ses_1/form", "/api/session/ses_1/inbox"])
     func recoveryFailureRemainsUnsynchronizedUntilSuccessfulRetry(failingPath: String) async throws {
         let transport = ReconciliationTransport(failingPath: failingPath)
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
         let capabilities = try await api.probeCapabilities()
         let connection = ConnectionManager(testClient: api, capabilities: capabilities)
         let chat = ChatClient(
-            connection: connection, liveActivity: LiveActivityManager(),
+            connection: connection, liveActivity: TestLiveActivityProvider(),
             sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
             providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
             savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore()
@@ -32,7 +32,7 @@ struct V2ReconciliationTests {
         let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!, transport: transport)
         let connection = ConnectionManager(testClient: api, capabilities: try await api.probeCapabilities())
         let chat = ChatClient(
-            connection: connection, liveActivity: LiveActivityManager(),
+            connection: connection, liveActivity: TestLiveActivityProvider(),
             sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
             providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
             savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore()
@@ -78,7 +78,7 @@ private actor ReconciliationTransport: OpenCodeTransport {
         case "/api/session/ses_1": body = #"{"data":{"id":"ses_1","title":"Recover","location":{"directory":"/workspace"},"time":{"created":0,"updated":0}}}"#
         case "/api/session/ses_1/message": body = #"{"data":[],"cursor":{"next":null}}"#
         case "/api/session/active": body = #"{"data":{}}"#
-        case "/api/session/ses_1/permission", "/api/session/ses_1/form": body = #"{"data":[]}"#
+        case "/api/session/ses_1/permission", "/api/session/ses_1/form", "/api/session/ses_1/inbox": body = #"{"data":[]}"#
         default: throw URLError(.unsupportedURL)
         }
         return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)

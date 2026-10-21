@@ -11,6 +11,7 @@ actor OpenCodeClient {
     private var baseURL: URL
     private var authHeader: String?
     private var contextDirectory: String?
+    private var contextRevision: UInt = 0
     private(set) var capabilities: OpenCodeServerCapabilities?
 
     init(
@@ -27,16 +28,21 @@ actor OpenCodeClient {
     }
 
     func updateConnection(baseURL: URL, authHeader: String?, contextDirectory: String? = nil) {
+        contextRevision &+= 1
         self.baseURL = baseURL
         self.authHeader = authHeader
         self.contextDirectory = contextDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         self.capabilities = nil
     }
 
-    func updateContextDirectory(_ directory: String?) {
+    @discardableResult
+    func updateContextDirectory(_ directory: String?) -> String? {
+        let previousDirectory = contextDirectory
+        contextRevision &+= 1
         let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         Logger.api.debug("OpenCode client context directory changed from \(self.contextDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         self.contextDirectory = normalizedDirectory
+        return previousDirectory
     }
 
     func currentContextDirectory() -> String? {
@@ -188,7 +194,13 @@ actor OpenCodeClient {
         return try await get("/session/\(id)")
     }
 
-    func createSession(title: String? = nil, parentID: String? = nil) async throws -> OCSession {
+    /// `model` seeds a new v2 session's canonical selection; when nil the
+    /// server applies its own default. It is ignored by v1 servers.
+    func createSession(
+        title: String? = nil,
+        parentID: String? = nil,
+        model: OCV2ModelRef? = nil
+    ) async throws -> OCSession {
         Logger.api.debug("Creating session with directory context \(self.contextDirectory ?? "nil", privacy: .public)")
         if usesV2 {
             // V2 session creation is location-scoped and returns its session
@@ -199,7 +211,8 @@ actor OpenCodeClient {
             let sessionID = "ses_\(UUID().uuidString)"
             let body = OCV2CreateSessionInput(
                 id: sessionID, title: title,
-                location: contextDirectory.map { OCV2LocationInfo(directory: $0, project: nil) }
+                location: contextDirectory.map { OCV2LocationInfo(directory: $0, project: nil) },
+                model: model
             )
             let data = try await sendV2RequestData(
                 method: "POST",
@@ -249,6 +262,17 @@ actor OpenCodeClient {
         return try await patch("/session/\(id)", body: ["title": title])
     }
 
+    /// Advance only the idle watermark the viewer actually observed.
+    func viewSessionResult(id: String, idle: Double) async throws {
+        guard usesV2, idle.isFinite, idle > 0 else {
+            throw OpenCodeError.invalidPayload("Viewing results requires a V2 session idle marker.")
+        }
+        try await sendV2RequestDiscardingResponse(
+            method: "POST", path: "/api/session/\(id)/view",
+            body: ["idle": idle], includesLocation: false
+        )
+    }
+
     func getSessionStatus() async throws -> [String: OCSessionStatus] {
         if usesV2 {
             let response: OCV2Envelope<[String: OCV2ActiveSession]> = try await getV2(
@@ -281,19 +305,48 @@ actor OpenCodeClient {
 
     // MARK: - Messages
 
+    /// The server's active projection, independent of paged conversation history.
+    /// Session routes resolve their own location; never send the workspace picker
+    /// location as an override. The revision still protects against a changed binding.
+    func getActiveContext(sessionID: String) async throws -> [OCTranscriptEntry]? {
+        guard usesV2 else { return nil }
+        let revision = contextRevision
+        do {
+            let response: OCV2Envelope<[OCV2SessionMessage]> = try await getV2(
+                "/api/session/\(sessionID)/context", includesLocation: false
+            )
+            guard !Task.isCancelled, revision == contextRevision else { throw CancellationError() }
+            return OCTranscriptEntry.projectV2(response.data, sessionID: sessionID)
+        } catch {
+            guard !Task.isCancelled, revision == contextRevision else { throw CancellationError() }
+            // A structured SessionNotFoundError remains a failure, not an
+            // unsupported endpoint. Never hide auth/network/server errors.
+            if case OpenCodeError.httpError(let status) = error, [404, 405, 501].contains(status) { return nil }
+            throw error
+        }
+    }
+
     func listMessages(sessionID: String, limit: Int? = nil) async throws -> [OCMessageWithParts] {
+        try await listTranscript(sessionID: sessionID, limit: limit).compactMap { entry in
+            guard case .message(let message) = entry else { return nil }
+            return message
+        }
+    }
+
+    func listTranscript(sessionID: String, limit: Int? = nil) async throws -> [OCTranscriptEntry] {
         if usesV2 {
-            let messages: [OCV2SessionMessage] = try await getAllV2Pages(
+            let entries: [OCV2SessionMessage] = try await getAllV2Pages(
                 endpoint: "/api/session/\(sessionID)/message",
                 limit: limit ?? Self.v2PageSize,
                 order: "asc",
                 includesLocation: false
             )
-            return messages.compactMap { $0.asMessage(sessionID: sessionID) }
+            return OCTranscriptEntry.projectV2(entries, sessionID: sessionID)
         }
         var path = "/session/\(sessionID)/message"
         if let limit { path += "?limit=\(limit)" }
-        return try await get(path)
+        let messages: [OCMessageWithParts] = try await get(path)
+        return messages.map(OCTranscriptEntry.message)
     }
 
     func getMessage(sessionID: String, messageID: String) async throws -> OCMessageWithParts {
@@ -322,6 +375,15 @@ actor OpenCodeClient {
     }
 
     /// Send a prompt asynchronously (fire and forget, monitor via SSE).
+    ///
+    /// `model`, `agent`, and `variant` only apply to v1 servers. A v2 session
+    /// owns its canonical selection, so prompts never reapply it; callers use
+    /// `switchSessionModel` / `switchSessionAgent` for explicit changes.
+    ///
+    /// On v2 the returned admission identifies the durable inbox entry. Pass
+    /// the same `messageID`, text, and attachments to retry without creating
+    /// duplicate work. Attachments are v2-only.
+    @discardableResult
     func sendPromptAsync(
         sessionID: String,
         text: String,
@@ -329,41 +391,30 @@ actor OpenCodeClient {
         agent: String? = nil,
         variant: String? = nil,
         messageID: String? = nil,
-        skills: [OCV2SkillAttachment] = []
-    ) async throws {
+        skills: [OCV2SkillAttachment] = [],
+        attachments: [PromptAttachment] = []
+    ) async throws -> OCV2PromptAdmission? {
         if usesV2 {
-            // v2 records selection changes as session mutations. They must be
-            // accepted before the prompt is admitted, otherwise the runner may
-            // begin this turn with the previous selection.
-            try await applyV2PromptSelection(
+            return try await admitV2Prompt(
                 sessionID: sessionID,
-                model: model,
-                agent: agent,
-                variant: variant
+                text: text,
+                messageID: messageID,
+                skills: skills,
+                attachments: attachments,
+                delivery: .steer
             )
-
-            try await sendV2RequestDiscardingResponse(
-                method: "POST",
-                path: "/api/session/\(sessionID)/prompt",
-                body: OCV2PromptInput(
-                    id: messageID,
-                    text: text,
-                    skills: skills.isEmpty ? nil : skills,
-                    delivery: .steer
-                ),
-                includesLocation: false
-            )
-            return
         }
 
+        guard attachments.isEmpty else { throw PromptAttachmentError.attachmentsRequireV2 }
         let part = OCPromptPart(type: "text", text: text)
         let input = OCPromptInput(parts: [part], model: model, agent: agent, messageID: nil, variant: variant)
         let _: EmptyResponse = try await postCodable("/session/\(sessionID)/prompt_async", body: input, expect204: true)
+        return nil
     }
 
     /// Admit a prompt behind the active session turn without interrupting it.
-    /// The scheduler responds with admission metadata. The chat only needs the
-    /// successful admission signal, so its response body is intentionally ignored.
+    /// Selection parameters only apply to v1, matching `sendPromptAsync`.
+    @discardableResult
     func queuePrompt(
         sessionID: String,
         text: String,
@@ -371,34 +422,221 @@ actor OpenCodeClient {
         agent: String? = nil,
         variant: String? = nil,
         messageID: String? = nil,
-        skills: [OCV2SkillAttachment] = []
-    ) async throws {
+        skills: [OCV2SkillAttachment] = [],
+        attachments: [PromptAttachment] = []
+    ) async throws -> OCV2PromptAdmission? {
         if usesV2 {
-            try await applyV2PromptSelection(
+            return try await admitV2Prompt(
                 sessionID: sessionID,
-                model: model,
-                agent: agent,
-                variant: variant
+                text: text,
+                messageID: messageID,
+                skills: skills,
+                attachments: attachments,
+                delivery: .queue
             )
-            try await sendV2RequestDiscardingResponse(
-                method: "POST",
-                path: "/api/session/\(sessionID)/prompt",
-                body: OCV2PromptInput(
-                    id: messageID,
-                    text: text,
-                    skills: skills.isEmpty ? nil : skills,
-                    delivery: .queue
-                ),
-                includesLocation: false
-            )
-            return
         }
 
+        guard attachments.isEmpty else { throw PromptAttachmentError.attachmentsRequireV2 }
         let input = OCQueuedPromptInput(
             prompt: .init(text: text),
             delivery: .queue
         )
         try await postDiscardingResponse("/api/session/\(sessionID)/prompt", body: input)
+        return nil
+    }
+
+    /// Largest prompt request body OpenLens sends; images are resized to fit.
+    nonisolated static let maximumPromptBodyBytes = 2 * 1_024 * 1_024
+
+    /// The exact size of the JSON body sent for `input`, including base64
+    /// and JSON escaping overhead.
+    nonisolated static func encodedPromptBodySize(_ input: OCV2PromptInput) throws -> Int {
+        try JSONEncoder().encode(input).count
+    }
+
+    nonisolated static func makePromptInput(
+        messageID: String?,
+        text: String,
+        skills: [OCV2SkillAttachment],
+        attachments: [PromptAttachment],
+        delivery: OCV2PromptInput.Delivery
+    ) -> OCV2PromptInput {
+        OCV2PromptInput(
+            id: messageID,
+            text: text,
+            skills: skills.isEmpty ? nil : skills,
+            files: attachments.isEmpty ? nil : attachments.map(\.promptFile),
+            delivery: delivery
+        )
+    }
+
+    /// Throws `promptTooLarge` when the complete request would exceed the
+    /// body limit, before anything is sent.
+    nonisolated static func validatePromptBodySize(_ input: OCV2PromptInput) throws {
+        guard input.files?.isEmpty == false else { return }
+        if try encodedPromptBodySize(input) > maximumPromptBodyBytes {
+            throw PromptAttachmentError.promptTooLarge
+        }
+    }
+
+    /// A 2xx response proves admission even if its body cannot be decoded, so
+    /// an unreadable body yields nil instead of a misleading failure.
+    private func admitV2Prompt(
+        sessionID: String,
+        text: String,
+        messageID: String?,
+        skills: [OCV2SkillAttachment],
+        attachments: [PromptAttachment],
+        delivery: OCV2PromptInput.Delivery
+    ) async throws -> OCV2PromptAdmission? {
+        let input = Self.makePromptInput(
+            messageID: messageID,
+            text: text,
+            skills: skills,
+            attachments: attachments,
+            delivery: delivery
+        )
+        try Self.validatePromptBodySize(input)
+        let data: Data
+        do {
+            data = try await sendV2RequestData(
+                method: "POST",
+                path: "/api/session/\(sessionID)/prompt",
+                body: input,
+                includesLocation: false
+            )
+        } catch let OpenCodeError.apiError(statusCode, payload)
+            where statusCode == 400 && payload.field == "files" {
+            // OpenCode refused an attachment before
+            // admitting anything, so the prompt can be fixed and resent.
+            throw PromptAttachmentError.rejected(payload.message ?? "The server refused it.")
+        }
+        do {
+            let response: OCV2Envelope<OCV2PromptAdmission> = try decode(data)
+            return response.data
+        } catch {
+            Logger.api.warning("Prompt admission response was not decodable: \(error, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Admission only: completion arrives through the shared inbox/timeline.
+    /// A successful but unreadable acknowledgement must never invite a new ID.
+    func requestCompaction(sessionID: String, messageID: String) async throws -> OCV2InboxEntry? {
+        guard usesV2 else { return nil }
+        let data: Data
+        do {
+            data = try await sendV2RequestData(
+                method: "POST", path: "/api/session/\(sessionID)/compact",
+                body: ["id": messageID, "delivery": "steer"], includesLocation: false
+            )
+        } catch {
+            if case OpenCodeError.httpError(let status) = error, [404, 405, 501].contains(status) { return nil }
+            throw error
+        }
+        if let response = try? decode(data) as OCV2Envelope<OCV2InboxEntry>,
+           response.data.id == messageID, response.data.sessionID == sessionID,
+           response.data.type == "compaction" {
+            return response.data
+        }
+        return OCV2InboxEntry(id: messageID, sessionID: sessionID, type: "compaction", delivery: .steer, text: nil)
+    }
+
+    // MARK: - V2 Inbox
+
+    /// Durable work admitted to a v2 session and not yet delivered.
+    func listSessionInbox(sessionID: String) async throws -> [OCV2InboxEntry] {
+        guard usesV2 else {
+            throw OpenCodeError.invalidPayload("The session inbox requires a v2 OpenCode server.")
+        }
+        let response: OCV2Envelope<[OCV2InboxEntry]> = try await getV2(
+            "/api/session/\(sessionID)/inbox",
+            includesLocation: false
+        )
+        return response.data
+    }
+
+    func cancelSessionInboxEntry(sessionID: String, inboxID: String) async throws {
+        guard usesV2 else {
+            throw OpenCodeError.invalidPayload("Session inbox cancellation requires a v2 OpenCode server.")
+        }
+        try await sendV2RequestDiscardingResponse(
+            method: "DELETE",
+            path: "/api/session/\(sessionID)/inbox",
+            pathParameter: inboxID,
+            includesLocation: false
+        )
+    }
+
+    func changeSessionInboxDelivery(sessionID: String, inboxID: String, delivery: OCV2PromptInput.Delivery) async throws {
+        guard usesV2 else {
+            throw OpenCodeError.invalidPayload("Session inbox delivery changes require a v2 OpenCode server.")
+        }
+        try await sendV2RequestDiscardingResponse(
+            method: "PATCH",
+            path: "/api/session/\(sessionID)/inbox",
+            pathParameter: inboxID,
+            body: ["delivery": delivery.rawValue],
+            includesLocation: false
+        )
+    }
+
+    /// Finds a prompt admitted under `messageID`, mirroring the server's own
+    /// reconciliation: the pending inbox first, then the delivered history.
+    /// Returns nil only when the server positively reports neither.
+    func findPromptAdmission(sessionID: String, messageID: String) async throws -> OCV2PromptAdmission? {
+        if let entry = try await listSessionInbox(sessionID: sessionID)
+            .first(where: { $0.id == messageID && $0.type == "user" }) {
+            return OCV2PromptAdmission(id: entry.id, sessionID: entry.sessionID, delivery: entry.delivery)
+        }
+
+        struct DeliveredMessage: Decodable, Sendable { let id: String; let type: String }
+        do {
+            let response: OCV2Envelope<DeliveredMessage> = try await getV2(
+                "/api/session/\(sessionID)/message",
+                pathParameter: messageID,
+                includesLocation: false
+            )
+            guard response.data.type == "user" else { return nil }
+            return OCV2PromptAdmission(id: response.data.id, sessionID: sessionID, delivery: nil)
+        } catch let OpenCodeError.apiError(statusCode, payload)
+            where statusCode == 404 && payload.tag == "MessageNotFoundError" {
+            return nil
+        }
+    }
+
+    /// Whether a failed request may still have been processed by the server.
+    /// Failures before the request could leave the device, and explicit server
+    /// rejections, are definitive; timeouts, lost connections, and
+    /// server errors are not proof that nothing was admitted.
+    nonisolated static func requestMayHaveReachedServer(_ error: Error) -> Bool {
+        switch error {
+        case let error as URLError:
+            switch error.code {
+            case .notConnectedToInternet, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+                 .badURL, .unsupportedURL, .appTransportSecurityRequiresSecureConnection,
+                 .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+                 .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+                 .clientCertificateRejected, .clientCertificateRequired,
+                 .internationalRoamingOff, .callIsActive, .dataNotAllowed:
+                return false
+            default:
+                return true
+            }
+        case let error as OpenCodeError:
+            switch error {
+            case let .httpError(statusCode), let .apiError(statusCode, _):
+                return statusCode == 408 || statusCode >= 500
+            case .invalidResponse:
+                return true
+            case .notConnected, .invalidURL, .invalidPayload, .incompleteRevert:
+                return false
+            }
+        case is CancellationError:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Send a prompt synchronously (blocks until response is complete).
@@ -415,6 +653,35 @@ actor OpenCodeClient {
         let part = OCPromptPart(type: "text", text: text)
         let input = OCPromptInput(parts: [part], model: model, agent: agent, messageID: nil, variant: variant)
         return try await postCodable("/session/\(sessionID)/message", body: input)
+    }
+
+    // MARK: - V2 Session Settings
+
+    /// Records an explicit model/variant change on a v2 session. The server
+    /// acknowledges with 204 and publishes `session.model.selected`.
+    func switchSessionModel(sessionID: String, model: OCV2ModelRef) async throws {
+        guard usesV2 else {
+            throw OpenCodeError.invalidPayload("Session model switching requires a v2 OpenCode server.")
+        }
+        try await sendV2RequestDiscardingResponse(
+            method: "POST",
+            path: "/api/session/\(sessionID)/model",
+            body: ["model": model],
+            includesLocation: false
+        )
+    }
+
+    /// Records an explicit agent change on a v2 session.
+    func switchSessionAgent(sessionID: String, agent: String) async throws {
+        guard usesV2 else {
+            throw OpenCodeError.invalidPayload("Session agent switching requires a v2 OpenCode server.")
+        }
+        try await sendV2RequestDiscardingResponse(
+            method: "POST",
+            path: "/api/session/\(sessionID)/agent",
+            body: ["agent": agent],
+            includesLocation: false
+        )
     }
 
     // MARK: - Providers
@@ -513,6 +780,8 @@ actor OpenCodeClient {
         return response.data
     }
 
+    /// Selection parameters only apply to v1; v2 commands run with the
+    /// session's canonical model, variant, and agent.
     func sendCommand(
         sessionID: String,
         command: String,
@@ -526,12 +795,6 @@ actor OpenCodeClient {
         delivery: OCV2PromptInput.Delivery = .steer
     ) async throws {
         if usesV2 {
-            try await applyV2PromptSelection(
-                sessionID: sessionID,
-                model: model,
-                agent: agent,
-                variant: variant
-            )
             try await sendV2RequestDiscardingResponse(
                 method: "POST",
                 path: "/api/session/\(sessionID)/command",
@@ -616,16 +879,33 @@ actor OpenCodeClient {
         return try await get("/file/status")
     }
 
-    func readFileContent(path: String) async throws -> OCFileContent {
+    /// Reads a file relative to `directory`, or to the current context.
+    /// Reading from another session's folder is a v2 capability.
+    func readFileContent(path: String, directory: String? = nil) async throws -> OCFileContent {
         if usesV2 {
-            return try await readV2FileContent(path: path)
+            return try await readV2FileContent(path: path, directory: directory)
         }
+        guard directory == nil else { throw PromptAttachmentError.attachmentsRequireV2 }
 
         let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
         return try await get("/file/content?path=\(encodedPath)")
     }
 
+    /// The raw bytes of a file in `directory`, as served by v2.
+    func readFileData(path: String, directory: String) async throws -> Data {
+        guard usesV2 else { throw ToolResultFileError.unavailable }
+        return try await readV2FileData(path: path, directory: directory).0
+    }
+
     // MARK: - Project
+
+    /// Resolve a destination without changing the active request context.
+    func resolveLocation(directory: String) async throws -> OCV2LocationInfo {
+        guard usesV2 else { throw OpenCodeError.invalidPayload("Location resolution requires OpenCode v2.") }
+        return try await getV2("/api/location", queryItems: [
+            URLQueryItem(name: "location[directory]", value: directory)
+        ], includesLocation: false)
+    }
 
     func listProjects() async throws -> [OCProject] {
         if usesV2 {
@@ -637,7 +917,9 @@ actor OpenCodeClient {
 
     func getCurrentProject() async throws -> OCProject {
         if usesV2 {
+            let revision = contextRevision
             let location: OCV2LocationInfo = try await getV2("/api/location")
+            guard !Task.isCancelled, contextRevision == revision else { throw CancellationError() }
             contextDirectory = location.directory
             guard let project = location.project else {
                 throw OpenCodeError.invalidPayload("The v2 location response did not contain a project.")
@@ -650,7 +932,9 @@ actor OpenCodeClient {
 
     func getPath() async throws -> OCPathInfo {
         if usesV2 {
+            let revision = contextRevision
             let location: OCV2LocationInfo = try await getV2("/api/location")
+            guard !Task.isCancelled, contextRevision == revision else { throw CancellationError() }
             contextDirectory = location.directory
             return OCPathInfo(
                 state: nil,
@@ -842,13 +1126,18 @@ actor OpenCodeClient {
 
     /// Fetches pending v2 forms. Session-scoped reads preserve the owning
     /// session without accepting a caller-supplied location; inbox reads use
-    /// the active location and receive the server-owned session identities.
-    func listPendingForms(sessionID: String? = nil) async throws -> [OCFormRequest] {
+    /// the active location and bind global MCP owners to the resolved location.
+    func listPendingForms(sessionID: String? = nil, directory: String? = nil) async throws -> [OCFormRequest] {
         guard usesV2 else { return [] }
+
+        guard sessionID == nil || directory == nil,
+              directory.map(InteractiveFormSafety.fitsGlobalDirectory) ?? true else {
+            throw OpenCodeError.invalidPayload("An explicit form location must be a valid workspace, without a session owner.")
+        }
 
         let forms: [OCFormRequest]
         if let sessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
-            guard InteractiveFormSafety.fitsIdentifier(sessionID) else {
+            guard sessionID != "global", InteractiveFormSafety.fitsIdentifier(sessionID) else {
                 throw OpenCodeError.invalidPayload("A valid session ID is required to recover v2 forms.")
             }
             let response: OCV2Envelope<[OCFormRequest]> = try await getV2(
@@ -867,8 +1156,10 @@ actor OpenCodeClient {
                     : form
             }
         } else {
-            let response: OCV2Located<[OCFormRequest]> = try await getV2Located("/api/form")
-            forms = response.data
+            let response: OCV2Located<[OCFormRequest]> = try await getV2Located("/api/form",
+                queryItems: directory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
+                includesLocation: directory == nil)
+            forms = response.data.map { $0.recovered(at: response.location.directory) }
         }
 
         var safeForms: [OCFormRequest] = []
@@ -888,38 +1179,58 @@ actor OpenCodeClient {
         formID: String,
         answer: [String: OCFormValue]
     ) async throws {
+        try await replyToForm(owner: .session(sessionID), formID: formID, answer: answer)
+    }
+
+    func replyToForm(owner: OCFormOwner, formID: String, answer: [String: OCFormValue]) async throws {
         guard usesV2 else {
             throw OpenCodeError.invalidPayload("Form replies require a v2 server.")
         }
-        guard InteractiveFormSafety.fitsIdentifier(sessionID),
-              InteractiveFormSafety.fitsIdentifier(formID)
-        else {
-            throw OpenCodeError.invalidPayload("A valid session and form ID are required to reply to a v2 form.")
-        }
+        let queryItems = try formQueryItems(owner: owner, formID: formID)
 
         try await sendV2RequestDiscardingResponse(
             method: "POST",
-            path: "/api/session/\(sessionID)/form/\(formID)/reply",
+            path: "/api/session/\(owner.wireID)/form/\(formID)/reply",
             body: OCV2FormReplyInput(answer: answer),
+            queryItems: queryItems,
             includesLocation: false
         )
     }
 
     func cancelForm(sessionID: String, formID: String) async throws {
+        try await cancelForm(owner: .session(sessionID), formID: formID)
+    }
+
+    func cancelForm(owner: OCFormOwner, formID: String) async throws {
         guard usesV2 else {
             throw OpenCodeError.invalidPayload("Form cancellation requires a v2 server.")
         }
-        guard InteractiveFormSafety.fitsIdentifier(sessionID),
-              InteractiveFormSafety.fitsIdentifier(formID)
-        else {
-            throw OpenCodeError.invalidPayload("A valid session and form ID are required to cancel a v2 form.")
-        }
+        let queryItems = try formQueryItems(owner: owner, formID: formID)
 
         try await sendV2RequestDiscardingResponse(
             method: "DELETE",
-            path: "/api/session/\(sessionID)/form/\(formID)",
+            path: "/api/session/\(owner.wireID)/form/\(formID)",
+            queryItems: queryItems,
             includesLocation: false
         )
+    }
+
+    private func formQueryItems(owner: OCFormOwner, formID: String) throws -> [URLQueryItem] {
+        guard InteractiveFormSafety.fitsIdentifier(formID) else {
+            throw OpenCodeError.invalidPayload("A valid form ID is required.")
+        }
+        switch owner {
+        case .session(let id):
+            guard id != "global", InteractiveFormSafety.fitsIdentifier(id) else {
+                throw OpenCodeError.invalidPayload("A valid session owner is required.")
+            }
+            return []
+        case .global(let directory):
+            guard let directory, InteractiveFormSafety.fitsGlobalDirectory(directory) else {
+                throw OpenCodeError.invalidPayload("Refresh Inbox to recover the global form's location.")
+            }
+            return [URLQueryItem(name: "location[directory]", value: directory)]
+        }
     }
 
     // MARK: - Session actions
@@ -991,35 +1302,6 @@ actor OpenCodeClient {
         capabilities?.supports(feature) ?? true
     }
 
-    private func applyV2PromptSelection(
-        sessionID: String,
-        model: OCPromptInput.OCModelRef?,
-        agent: String?,
-        variant: String?
-    ) async throws {
-        if let model {
-            let selection = OCV2ModelRef(
-                id: model.modelID,
-                providerID: model.providerID,
-                variant: variant
-            )
-            try await sendV2RequestDiscardingResponse(
-                method: "POST",
-                path: "/api/session/\(sessionID)/model",
-                body: ["model": selection],
-                includesLocation: false
-            )
-        }
-        if let agent = agent?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
-            try await sendV2RequestDiscardingResponse(
-                method: "POST",
-                path: "/api/session/\(sessionID)/agent",
-                body: ["agent": agent],
-                includesLocation: false
-            )
-        }
-    }
-
     private func getV2<T: Decodable>(
         _ path: String,
         pathParameter: String? = nil,
@@ -1076,11 +1358,13 @@ actor OpenCodeClient {
         method: String,
         path: String,
         pathParameter: String? = nil,
+        queryItems: [URLQueryItem] = [],
         includesLocation: Bool = true
     ) async throws {
         var request = makeV2Request(
             path: path,
             pathParameter: pathParameter,
+            queryItems: queryItems,
             includesLocation: includesLocation
         )
         request.httpMethod = method
@@ -1094,6 +1378,7 @@ actor OpenCodeClient {
         path: String,
         pathParameter: String? = nil,
         body: B,
+        queryItems: [URLQueryItem] = [],
         includesLocation: Bool = true
     ) async throws {
         _ = try await sendV2RequestData(
@@ -1101,6 +1386,7 @@ actor OpenCodeClient {
             path: path,
             pathParameter: pathParameter,
             body: body,
+            queryItems: queryItems,
             includesLocation: includesLocation
         )
     }
@@ -1110,11 +1396,13 @@ actor OpenCodeClient {
         path: String,
         pathParameter: String? = nil,
         body: B?,
+        queryItems: [URLQueryItem] = [],
         includesLocation: Bool = true
     ) async throws -> Data {
         var request = makeV2Request(
             path: path,
             pathParameter: pathParameter,
+            queryItems: queryItems,
             includesLocation: includesLocation
         )
         request.httpMethod = method
@@ -1146,8 +1434,8 @@ actor OpenCodeClient {
         return try decode(data)
     }
 
-    /// Follows opaque v2 cursors until the server ends the snapshot. A remote
-    /// catalog page may be empty after gateway filtering while more pages remain.
+    /// Follows opaque v2 cursors until the server ends the snapshot. A catalog
+    /// page may be empty while more pages remain.
     private func getAllV2Pages<T: Decodable & Sendable>(
         endpoint: String,
         limit: Int = v2PageSize,
@@ -1241,8 +1529,22 @@ actor OpenCodeClient {
         return OCV2PageResult(values: page.data, nextCursor: next)
     }
 
-    private func readV2FileContent(path: String) async throws -> OCFileContent {
-        let request = makeV2Request(path: "/api/fs/read", pathParameter: path)
+    private func readV2FileContent(path: String, directory: String?) async throws -> OCFileContent {
+        let (data, mimeType) = try await readV2FileData(path: path, directory: directory)
+        guard let content = String(data: data, encoding: .utf8)
+        else {
+            return OCFileContent(type: "binary", mimeType: mimeType)
+        }
+        return OCFileContent(type: "text", content: content, mimeType: mimeType)
+    }
+
+    private func readV2FileData(path: String, directory: String?) async throws -> (Data, String?) {
+        let request = makeV2Request(
+            path: "/api/fs/read",
+            pathParameter: path,
+            queryItems: directory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
+            includesLocation: directory == nil
+        )
         let (data, response) = try await transport.data(for: request)
         try validateResponse(response, data: data)
 
@@ -1251,11 +1553,7 @@ actor OpenCodeClient {
             .split(separator: ";", maxSplits: 1)
             .first
             .map(String.init)
-        guard let content = String(data: data, encoding: .utf8)
-        else {
-            return OCFileContent(type: "binary", mimeType: mimeType)
-        }
-        return OCFileContent(type: "text", content: content, mimeType: mimeType)
+        return (data, mimeType)
     }
 
     private func makeV2Request(
@@ -1417,14 +1715,6 @@ actor OpenCodeClient {
             default:
                 break
             }
-        }
-
-        // The pre-v2 remote relay rejects unknown routes before forwarding
-        // them. Treat that rejection exactly like a missing v2 endpoint so
-        // existing paired v1 servers keep connecting until the relay itself is
-        // upgraded in the remote-v2 migration step.
-        if let remoteError = error as? RemoteProtocolError {
-            return remoteError == .invalidRequest
         }
 
         return false

@@ -71,6 +71,9 @@ struct ReviewRootView: View {
         .toolbarTitleDisplayMode(.inline)
         .task {
             await refreshInboxBadgeCount()
+            if ScreenshotFixtures.opensInbox {
+                isInboxPresented = true
+            }
         }
         .task(id: chatClient.currentSession?.id) {
             await refreshAvailableSessions()
@@ -470,7 +473,7 @@ struct ReviewRootView: View {
     private func refreshInboxBadgeCount() async {
         do {
             let snapshot = try await inboxService.loadInbox()
-            inboxBadgeCount = snapshot.permissions.count + snapshot.questions.count
+            inboxBadgeCount = snapshot.pendingRequestCount
         } catch {
             inboxBadgeCount = 0
         }

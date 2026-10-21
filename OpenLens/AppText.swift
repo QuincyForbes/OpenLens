@@ -10,10 +10,12 @@ enum AppText {
     static let appearance = "Appearance"
     static let appearanceSubtitle = "Choose the app look"
     static let autoReconnect = "Auto-reconnect"
-    static let autoReconnectErrorBody = "The server may be offline or unreachable.\nCheck that it's running and you're on the same network."
+    static let autoReconnectErrorBody = "The server may be offline or unreachable.\nCheck that OpenCode is running and your network or remote tunnel is available."
     static let autoReconnectErrorTitle = "Could not reach the saved server"
     static let autoReconnectSubtitle = "Connect to your last computer when you open OpenLens"
     static let back = "Back"
+    static let unreadResult = "Unread"
+    static let unreadResultAccessibility = "Unread result"
     static let basicAuth = "Basic Auth"
     static let branch = "Branch"
     static let browseCaptures = "Browse Captures"
@@ -30,6 +32,9 @@ enum AppText {
     static let connectionSetupTips = "Connection tips"
     static let connectionSetupNetworkTitle = "Same network or VPN"
     static let connectionSetupNetworkDetail = "Keep your iPhone and computer on the same network, or use a VPN that can reach your computer."
+    static let connectionSetupRemoteTitle = "Connect from anywhere"
+    static let connectionSetupRemoteDetail = "Run opencode pair --remote to generate a QR code that works outside your computer’s network. Keep OpenCode and its remote tunnel running."
+    static let connectionSetupRemoteHint = "Away from your computer’s network? \nUse opencode pair --remote"
     static let connectionSetupHostnameTitle = "Listen on your network"
     static let connectionSetupHostnameDetail = "To connect from your iPhone on the same network, run: opencode service set hostname 0.0.0.0."
     static let connectionManualTipsV2Title = "OpenCode v2"
@@ -84,7 +89,73 @@ enum AppText {
     static let image = "Image"
     static let audio = "Audio"
     static let video = "Video"
+    static let attach = "Attach"
+    static let attachFiles = "Attach files"
+    static let attachFromFiles = "Files"
+    static let attachPhotos = "Photos"
+    static let attachRepositoryFile = "Repository File"
+    static let attachedFile = "Attached file"
+    static let attachedImage = "Attached image"
     static let pdf = "PDF"
+    static let preparingImage = "Preparing image"
+    static let promptAdmissionFailed = "Not sent"
+    static let promptAdmissionSending = "Sending…"
+    static let promptAdmissionUnconfirmed = "Not confirmed"
+    static let promptAdmissionUncertain = "OpenLens couldn’t confirm that the server received your prompt. It’s back in the composer — send it unchanged to retry without duplicating it."
+    static let removeAttachedImage = "Remove image"
+    static let removeAttachment = "Remove attachment"
+    static let previewAttachment = "Preview"
+    static let previewTruncated = "Preview shortened. The whole file will be sent."
+    static let repositoryFileReference = "Repository file"
+    static let repositoryFiles = "Repository"
+    static let repositoryFolderEmpty = "This folder is empty"
+    static let repositoryFolderUnavailable = "Couldn't Load Folder"
+    static let repositoryFileUnavailable = "Couldn't Load File"
+    static let startLine = "Start line"
+    static let endLine = "End line"
+    static let wholeFileReference = "The whole file will be read when the prompt is sent. Add lines to narrow it."
+    static func lineRangeReference(_ label: String) -> String {
+        "Lines \(label) will be read when the prompt is sent."
+    }
+    nonisolated static func lineRangeToEnd(_ start: Int) -> String { "\(start)–end" }
+    static func lineRangePastEnd(_ lineCount: Int) -> String {
+        "This file has \(lineCount) lines. Choose lines within it."
+    }
+    nonisolated static let unsupportedImageAttachment = "This file isn't an image OpenLens can send. Choose a PNG, JPEG, GIF, WebP, or HEIC photo or screenshot."
+    nonisolated static let imageAttachmentTooLarge = "This image is too large to send, even after resizing. Crop it or choose a smaller image."
+    nonisolated static func unsupportedTextFileAttachment(_ name: String) -> String {
+        "\(name) isn't a UTF-8 text file. Choose a plain text, Markdown, or source file."
+    }
+    nonisolated static func textFileAttachmentTooLarge(_ name: String) -> String {
+        "\(name) is too large to attach. Choose a smaller file or reference it from the repository."
+    }
+    nonisolated static func unreadableFileAttachment(_ name: String) -> String {
+        "OpenLens couldn't read \(name). Make sure it's downloaded to this device and try again."
+    }
+    nonisolated static let repositoryFileNotText = "This file isn't text, so it can't be referenced by line."
+    nonisolated static let invalidLineRange = "Line ranges start at line 1 and can't end before they start."
+    nonisolated static let fileOutsideSession = "Only files inside this session's folder on the computer can be referenced."
+    nonisolated static let attachmentsTooLarge = "These attachments are too large to send together. Remove one and try again."
+    nonisolated static func modelDoesNotAcceptImages(_ modelName: String) -> String {
+        "\(modelName) doesn't accept images. Choose a model with image input or remove the images."
+    }
+    nonisolated static let attachmentsRequireV2 = "Sending attachments requires OpenCode 2."
+    nonisolated static func attachmentRejected(_ message: String) -> String {
+        "An attached file couldn't be used. \(message)"
+    }
+    nonisolated static let toolFileTooLarge = "Too large to show here"
+    nonisolated static let toolFileUnavailable = "OpenLens can't open this location"
+    nonisolated static func toolFileUnsupported(_ mime: String) -> String { "No preview for \(mime)" }
+    nonisolated static let toolFileCannotPreview = "OpenLens can't preview this kind of file."
+    nonisolated static let toolFileUnreadable = "This file couldn't be read."
+    nonisolated static let toolFileOutsideSession = "This file is outside the session's folder, so OpenLens won't open it."
+    static let toolFileCouldNotOpen = "Couldn't Open File"
+    static func toolFilesNotShown(_ count: Int) -> String {
+        count == 1 ? "1 more file not shown" : "\(count) more files not shown"
+    }
+    static let openToolFile = "Open"
+    static let toolReturnedFile = "Tool file"
+    static let partialOutputBeforeError = "Output before the error:"
     static let forget = "Forget"
     static let forgetConnection = "Forget Connection"
     static let forgetConnectionMessage = "Remove this server's credentials from Keychain? You'll need to re-enter them to connect again."
@@ -159,9 +230,22 @@ enum AppText {
     static let queuePromptRunsNext = "Runs next"
     static let queuePromptSubmitting = "Adding to queue..."
     static func queuePromptPosition(_ position: Int) -> String { "Position \(position)" }
+    static let queuePromptSteers = "Steers at next step"
+    static let queuedCompaction = "Compact conversation"
+    static let queuedSyntheticDefault = "Automatic message"
+    static func queuedMove(to directory: String?) -> String {
+        directory.map { "Move session to \($0)" } ?? "Move session"
+    }
+    static let sessionInboxLoadFailedPrefix = "Failed to load the session queue:"
+    static let cancelQueuedPromptFailedPrefix = "Failed to cancel the pending prompt:"
+    static let steerQueuedPromptFailedPrefix = "Failed to steer the pending prompt:"
+    static let queuedPromptActions = "Pending prompt actions"
+    static let cancelQueuedPrompt = "Cancel pending prompt"
+    static let promoteQueuedPrompt = "Steer at next step"
+    static let updatingQueuedPrompt = "Updating pending prompt"
     static let qrInstruction = "Point camera at QR code"
-    static let qrInstructionSubtitle = "Scan an OpenCode pairing link or an openlens-qr code"
-    static let qrInvalid = "Invalid QR code — scan an OpenCode pairing link or an openlens-qr code"
+    static let qrInstructionSubtitle = "Scan an OpenCode pairing QR code"
+    static let qrInvalid = "Invalid QR code — scan an OpenCode pairing QR code"
     static let questionTranscriptAnswer = "Answer"
     static let questionTranscriptAnswered = "Answered"
     static let questionTranscriptAsking = "Asking questions..."
@@ -285,7 +369,7 @@ enum AppText {
     static let wizardConnectManualSubtitle = "Type the IP address shown in terminal"
     static let wizardConnectQR = "Scan QR Code"
     static let wizardConnectQRSubtitle = "Fastest — no typing needed"
-    static let wizardConnectQRTipTitle = "Generate a QR Code"
+    static let wizardConnectQRTipTitle = "Pair with a QR Code"
     static let wizardConnectTitle = "How to connect?"
     static let wizardInstallBody = "On your computer, open a terminal and run:"
     static let wizardInstallHint = "Your iPhone and computer must be on the same Wi-Fi network. The --hostname 0.0.0.0 flag exposes the server on all network interfaces."
@@ -296,57 +380,47 @@ enum AppText {
 
     static let onboardingPageQRTitle = "Quick Connect with QR"
     static let onboardingPageQRBody = """
-    The fastest way to connect is scanning a QR code generated by the `openlens-qr` tool included in this repo.
+    The fastest way to connect is scanning the pairing QR code from OpenCode.
 
-    **1.** Open Terminal in the project root.
+    **1.** Start OpenCode on your computer:
+    `opencode serve --port 4096 --hostname 0.0.0.0`
 
-    **2.** Build the CLI tool once:
-    `xcrun swift build -c release --package-path Tools/openlens-qr`
+    **2.** In another terminal, run:
+    `opencode pair`
 
-    **3.** Start the QR flow:
-    `Tools/openlens-qr/.build/release/openlens-qr --serve`
-
-    The server starts first, then the QR code appears in your terminal. Scan it with OpenLens before pressing Enter to open the TUI.
+    **3.** Scan the QR code with OpenLens. The connection is saved for next time.
     """
     static let onboardingPageQRHint = """
-    `--serve` starts OpenCode, waits until the server is reachable, prints the QR code, and only opens the TUI after you confirm with Enter.
-    If you set `OPENLENS_QR_PASSWORD=secret`, the same secret is applied to the server, encoded in the QR deep link, and reused when the TUI attaches.
-    By default the printed deep link is masked. Use `--print-secret-link` only when you explicitly want to reveal the full link in the terminal.
+    Pairing links expire after five minutes. If you can't use the camera, paste the link on the manual connection screen instead.
     """
     static let onboardingPage1Title = "Start manually"
     static let onboardingPage1Body = """
-    If you want to start OpenCode manually instead of using the QR helper, run:
+    If you want to start OpenCode manually instead of pairing with a QR code, run:
     **opencode serve --port 4096 --hostname 0.0.0.0**
 
     This exposes the server on your local network so OpenLens can reach it from your iPhone. Keep your iPhone and Mac on the same Wi-Fi.
     """
     static let onboardingPage1Hint = """
-    Recommended default: use `openlens-qr --serve` from this repo when you want QR setup and a local TUI in one flow.
+    Set `OPENCODE_SERVER_PASSWORD` before starting the server to require a password.
     Don't have OpenCode? `curl -fsSL https://opencode.ai/install | bash`
     """
     static let onboardingPage2Title = "Connect"
     static let onboardingPage2Body = """
     Make sure your iPhone and Mac are on the **same Wi-Fi network**.
     **Fastest: QR Code**
-    From the project root run `cd Tools/openlens-qr`, build once with `xcrun swift build -c release`, then run `.build/release/openlens-qr --serve`.
-    The tool starts the server first, shows a QR code while it is already live, and waits for you to scan before opening the TUI.
+    Run `opencode pair` on your computer and scan the QR code it shows.
     **Manual** — enter the IP address, e.g. `192.168.1.50:4096`.
     """
     static let onboardingPage2Hint = """
-    Useful variants:
-    `OPENLENS_QR_PASSWORD=secret openlens-qr --serve`
-    `OPENLENS_QR_PASSWORD=secret openlens-qr 192.168.1.50:4096`
-    `OPENLENS_QR_PASSWORD=secret openlens-qr --print-secret-link`
-
-    `OPENLENS_QR_PASSWORD` secures the server in serve mode and includes the same secret in the QR deep link, so OpenLens can connect without retyping it.
-    Build from the repo root with: `xcrun swift build -c release --package-path Tools/openlens-qr`
+    You can also paste a pairing link from `opencode pair` on the manual connection screen.
+    If the server needs a password, enter the username and password you started it with.
     """
     static let onboardingPage3Title = "One session, many places"
     static let onboardingPage3Body = """
     OpenCode works like a server — you can have the **TUI in a terminal**, a browser, and OpenLens open at the same time, all connected to the same session.
     Changes and messages sync in real time.
     """
-    static let onboardingPage3Hint = "With `openlens-qr --serve`, press Enter after scanning to open the TUI while keeping the same server available to your phone."
+    static let onboardingPage3Hint = "Run `opencode attach http://<host>:4096` in a terminal to open the TUI on the same server your phone uses."
     static let onboardingPage4Title = "Attach to a server"
     static let onboardingPage4Body = """
     If the server is already running (e.g. via `opencode serve` or `opencode web`), you can attach a terminal to it without restarting:
@@ -358,7 +432,7 @@ enum AppText {
     static let onboardingNext = "Next"
     static let onboardingStart = "Let's go"
 
-    static let wizardConnectQRTipBody = "On your computer, run this command to start the server and include the secret from `OPENLENS_QR_PASSWORD` in the QR flow. The TUI opens only after you scan and press Enter:"
+    static let wizardConnectQRTipBody = "With the server running, run this command on your computer and scan the QR code it shows:"
 
     static func captureEventCount(_ count: Int) -> String {
         "\(count) event\(count == 1 ? "" : "s")"
@@ -415,6 +489,12 @@ enum AppText {
     static func showMoreSessions(_ remainingCount: Int) -> String {
         "\(showMoreSessions) (\(remainingCount))"
     }
+
+    static let executionOutcomeUnavailable = "Outcome unavailable"
+    static let executionWaitingPermission = "Waiting for permission"
+    static let executionWaitingForm = "Waiting for response"
+    static let executionSucceeded = "Succeeded"
+    static let executionInterrupted = "Interrupted"
 
     static func onboardingStep(_ current: Int, _ total: Int) -> String {
         "Step \(current) of \(total)"

@@ -8,10 +8,7 @@ Explain the user-facing reason for this change.
 
 ## Verification
 
-- [ ] `xcodegen generate`
-- [ ] `xcodebuild -project OpenLens.xcodeproj -scheme OpenLens -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO test`
-- [ ] `xcrun swift build --package-path Tools/openlens-qr` (if CLI code changed)
-- [ ] Browser flow checked for `Tools/appstore-shot-studio/` changes
+- [ ] `./scripts/test-ios.sh`
 
 ## Screenshots
 

@@ -14,14 +14,69 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
     let time: OCSessionTime
     let share: OCShareInfo?
     let revert: OCSessionRevert?
+    /// v2 canonical agent for the next turn. Absent on v1 servers.
+    let agent: String?
+    /// v2 canonical model and reasoning variant for the next turn. Absent on
+    /// v1 servers, and on v2 sessions that use the server default.
+    let model: OCV2ModelRef?
+    /// Last completed V2 execution; unknown future values remain decodable.
+    let outcome: String?
 
     /// Convenience: Unix timestamp (seconds) when last updated. Used for sorting.
     var updatedAt: Double { time.updated / 1000.0 }
     /// Convenience: Unix timestamp (seconds) when created.
     var createdAt: Double { time.created / 1000.0 }
 
+    /// An active snapshot alone cannot prove a successful completion.
+    var executionOutcome: OCExecutionState {
+        guard let idle = time.idle, idle.isFinite, idle > 0,
+              let outcome, let state = OCExecutionState(rawValue: outcome),
+              state == .succeeded || state == .failed || state == .interrupted else { return .unknown }
+        return state
+    }
+
+    /// Session-list rows only surface a fresh terminal result. Unknown outcomes stay hidden.
+    func executionOutcomeVisibleOnSessionList(at now: Date = .now) -> OCExecutionState? {
+        let state = executionOutcome
+        guard state != .unknown else { return nil }
+        guard let idle = time.idle, idle.isFinite, idle > 0 else { return nil }
+        let age = now.timeIntervalSince1970 - (idle / 1000)
+        guard age <= Self.sessionListOutcomeVisibilityWindow else { return nil }
+        return state
+    }
+
+    static let sessionListOutcomeVisibilityWindow: TimeInterval = 24 * 60 * 60
+
+    /// Read attention belongs to the server's last idle transition, not updated time.
+    var completedResultMarker: Double? {
+        guard let idle = time.idle, idle.isFinite, idle > 0 else { return nil }
+        return idle
+    }
+
+    func hasViewedResult(at idle: Double) -> Bool {
+        guard idle.isFinite, idle > 0, let viewed = time.viewed,
+              viewed.isFinite, viewed >= 0 else { return false }
+        return viewed >= idle
+    }
+
+    var hasUnreadResult: Bool {
+        guard let idle = completedResultMarker else { return false }
+        return !hasViewedResult(at: idle)
+    }
+
+    /// Merge only a recovered read marker without overwriting a newer execution.
+    func withViewedMarker(_ viewed: Double) -> OCSession {
+        OCSession(
+            id: id, projectID: projectID, directory: directory, parentID: parentID,
+            title: title, version: version,
+            time: .init(created: time.created, updated: time.updated, compacting: time.compacting,
+                        idle: time.idle, viewed: max(time.viewed ?? 0, viewed)),
+            share: share, revert: revert, agent: agent, model: model, outcome: outcome
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, projectID, directory, location, parentID, title, version, time, share, revert
+        case id, projectID, directory, location, parentID, title, version, time, share, revert, agent, model, outcome
     }
 
     init(
@@ -33,7 +88,10 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         version: String? = nil,
         time: OCSessionTime,
         share: OCShareInfo? = nil,
-        revert: OCSessionRevert? = nil
+        revert: OCSessionRevert? = nil,
+        agent: String? = nil,
+        model: OCV2ModelRef? = nil,
+        outcome: String? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -44,6 +102,9 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         self.time = time
         self.share = share
         self.revert = revert
+        self.agent = agent
+        self.model = model
+        self.outcome = outcome
     }
 
     init(from decoder: Decoder) throws {
@@ -58,6 +119,11 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         time = try container.decodeIfPresent(OCSessionTime.self, forKey: .time) ?? OCSessionTime(created: 0, updated: 0)
         share = try container.decodeIfPresent(OCShareInfo.self, forKey: .share)
         revert = try container.decodeIfPresent(OCSessionRevert.self, forKey: .revert)
+        // Selection and outcome fields are advisory for listing sessions, so a shape the
+        // app does not understand must not hide the session itself.
+        agent = (try? container.decodeIfPresent(String.self, forKey: .agent))?.nilIfBlank
+        model = (try? container.decodeIfPresent(OCV2ModelRef.self, forKey: .model)) ?? nil
+        outcome = try? container.decodeIfPresent(String.self, forKey: .outcome)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -71,6 +137,9 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         try container.encode(time, forKey: .time)
         try container.encodeIfPresent(share, forKey: .share)
         try container.encodeIfPresent(revert, forKey: .revert)
+        try container.encodeIfPresent(agent, forKey: .agent)
+        try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(outcome, forKey: .outcome)
     }
 
     func hash(into hasher: inout Hasher) {
@@ -82,6 +151,58 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
             && lhs.title == rhs.title
             && lhs.time.updated == rhs.time.updated
             && lhs.revert == rhs.revert
+            && lhs.agent == rhs.agent
+            && lhs.model == rhs.model
+            && lhs.outcome == rhs.outcome
+            && lhs.time.idle == rhs.time.idle
+            && lhs.time.viewed == rhs.time.viewed
+    }
+
+    /// Returns a copy with v2 canonical selection fields replaced.
+    func withSelection(agent: String?, model: OCV2ModelRef?) -> OCSession {
+        OCSession(
+            id: id, projectID: projectID, directory: directory, parentID: parentID,
+            title: title, version: version, time: time, share: share, revert: revert,
+            agent: agent, model: model, outcome: outcome
+        )
+    }
+
+    /// Retain the row's metadata when its latest result could not be recovered.
+    func withoutExecutionOutcome() -> OCSession {
+        OCSession(
+            id: id, projectID: projectID, directory: directory, parentID: parentID,
+            title: title, version: version, time: time, share: share, revert: revert,
+            agent: agent, model: model, outcome: nil
+        )
+    }
+}
+
+nonisolated enum OCExecutionState: String, Sendable {
+    case unknown, working, waitingPermission, waitingForm
+    case succeeded, failed, interrupted
+
+    var label: String {
+        switch self {
+        case .unknown: AppText.executionOutcomeUnavailable
+        case .working: AppText.working
+        case .waitingPermission: AppText.executionWaitingPermission
+        case .waitingForm: AppText.executionWaitingForm
+        case .succeeded: AppText.executionSucceeded
+        case .failed: AppText.responseFailed
+        case .interrupted: AppText.executionInterrupted
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .unknown: "questionmark.circle"
+        case .working: "circle.dashed"
+        case .waitingPermission: "hand.raised"
+        case .waitingForm: "text.bubble"
+        case .succeeded: "checkmark.circle"
+        case .failed: "exclamationmark.triangle"
+        case .interrupted: "stop.circle"
+        }
     }
 }
 
@@ -99,11 +220,15 @@ nonisolated struct OCSessionTime: Codable, Hashable, Sendable {
     let created: Double
     let updated: Double
     let compacting: Double?
+    let idle: Double?
+    let viewed: Double?
 
-    init(created: Double, updated: Double, compacting: Double? = nil) {
+    init(created: Double, updated: Double, compacting: Double? = nil, idle: Double? = nil, viewed: Double? = nil) {
         self.created = created
         self.updated = updated
         self.compacting = compacting
+        self.idle = idle
+        self.viewed = viewed
     }
 
     init(from decoder: Decoder) throws {
@@ -111,10 +236,12 @@ nonisolated struct OCSessionTime: Codable, Hashable, Sendable {
         created = try container.decodeIfPresent(Double.self, forKey: .created) ?? 0
         updated = try container.decodeIfPresent(Double.self, forKey: .updated) ?? 0
         compacting = try container.decodeIfPresent(Double.self, forKey: .compacting)
+        idle = try? container.decodeIfPresent(Double.self, forKey: .idle)
+        viewed = try? container.decodeIfPresent(Double.self, forKey: .viewed)
     }
 
     enum CodingKeys: String, CodingKey {
-        case created, updated, compacting
+        case created, updated, compacting, idle, viewed
     }
 }
 
@@ -335,7 +462,7 @@ nonisolated struct OCMessage: Codable, Identifiable, Sendable {
     let name: String?
     let data: OCAPIErrorData?
 
-    var message: String? { data?.message }
+    nonisolated var message: String? { data?.message }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -546,12 +673,60 @@ nonisolated struct OCPart: Codable, Identifiable, Sendable {
         guard isRenderableText else { return nil }
         return text
     }
+
+    var isInlineImageFile: Bool {
+        type == .file
+            && mime?.lowercased().hasPrefix("image/") == true
+            && url?.hasPrefix("data:") == true
+    }
+}
+
+/// A file returned by a v2 tool (`Tool.FileContent`). `uri` is nil when the
+/// file was withheld for exceeding `ToolResultFileBudget`; its MIME and name
+/// still say what was left out.
+nonisolated struct OCToolFile: Codable, Hashable, Sendable {
+    let uri: String?
+    let mime: String
+    let name: String?
+
+    init(uri: String?, mime: String, name: String? = nil) {
+        self.uri = uri
+        self.mime = mime
+        self.name = name
+    }
 }
 
 nonisolated struct OCToolState: Codable, Sendable {
+    /// One `Tool.Content` item. Unknown or malformed items decode as nil so
+    /// they can't hide the rest of the result.
     private struct ContentItem: Decodable {
-        let type: OCPartType
+        let type: String?
         let text: String?
+        let uri: String?
+        let mime: String?
+        let name: String?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            type = try? container.decodeIfPresent(String.self, forKey: .type)
+            text = try? container.decodeIfPresent(String.self, forKey: .text)
+            uri = try? container.decodeIfPresent(String.self, forKey: .uri)
+            mime = try? container.decodeIfPresent(String.self, forKey: .mime)
+            name = try? container.decodeIfPresent(String.self, forKey: .name)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case type, text, uri, mime, name
+        }
+    }
+
+    /// A non-object item (not keyed) also decodes as nil.
+    private struct OptionalContentItem: Decodable {
+        let value: ContentItem?
+
+        init(from decoder: Decoder) throws {
+            value = try? ContentItem(from: decoder)
+        }
     }
 
     private struct ErrorDetail: Decodable {
@@ -566,18 +741,23 @@ nonisolated struct OCToolState: Codable, Sendable {
     let metadata: [String: AnyCodable]?
     let time: OCToolTime?
     let attachments: [AnyCodable]?
+    /// Files the tool returned, within `ToolResultFileBudget.maximumFiles`.
+    let files: [OCToolFile]
+    /// Returned files beyond `ToolResultFileBudget.maximumFiles`.
+    let omittedFileCount: Int
 
     enum CodingKeys: String, CodingKey {
-        case status, input, output, title, error, metadata, time, attachments
+        case status, input, output, title, error, metadata, time, attachments, files, omittedFileCount
     }
 
     private enum DecodingKeys: String, CodingKey {
-        case status, input, output, content, title, error, metadata, time, attachments
+        case status, input, output, content, title, error, metadata, time, attachments, files, omittedFileCount
     }
 
     init(status: OCToolStatus, input: AnyCodable? = nil, output: String? = nil,
          title: String? = nil, error: String? = nil, metadata: [String: AnyCodable]? = nil,
-         time: OCToolTime? = nil, attachments: [AnyCodable]? = nil) {
+         time: OCToolTime? = nil, attachments: [AnyCodable]? = nil,
+         files: [OCToolFile] = [], omittedFileCount: Int = 0) {
         self.status = status
         self.input = input
         self.output = output
@@ -586,18 +766,28 @@ nonisolated struct OCToolState: Codable, Sendable {
         self.metadata = metadata
         self.time = time
         self.attachments = attachments
+        self.files = files
+        self.omittedFileCount = omittedFileCount
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: DecodingKeys.self)
         status = try container.decodeIfPresent(OCToolStatus.self, forKey: .status) ?? .pending
         input = try? container.decodeIfPresent(AnyCodable.self, forKey: .input)
+        let content = (try? container.decodeIfPresent([OptionalContentItem].self, forKey: .content))?
+            .compactMap(\.value)
+        if let content {
+            (files, omittedFileCount) = Self.boundedFiles(from: content)
+        } else {
+            files = (try? container.decodeIfPresent([OCToolFile].self, forKey: .files)) ?? []
+            omittedFileCount = max(0, (try? container.decodeIfPresent(Int.self, forKey: .omittedFileCount)) ?? 0)
+        }
         // output can sometimes be a non-string value; fall back gracefully
         if let str = try? container.decodeIfPresent(String.self, forKey: .output) {
             output = str
-        } else if let content = try? container.decodeIfPresent([ContentItem].self, forKey: .content) {
+        } else if let content {
             let text = content
-                .filter { $0.type == .text }
+                .filter { $0.type == "text" }
                 .compactMap(\.text)
                 .joined(separator: "\n")
             output = text.isEmpty ? nil : text
@@ -622,6 +812,44 @@ nonisolated struct OCToolState: Codable, Sendable {
         time = try? container.decodeIfPresent(OCToolTime.self, forKey: .time)
         attachments = try? container.decodeIfPresent([AnyCodable].self, forKey: .attachments)
     }
+
+    /// Applies `ToolResultFileBudget`.
+    private static func boundedFiles(from content: [ContentItem]) -> ([OCToolFile], Int) {
+        let items = content.filter { $0.type == "file" }
+        let keeps = ToolResultFileBudget.keepsURIs(ofSizes: items.map { $0.uri?.utf8.count ?? 0 })
+        let files = zip(items, keeps).prefix(ToolResultFileBudget.maximumFiles).map { item, keeps in
+            OCToolFile(
+                uri: keeps ? item.uri : nil,
+                mime: StreamDisplayValue.preview(item.mime, maximumBytes: 128) ?? "application/octet-stream",
+                name: StreamDisplayValue.preview(item.name, maximumBytes: 512)
+            )
+        }
+        return (Array(files), items.count - files.count)
+    }
+}
+
+/// Shared alias precedence for card identity, stream ownership and safety.
+nonisolated enum OCSubagentMetadata {
+    static let childIDKeys = ["sessionId", "sessionID", "session_id"]
+
+    static func validChildID(_ value: AnyCodable?) -> String? {
+        guard let id = value?.value as? String, InteractiveFormSafety.fitsIdentifier(id) else { return nil }
+        return id
+    }
+
+    static func childID(in metadata: [String: AnyCodable]?) -> String? {
+        for key in childIDKeys {
+            if let id = validChildID(metadata?[key]) { return id }
+        }
+        return nil
+    }
+}
+
+/// Child state reported in V2 subagent tool metadata. This is evidence from
+/// that tool update, rather than a subscription to the child's later outcome.
+nonisolated enum OCSubagentStatus: String, Sendable {
+    case running
+    case completed
 }
 
 nonisolated enum OCToolStatus: String, Codable, Sendable {
@@ -1543,31 +1771,58 @@ nonisolated struct OCQuestionRequest: Codable, Identifiable, Sendable {
 
 // MARK: - Forms
 
-/// A server-driven v2 form. Unlike legacy questions, forms carry typed fields
-/// and must retain their session identity for their session-scoped operations.
+/// Only MCP forms may use the wire sentinel "global". They belong to a
+/// location, not a session; recovery binds that location before any operation.
+nonisolated enum OCFormOwner: Hashable, Sendable {
+    case session(String)
+    case global(directory: String?)
+
+    var wireID: String {
+        switch self {
+        case .session(let id): id
+        case .global: "global"
+        }
+    }
+}
+
+/// A server-driven v2 form retaining its wire identity and recovered ownership.
 nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
+    nonisolated struct Identity: Hashable, Sendable {
+        let id: String
+        let owner: OCFormOwner
+    }
     let id: String
     let sessionID: String
     let title: String
     let fields: [OCFormField]
     let state: OCFormState
+    let globalDirectory: String?
+
+    var owner: OCFormOwner {
+        sessionID == "global" ? .global(directory: globalDirectory) : .session(sessionID)
+    }
+
+    var isGlobal: Bool { sessionID == "global" }
+    var identity: Identity { Identity(id: id, owner: owner) }
 
     init(
         id: String,
         sessionID: String,
         title: String,
         fields: [OCFormField],
-        state: OCFormState = .pending
+        state: OCFormState = .pending,
+        globalDirectory: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
         self.title = title
         self.fields = fields
         self.state = state
+        self.globalDirectory = globalDirectory
     }
 
     var hasUnsupportedFields: Bool {
-        fields.contains { !$0.isSupported }
+        fields.contains { !$0.isSupported } || !InteractiveFormSafety.supportsConditions(in: self)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1581,6 +1836,14 @@ nonisolated struct OCFormRequest: Decodable, Identifiable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
         fields = try container.decodeIfPresent([OCFormField].self, forKey: .fields) ?? []
         state = try container.decodeIfPresent(OCFormState.self, forKey: .state) ?? .pending
+        // A field inside the form cannot choose a location. Only the enclosing
+        // located recovery response may bind a global interaction.
+        globalDirectory = nil
+    }
+
+    func recovered(at directory: String) -> OCFormRequest {
+        OCFormRequest(id: id, sessionID: sessionID, title: title, fields: fields,
+            state: state, globalDirectory: isGlobal ? directory : nil)
     }
 }
 
@@ -1639,6 +1902,7 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
     let placeholder: String?
     let stringDefault: String?
     let options: [OCFormOption]
+    let hasDeclaredOptions: Bool
     let custom: Bool
     let numberMinimum: Double?
     let numberMaximum: Double?
@@ -1648,15 +1912,18 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
     let multiselectMaximum: Int?
     let multiselectDefault: [String]
     let externalURLString: String?
-    /// Conditions are part of the documented contract, but OpenLens does not
-    /// yet evaluate them. Treat them as unsupported instead of submitting
-    /// values for fields that may be inactive.
-    let hasConditionalRules: Bool
+    /// Nil retains malformed or future predicates as an explicit fallback.
+    let conditions: [OCFormCondition]?
+    var hasConditionalRules: Bool { conditions?.isEmpty != true }
 
     var id: String { key }
+    // V2 2.0.23 ExternalField has no `when`, and server validateAnswer requires
+    // its acknowledgement before testing activity. Never guess that a rule
+    // makes an external action optional.
     var isSupported: Bool {
         kind != .unsupported
-            && !hasConditionalRules
+            && conditions?.allSatisfy({ ["eq", "neq"].contains($0.op) }) == true
+            && (kind != .external || !hasConditionalRules)
             && (kind != .string || stringFormat.map {
                 ["email", "uri", "date", "date-time"].contains($0)
             } ?? true)
@@ -1700,6 +1967,7 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
         stringMaximum = try container.decodeIfPresent(Int.self, forKey: .maxLength)
         stringPattern = try container.decodeIfPresent(String.self, forKey: .pattern)
         placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder)
+        hasDeclaredOptions = try container.contains(.options) && !container.decodeNil(forKey: .options)
         options = try container.decodeIfPresent([OCFormOption].self, forKey: .options) ?? []
         custom = try container.decodeIfPresent(Bool.self, forKey: .custom) ?? false
         numberMinimum = Self.finiteNumber(from: container, key: .minimum)
@@ -1707,18 +1975,9 @@ nonisolated struct OCFormField: Decodable, Identifiable, Sendable {
         multiselectMinimum = try container.decodeIfPresent(Int.self, forKey: .minItems)
         multiselectMaximum = try container.decodeIfPresent(Int.self, forKey: .maxItems)
         externalURLString = try container.decodeIfPresent(String.self, forKey: .url)
-        if container.contains(.when) {
-            // An empty condition list has no effect. A malformed condition is
-            // treated as conditional so the field falls back safely instead
-            // of being submitted with guessed visibility semantics.
-            if let conditions = try? container.decode([OCFormCondition].self, forKey: .when) {
-                hasConditionalRules = !conditions.isEmpty
-            } else {
-                hasConditionalRules = true
-            }
-        } else {
-            hasConditionalRules = false
-        }
+        conditions = container.contains(.when)
+            ? try? container.decode([OCFormCondition].self, forKey: .when)
+            : []
 
         switch rawType {
         case "string":
@@ -1798,15 +2057,37 @@ nonisolated struct OCFormOption: Decodable, Identifiable, Sendable {
     }
 }
 
-/// Conditions are intentionally only decoded to decide whether a form field
-/// needs the unsupported fallback. OpenLens does not evaluate them yet.
-private nonisolated struct OCFormCondition: Decodable {
+/// Scalar, typed predicates from Form.When. Unknown syntax remains unsupported.
+nonisolated struct OCFormCondition: Decodable, Sendable {
     let key: String
     let op: String
-    let value: AnyCodable
+    let value: OCFormValue
 
-    private enum CodingKeys: String, CodingKey {
-        case key, op, value
+    private enum CodingKeys: String, CodingKey { case key, op, value }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decode(String.self, forKey: .key)
+        op = try container.decode(String.self, forKey: .op)
+        let scalar = try container.superDecoder(forKey: .value).singleValueContainer()
+        if let flag = try? scalar.decode(Bool.self) {
+            value = .boolean(flag)
+        } else if let number = try? scalar.decode(Double.self), number.isFinite {
+            value = .number(number)
+        } else {
+            value = .string(try scalar.decode(String.self))
+        }
+    }
+
+    func matches(_ answer: OCFormValue?) -> Bool {
+        guard let answer else { return false }
+        let hit: Bool
+        if case .strings(let selections) = answer, case .string(let option) = value {
+            hit = selections.contains(option)
+        } else {
+            hit = answer == value
+        }
+        return op == "eq" ? hit : !hit
     }
 }
 
@@ -1998,10 +2279,42 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
         }
     }
 
+    /// A file on a user prompt (`Prompt.FileAttachment`): base64 `data` with
+    /// its detected `mime`, whether it was sent inline or read from a URI.
+    nonisolated struct File: Decodable, Sendable {
+        nonisolated struct Source: Decodable, Sendable {
+            let type: String
+            let uri: String?
+        }
+
+        let data: String
+        let mime: String
+        let name: String?
+        let source: Source?
+
+        /// A server-read reference keeps its `file:` URI so it is shown as a
+        /// reference rather than inline content.
+        var partURL: String {
+            if source?.type == "uri", let uri = source?.uri, !uri.isEmpty { return uri }
+            return "data:\(mime);base64,\(data)"
+        }
+    }
+
+    /// One malformed file must not hide the rest of the prompt.
+    private nonisolated struct OptionalFile: Decodable, Sendable {
+        let value: File?
+
+        init(from decoder: Decoder) throws {
+            value = try? File(from: decoder)
+        }
+    }
+
+    let contextEntry: SessionContextEntry?
     let id: String
     let type: String
     let time: OCMessageTime?
     let text: String?
+    let files: [File]
     let agent: String?
     let model: Model?
     let content: [Content]
@@ -2011,15 +2324,37 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
     let error: OCAPIError?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, time, text, agent, model, content, cost, tokens, finish, error
+        case id, type, time, text, files, agent, model, content, cost, tokens, finish, error
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
         type = try container.decode(String.self, forKey: .type)
+        if type == "user" || type == "assistant" {
+            id = try container.decode(String.self, forKey: .id)
+        } else {
+            id = (try? container.decode(String.self, forKey: .id)) ?? ""
+        }
+        contextEntry = try? SessionContextEntry(from: decoder)
+        // An unknown non-chat entry must not fail the page because it carries
+        // fields whose future shapes differ from today's chat schema.
+        guard type == "user" || type == "assistant" else {
+            time = nil
+            text = nil
+            files = []
+            agent = nil
+            model = nil
+            content = []
+            cost = nil
+            tokens = nil
+            finish = nil
+            error = nil
+            return
+        }
         time = try? container.decodeIfPresent(OCMessageTime.self, forKey: .time)
         text = try container.decodeIfPresent(String.self, forKey: .text)
+        files = (try? container.decodeIfPresent([OptionalFile].self, forKey: .files))?
+            .compactMap(\.value) ?? []
         agent = try container.decodeIfPresent(String.self, forKey: .agent)
         model = try? container.decodeIfPresent(Model.self, forKey: .model)
         content = (try? container.decodeIfPresent([Content].self, forKey: .content)) ?? []
@@ -2055,7 +2390,7 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
         )
         let parts: [OCPart]
         if role == .user {
-            parts = text.map {
+            let textParts = text.map {
                 [
                     OCPart(
                         id: "\(id)-text",
@@ -2066,6 +2401,19 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
                     ),
                 ]
             } ?? []
+            // Files use the same data-URL file part shape as v1 messages.
+            let fileParts = files.enumerated().map { index, file in
+                OCPart(
+                    id: "\(id)-file-\(index)",
+                    sessionID: sessionID,
+                    messageID: id,
+                    type: .file,
+                    mime: file.mime,
+                    filename: file.name,
+                    url: file.partURL
+                )
+            }
+            parts = textParts + fileParts
         } else {
             parts = content.enumerated().map { index, item in
                 OCPart(
@@ -2507,17 +2855,129 @@ nonisolated struct OCV2CreateSessionInput: Encodable, Sendable {
     let id: String
     let title: String?
     let location: OCV2LocationInfo?
+    var model: OCV2ModelRef? = nil
 }
 
 nonisolated struct OCV2PromptInput: Codable, Sendable {
     let id: String?
     let text: String
     let skills: [OCV2SkillAttachment]?
+    let files: [OCV2PromptFile]?
     let delivery: Delivery
+
+    init(
+        id: String?,
+        text: String,
+        skills: [OCV2SkillAttachment]?,
+        files: [OCV2PromptFile]? = nil,
+        delivery: Delivery
+    ) {
+        self.id = id
+        self.text = text
+        self.skills = skills
+        self.files = files
+        self.delivery = delivery
+    }
 
     nonisolated enum Delivery: String, Codable, Sendable {
         case steer
         case queue
+    }
+}
+
+/// A file attached to a v2 prompt (`PromptInput.FileAttachment`). Files from
+/// the phone use a `data:` URI; the server reads `file:` URIs from its disk.
+nonisolated struct OCV2PromptFile: Codable, Equatable, Sendable {
+    let uri: String
+    let name: String?
+}
+
+/// Durable admission returned by `POST /api/session/:id/prompt`
+/// (`Session.Inbox.User`). The ID is the caller-provided admission ID when one
+/// was sent; the first admission of an ID wins for its session.
+nonisolated struct OCV2PromptAdmission: Decodable, Equatable, Sendable {
+    let id: String
+    let sessionID: String
+    let delivery: OCV2PromptInput.Delivery?
+
+    init(id: String, sessionID: String, delivery: OCV2PromptInput.Delivery?) {
+        self.id = id
+        self.sessionID = sessionID
+        self.delivery = delivery
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, sessionID, delivery }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        delivery = try? container.decodeIfPresent(OCV2PromptInput.Delivery.self, forKey: .delivery)
+    }
+}
+
+/// Durable session work not yet delivered (`Session.Inbox.Info`). Covers user,
+/// synthetic, compaction, and move entries; `text` is present for the first two.
+nonisolated struct OCV2InboxEntry: Decodable, Equatable, Sendable {
+    let id: String
+    let sessionID: String
+    let type: String
+    let delivery: OCV2PromptInput.Delivery?
+    let text: String?
+    /// Synthetic entries only.
+    let description: String?
+    let subagentResult: SessionContextEntry.SubagentResult?
+    /// Names of files attached to a user entry.
+    let fileNames: [String]
+    /// Destination of a move entry.
+    let moveDirectory: String?
+
+    init(
+        id: String,
+        sessionID: String,
+        type: String,
+        delivery: OCV2PromptInput.Delivery?,
+        text: String?,
+        description: String? = nil,
+        fileNames: [String] = [],
+        moveDirectory: String? = nil,
+        subagentResult: SessionContextEntry.SubagentResult? = nil
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.type = type
+        self.delivery = delivery
+        self.text = text
+        self.description = description
+        self.subagentResult = subagentResult
+        self.fileNames = fileNames
+        self.moveDirectory = moveDirectory
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, sessionID, type, delivery, payload }
+    private struct Payload: Decodable {
+        struct File: Decodable { let name: String? }
+        struct Location: Decodable { let directory: String? }
+        let text: String?
+        let description: String?
+        let metadata: AnyCodable?
+        let files: [File]?
+        let location: Location?
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        type = try container.decode(String.self, forKey: .type)
+        delivery = try? container.decodeIfPresent(OCV2PromptInput.Delivery.self, forKey: .delivery)
+        let payload = (try? container.decodeIfPresent(Payload.self, forKey: .payload)) ?? nil
+        text = payload?.text
+        description = payload?.description
+        subagentResult = type == "synthetic"
+            ? SessionContextEntry.SubagentResult(metadata: payload?.metadata?.value as? [String: Any] ?? [:]) : nil
+        fileNames = payload?.files?.compactMap(\.name) ?? []
+        moveDirectory = payload?.location?.directory
     }
 }
 
@@ -2555,7 +3015,8 @@ nonisolated struct OCV2InterruptResponse: Decodable, Sendable {
 
 /// The v2 session model endpoints use `id`, rather than the legacy
 /// `modelID`, and include the selected reasoning variant in the same object.
-nonisolated struct OCV2ModelRef: Codable, Sendable {
+/// A v2 session's canonical model selection (`Model.Ref`).
+nonisolated struct OCV2ModelRef: Codable, Hashable, Sendable {
     let id: String
     let providerID: String
     let variant: String?

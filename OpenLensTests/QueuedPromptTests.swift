@@ -3,12 +3,24 @@ import Testing
 @testable import OpenLens
 
 struct QueuedPromptTests {
+    @Test func onlyAcceptedQueueEntriesHaveQueuePositions() {
+        let steer = QueuedPrompt(text: "Steer", state: .queued, delivery: .steer)
+        let first = QueuedPrompt(text: "First", state: .queued)
+        let compaction = QueuedPrompt(text: "", state: .queued, kind: .compaction)
+        let sending = QueuedPrompt(text: "Sending", state: .submitting)
+
+        let positions = QueuedPrompt.queuePositions([steer, first, compaction, sending])
+
+        #expect(positions == [first.id: 1, compaction.id: 2])
+    }
+
     @Test func v2QueuedPromptUsesTheSharedPromptAdmissionContract() async throws {
         let transport = QueuedPromptTransport(responses: [
             .init(statusCode: 200, body: OpenCodeContractFixtures.v2InfoResponse),
-            .init(statusCode: 204, body: Data()),
-            .init(statusCode: 204, body: Data()),
-            .init(statusCode: 202, body: Data()),
+            .init(
+                statusCode: 200,
+                body: Data(#"{"data":{"id":"msg_queued","sessionID":"session-1","time":{"created":1},"type":"user","payload":{"text":"Run the tests after this finishes."},"delivery":"queue"}}"#.utf8)
+            ),
         ])
         let client = OpenCodeClient(
             baseURL: try #require(URL(string: "https://opencode.example.com")),
@@ -16,7 +28,7 @@ struct QueuedPromptTests {
         )
 
         _ = try await client.probeCapabilities()
-        try await client.queuePrompt(
+        let admission = try await client.queuePrompt(
             sessionID: "session-1",
             text: "Run the tests after this finishes.",
             model: .init(providerID: "anthropic", modelID: "claude-sonnet"),
@@ -24,12 +36,12 @@ struct QueuedPromptTests {
             variant: "high",
             messageID: "msg_queued"
         )
+        #expect(admission == OCV2PromptAdmission(id: "msg_queued", sessionID: "session-1", delivery: .queue))
 
         let requests = transport.recordedRequests()
+        // A v2 session owns its selection, so queued prompts never reapply it.
         #expect(requests.map { $0.url?.path } == [
             "/api/info",
-            "/api/session/session-1/model",
-            "/api/session/session-1/agent",
             "/api/session/session-1/prompt",
         ])
         let request = try #require(requests.last)
@@ -42,6 +54,8 @@ struct QueuedPromptTests {
         #expect(payload["id"] as? String == "msg_queued")
         #expect(payload["text"] as? String == "Run the tests after this finishes.")
         #expect(payload["delivery"] as? String == "queue")
+        #expect(payload["model"] == nil)
+        #expect(payload["agent"] == nil)
     }
 
     @MainActor

@@ -653,7 +653,10 @@ final class SSEEventHandler {
             version: includes("version") ? update.version : currentSession.version,
             time: includes("time") ? update.time : currentSession.time,
             share: includes("share") ? update.share : currentSession.share,
-            revert: includes("revert") ? update.revert : currentSession.revert
+            revert: includes("revert") ? update.revert : currentSession.revert,
+            agent: includes("agent") ? update.agent : currentSession.agent,
+            model: includes("model") ? update.model : currentSession.model,
+            outcome: includes("outcome") ? update.outcome : currentSession.outcome
         )
     }
 
@@ -709,6 +712,9 @@ final class SSEEventHandler {
         guard let delegate else { return }
 
         let sessionID = incoming.sessionID ?? incoming.form?.sessionID
+        // MCP elicitation is recovered through Inbox with its location. Chat
+        // must neither present nor auto-cancel it, even without a selected chat.
+        guard sessionID != "global" else { return }
         guard sessionBelongsToCurrentConversation(sessionID, delegate: delegate) else {
             return
         }
@@ -737,6 +743,7 @@ final class SSEEventHandler {
 
     private func handleFormResolved(_ incoming: SSEFormResolved) {
         guard let delegate,
+              incoming.sessionID != "global",
               sessionBelongsToCurrentConversation(incoming.sessionID, delegate: delegate)
         else {
             return
@@ -880,14 +887,6 @@ final class SSEEventHandler {
     }
 
     private func relatedSessionID(from state: OCToolState) -> String? {
-        let metadata = state.metadata ?? [:]
-
-        return stringValue(for: "sessionId", in: metadata)
-            ?? stringValue(for: "sessionID", in: metadata)
-            ?? stringValue(for: "session_id", in: metadata)
-    }
-
-    private func stringValue(for key: String, in metadata: [String: AnyCodable]) -> String? {
-        (metadata[key]?.value as? String)?.nilIfBlank
+        OCSubagentMetadata.childID(in: state.metadata)
     }
 }

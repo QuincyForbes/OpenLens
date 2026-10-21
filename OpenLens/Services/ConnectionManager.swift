@@ -20,6 +20,9 @@ final class ConnectionManager: ConnectionProviding {
     private(set) var projectName: String?
     private(set) var branch: String?
     private(set) var selectedProjectDirectory: String?
+    private(set) var projectContextRevision: UInt = 0
+    private var projectContextGeneration: UInt = 0
+    @ObservationIgnored private var globalFormRecoveryDirectories: Set<String> = []
     private(set) var connectionMethod: ConnectionMethod?
     private(set) var serverURL: URL?
     private(set) var localNetworkAccessRequired: Bool = false
@@ -36,7 +39,6 @@ final class ConnectionManager: ConnectionProviding {
 
     private(set) var client: OpenCodeClient?
     private(set) var sseClient: SSEClient?
-    @ObservationIgnored private var remoteTransport: RemoteOpenCodeTransport?
 
     /// Continuation used to bridge the SSE callback-based connection into async/await.
     /// Resumed once when SSE reports `.connected` or fails to connect.
@@ -63,10 +65,11 @@ final class ConnectionManager: ConnectionProviding {
 
 #if DEBUG
     /// Installs a negotiated client without opening a live network connection.
-    init(testClient: OpenCodeClient, capabilities: OpenCodeServerCapabilities) {
+    init(testClient: OpenCodeClient, capabilities: OpenCodeServerCapabilities, testSSEClient: SSEClient? = nil) {
         self.localNetworkAccessProbe = LocalNetworkAccessProbe()
         self.client = testClient
         self.serverCapabilities = capabilities
+        self.sseClient = testSSEClient
         self.state = .connected
     }
 #endif
@@ -161,6 +164,7 @@ final class ConnectionManager: ConnectionProviding {
             serverVersion = capabilities.serverVersion
 
             self.client = apiClient
+            globalFormRecoveryDirectories = []
             self.serverURL = baseURL
             self.selectedProjectDirectory = restoredProjectDirectory?.nilIfBlank
 
@@ -190,7 +194,7 @@ final class ConnectionManager: ConnectionProviding {
                 contextDirectory: selectedProjectDirectory
             )
             self.sseClient = sse
-            configureSSECallbacks(sse, isRemote: false)
+            configureSSECallbacks(sse)
             await connectSSEAndWait(sse)
         } catch {
             guard !Task.isCancelled else { return }
@@ -201,14 +205,6 @@ final class ConnectionManager: ConnectionProviding {
     /// Reconnect using saved config.
     func reconnect() async {
         guard let saved = savedConnectionsStore?.mostRecent, saved.isConfigured else { return }
-        if saved.isRemote {
-            guard let credential = RemoteConnectionSecretStore.load(connectionID: saved.id) else {
-                state = .error("Remote credentials are missing. Pair this device with the Mac again.")
-                return
-            }
-            await connect(remoteCredential: credential, method: .autoReconnect)
-            return
-        }
         await connect(
             url: saved.serverURL,
             username: saved.username,
@@ -217,81 +213,18 @@ final class ConnectionManager: ConnectionProviding {
         )
     }
 
-    func connect(
-        remoteCredential credential: RemoteDeviceCredential,
-        method: ConnectionMethod = .qr
-    ) async {
-        didManuallyDisconnect = false
-        hasAttemptedConnection = true
-        connectionMethod = method
-        localNetworkAccessRequired = false
-        serverCapabilities = nil
-        currentProject = nil
-        state = .connecting
-
-        let restoredProjectDirectory = savedConnectionsStore?.connections
-            .first(where: { $0.id == credential.connectionID })?
-            .selectedProjectDirectory?
-            .nilIfBlank
-        Logger.connection.debug("Connecting to remote OpenCode with restored project directory \(restoredProjectDirectory ?? "nil", privacy: .public)")
-        let transport = RemoteOpenCodeTransport(credential: credential)
-        let apiClient = OpenCodeClient(
-            baseURL: credential.endpoint,
-            contextDirectory: restoredProjectDirectory,
-            transport: transport
-        )
-        do {
-            let capabilities = try await apiClient.probeCapabilities()
-            guard capabilities.isHealthy else {
-                transport.disconnect()
-                state = .error("Remote OpenCode server is not healthy.")
-                return
-            }
-
-            serverCapabilities = capabilities
-            serverVersion = capabilities.serverVersion
-            client = apiClient
-            serverURL = credential.endpoint
-            remoteTransport = transport
-            selectedProjectDirectory = restoredProjectDirectory
-            SharedConnectionStore.clear()
-
-            await refreshProjectMetadata()
-            savedConnectionsStore?.saveRemoteConnection(credential)
-            if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
-                savedConnectionsStore?.updateProjectSelection(
-                    connectionID: activeConnectionID,
-                    directory: selectedProjectDirectory
-                )
-            }
-
-            let sse = SSEClient(
-                baseURL: credential.endpoint,
-                protocolVersion: capabilities.protocolVersion,
-                contextDirectory: selectedProjectDirectory,
-                transport: transport
-            )
-            sseClient = sse
-            configureSSECallbacks(sse, isRemote: true)
-            await connectSSEAndWait(sse)
-        } catch {
-            transport.disconnect()
-            guard !Task.isCancelled else { return }
-            state = .error(error.localizedDescription)
-        }
-    }
-
     // MARK: - Disconnect
 
     func disconnect() {
+        projectContextGeneration &+= 1
+        projectContextRevision &+= 1
         sseConnectionContinuation?.resume()
         sseConnectionContinuation = nil
         stopHeartbeatWatchdog()
         sseClient?.disconnect()
         sseClient = nil
-        remoteTransport?.disconnect()
-        remoteTransport = nil
         client = nil
+        globalFormRecoveryDirectories = []
         serverURL = nil
         state = .disconnected
         serverVersion = nil
@@ -306,7 +239,7 @@ final class ConnectionManager: ConnectionProviding {
         SharedConnectionStore.clear()
     }
 
-    private func configureSSECallbacks(_ sse: SSEClient, isRemote: Bool) {
+    private func configureSSECallbacks(_ sse: SSEClient) {
         sse.onStateChange = { [weak self] sseState in
             guard let self else { return }
             switch sseState {
@@ -336,9 +269,7 @@ final class ConnectionManager: ConnectionProviding {
             guard let self else { return }
             self.stopHeartbeatWatchdog()
             self.state = .error(
-                isRemote
-                    ? "The Mac rejected the Remote event stream (HTTP \(statusCode))."
-                    : "Authentication failed for the live event stream (HTTP \(statusCode)). Check the OpenCode username and password."
+                "Authentication failed for the live event stream (HTTP \(statusCode)). Check the OpenCode username and password."
             )
             self.sseConnectionContinuation?.resume()
             self.sseConnectionContinuation = nil
@@ -357,17 +288,34 @@ final class ConnectionManager: ConnectionProviding {
     }
 
     func setProjectContext(directory: String?) async {
+        projectContextGeneration &+= 1
+        let generation = projectContextGeneration
         let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         Logger.connection.debug("OpenLens changing active project directory from \(self.selectedProjectDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         guard let client else {
             selectedProjectDirectory = normalizedDirectory
+            projectContextRevision &+= 1
             return
         }
 
-        await client.updateContextDirectory(normalizedDirectory)
+        let previousDirectory = await client.updateContextDirectory(normalizedDirectory)
+        guard self.client === client else { return }
+        // Chat can leave a workspace before any Inbox load has discovered its
+        // global forms. Queue that actual routing directory for recovery once.
+        if serverCapabilities?.protocolVersion == .v2,
+           let previousDirectory, previousDirectory != normalizedDirectory,
+           InteractiveFormSafety.fitsGlobalDirectory(previousDirectory) {
+            globalFormRecoveryDirectories.insert(previousDirectory)
+        }
+        // The actor has already changed request routing. Commit the matching
+        // published/SSE context even if the caller was cancelled at this await.
+        guard generation == projectContextGeneration else { return }
         selectedProjectDirectory = normalizedDirectory
         sseClient?.updateContextDirectory(normalizedDirectory)
+        projectContextRevision &+= 1
         currentProject = nil
+        projectName = nil
+        branch = nil
 
         if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
             savedConnectionsStore?.updateProjectSelection(
@@ -379,11 +327,38 @@ final class ConnectionManager: ConnectionProviding {
         await refreshProjectMetadata()
     }
 
+    func takeGlobalFormRecoveryDirectories(using client: OpenCodeClient) -> Set<String> {
+        guard self.client === client else { return [] }
+        let directories = globalFormRecoveryDirectories
+        globalFormRecoveryDirectories = []
+        return directories
+    }
+
     func clearProjectContext() async {
         await setProjectContext(directory: nil)
     }
 
-    private func refreshProjectMetadata() async {
+    /// An externally moved session must resolve successfully before its
+    /// destination becomes the active workspace. A refusal leaves it untouched.
+    func rebindProjectContext(directory: String, isCurrent: () -> Bool = { true }) async throws {
+        guard let client else { throw OpenCodeError.notConnected }
+        let generation = projectContextGeneration
+        guard directory.hasPrefix("/"),
+              let normalized = WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+            throw OpenCodeError.invalidPayload("The session's new location is not an absolute directory.")
+        }
+        let location = try await client.resolveLocation(directory: normalized)
+        try Task.checkCancellation()
+        guard generation == projectContextGeneration, isCurrent() else { throw CancellationError() }
+        guard WorkspaceSelectionBuilder.normalizedDirectory(location.directory) == normalized else {
+            throw OpenCodeError.invalidPayload("The server resolved a different session location.")
+        }
+        await setProjectContext(directory: normalized)
+    }
+
+    /// Recovery can retry a cancelled metadata load. For an already committed
+    /// directory this preserves the context revision and SSE binding.
+    func refreshProjectMetadata() async {
         guard let client else {
             currentProject = nil
             projectName = nil
@@ -391,8 +366,11 @@ final class ConnectionManager: ConnectionProviding {
             return
         }
 
+        let generation = projectContextGeneration
         let pathInfo = try? await client.getPath()
+        guard !Task.isCancelled, generation == projectContextGeneration else { return }
         let project = try? await client.getCurrentProject()
+        guard !Task.isCancelled, generation == projectContextGeneration else { return }
 
         Logger.connection.debug("OpenCode reported directory \(pathInfo?.directory ?? "nil", privacy: .public), worktree \(pathInfo?.worktree ?? "nil", privacy: .public), and project worktree \(project?.worktree ?? "nil", privacy: .public)")
 
@@ -415,6 +393,7 @@ final class ConnectionManager: ConnectionProviding {
 
             if let inferredDirectory {
                 await client.updateContextDirectory(inferredDirectory)
+                guard generation == projectContextGeneration else { return }
                 sseClient?.updateContextDirectory(inferredDirectory)
 
                 if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
@@ -430,8 +409,10 @@ final class ConnectionManager: ConnectionProviding {
 
         do {
             let vcs = try await client.getVCS()
+            guard !Task.isCancelled, generation == projectContextGeneration else { return }
             branch = vcs.branch
         } catch {
+            guard !Task.isCancelled, generation == projectContextGeneration else { return }
             branch = nil
             Logger.connection.warning("Failed to fetch VCS info: \(error, privacy: .public)")
         }

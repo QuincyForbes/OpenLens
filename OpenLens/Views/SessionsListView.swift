@@ -1,28 +1,5 @@
 import SwiftUI
 
-/// Pulsing green dot indicating an active/busy session.
-private struct ActivityIndicatorDot: View {
-    @State private var pulsing = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color.green.opacity(0.3))
-                .frame(width: 18, height: 18)
-                .scaleEffect(pulsing ? 1.4 : 1.0)
-                .opacity(pulsing ? 0 : 1)
-            Circle()
-                .fill(Color.green)
-                .frame(width: 10, height: 10)
-        }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: false)) {
-                pulsing = true
-            }
-        }
-    }
-}
-
 /// Session list view with create, delete, and select.
 /// Uses SessionsService directly with view-local state.
 struct SessionsListView: View {
@@ -71,6 +48,9 @@ struct SessionsListView: View {
     @State private var viewState: ViewState
     @State private var sessions: [OCSession]
     @State private var sessionStatuses: [String: OCSessionStatus]
+    @State private var openedSessionIDs: Set<String> = []
+    @State private var failedOutcomeSessionIDs: Set<String> = []
+    @State private var outcomeRefreshGeneration = 0
 
     @State private var newSessionRequest: NewSessionRequest?
     @State private var sessionToDelete: OCSession?
@@ -81,7 +61,10 @@ struct SessionsListView: View {
     let selectedSessionID: String?
     var onSelect: (OCSession) -> Void
     var onDelete: (OCSession) -> Void
+    /// Resolves the model a new session starts with; nil uses the server default.
+    var newSessionModel: @MainActor () async -> OCV2ModelRef?
 
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.sessionsService) private var sessionsService
     @Environment(\.connection) private var connection
 
@@ -90,12 +73,14 @@ struct SessionsListView: View {
         presentationStyle: PresentationStyle = .navigation,
         selectedSessionID: String? = nil,
         onSelect: @escaping (OCSession) -> Void,
-        onDelete: @escaping (OCSession) -> Void = { _ in }
+        onDelete: @escaping (OCSession) -> Void = { _ in },
+        newSessionModel: @escaping @MainActor () async -> OCV2ModelRef? = { nil }
     ) {
         self.presentationStyle = presentationStyle
         self.selectedSessionID = selectedSessionID
         self.onSelect = onSelect
         self.onDelete = onDelete
+        self.newSessionModel = newSessionModel
 
         switch initialState {
         case .loaded(let sessions):
@@ -159,7 +144,7 @@ struct SessionsListView: View {
             .scrollEdgeEffectStyle(.soft, for: .bottom)
         .background(isSidebar ? Color.clear : Color.appBackground)
         .sheet(item: $newSessionRequest) { _ in
-            NewSessionSheet { session in
+            NewSessionSheet(newSessionModel: newSessionModel) { session in
                 handleCreatedSession(session)
             }
             .presentationDetents([.medium, .large])
@@ -178,8 +163,28 @@ struct SessionsListView: View {
         } message: { _ in
             Text(AppText.deleteSessionMessage)
         }
-        .task {
-            await loadSessionStatuses()
+        .onChange(of: selectedSessionID, initial: true) { previousID, currentID in
+            // Queue affected rows for the existing poll without restarting catalog recovery.
+            openedSessionIDs.formUnion([previousID, currentID].compactMap { $0 })
+        }
+        .onChange(of: sessionsService.confirmedViewedMarkers, initial: true) { _, _ in
+            sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await loadSessionStatuses(refreshInactive: true)
+            guard connection.serverCapabilities?.protocolVersion == .v2
+                    || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
+            var lastAttentionRefresh = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                // Desktop viewing can change idle rows without an active-entry
+                // transition. Reconcile attention periodically while visible.
+                let refreshAttention = Date().timeIntervalSince(lastAttentionRefresh) >= 30
+                await loadSessionStatuses(refreshAttention: refreshAttention)
+                if refreshAttention { lastAttentionRefresh = Date() }
+            }
         }
     }
 
@@ -269,8 +274,8 @@ struct SessionsListView: View {
                 VStack(alignment: .leading) {
                     HStack(alignment: .center) {
                         Image(systemName: "folder")
-                            .font(.system(size: 12, design: .rounded))
-                            .foregroundStyle(Color.appSecondary)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.appPrimary)
 
                         Text(group.title)
                             .font(.system(size: isSidebar ? 15 : 18, weight: .semibold, design: .rounded))
@@ -304,6 +309,7 @@ struct SessionsListView: View {
             VStack(spacing: 0) {
                 ForEach(Array(displayedSessions.enumerated()), id: \.element.id) { index, session in
                     Button {
+                        openedSessionIDs.insert(session.id)
                         onSelect(session)
                     } label: {
                         sessionRow(session)
@@ -326,29 +332,27 @@ struct SessionsListView: View {
                     ))
                 }
             }
+            .padding(.leading, 22)
         }
     }
 
     private func sessionRow(_ session: OCSession) -> some View {
-        let isBusy = sessionStatuses[session.id]?.type == .busy
+        let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
         let isSelected = isSidebar && selectedSessionID == session.id
+        let showsListExecutionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
+            || ScreenshotFixtures.showsExecutionOutcomes
 
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title.isEmpty ? AppText.titleUntitled : session.title)
-                    .font(.system(size: 16, weight: .regular, design: .rounded))
-                    .foregroundStyle(Color.appPrimary)
-                    .lineLimit(1)
+                SessionWorkingTitle(
+                    title: session.title.isEmpty ? AppText.titleUntitled : session.title,
+                    isWorking: isBusy
+                )
 
-                if isBusy {
-                    HStack(spacing: 6) {
-                        ActivityIndicatorDot()
-                            .frame(width: 10, height: 10)
-                        Text(AppText.working)
-                    }
-                    .font(.system(size: 12, design: .rounded))
-                    .foregroundStyle(.green)
-                } else {
+                if !isBusy, showsListExecutionOutcomes,
+                          let outcome = session.executionOutcomeVisibleOnSessionList() {
+                    ExecutionStatusView(state: outcome, idleTime: session.time.idle)
+                } else if !isBusy, !showsListExecutionOutcomes {
                     Text(formattedDate(session.updatedAt))
                         .font(.system(size: 14, design: .rounded))
                         .foregroundStyle(Color.appSecondary)
@@ -356,6 +360,17 @@ struct SessionsListView: View {
             }
 
             Spacer()
+
+            if !isBusy, session.hasUnreadResult, showsListExecutionOutcomes {
+                Text(AppText.unreadResult)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.appAccent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.appAccent.opacity(0.12), in: Capsule())
+                    .accessibilityLabel(AppText.unreadResultAccessibility)
+                    .accessibilityIdentifier("session.unreadResult.\(session.id)")
+            }
 
             if !isSidebar {
                 Image(systemName: "chevron.right")
@@ -418,31 +433,56 @@ struct SessionsListView: View {
     // MARK: - Side Effects (Service calls)
 
     private func loadSessions() async {
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, !isLoading else { return }
+        outcomeRefreshGeneration &+= 1
+        let generation = outcomeRefreshGeneration
         viewState = .loading
+        defer {
+            if generation == outcomeRefreshGeneration, case .loading = viewState {
+                viewState = .loaded
+            }
+        }
         do {
-            async let sessionList = sessionsService.listAllSessions()
-            async let statuses = (try? sessionsService.getSessionStatuses()) ?? [:]
-            let (result, statusMap) = try await (sessionList, statuses)
-            guard !Task.isCancelled else { return }
-            sessions = result
-            sessionStatuses = statusMap
-            pruneExpandedProjects(using: result)
+            let result = try await sessionsService.listAllSessions()
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+            let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs)
+            let snapshot = await sessionsService.refreshSessionOutcomes(
+                in: result, previousStatuses: sessionStatuses, openedSessionIDs: requestedIDs, refreshInactive: true
+            )
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+            applyExecutionSnapshot(snapshot, requestedIDs: requestedIDs)
             viewState = .loaded
         } catch is CancellationError {
-            debugPrint("loadSessions cancelled during view teardown")
             return
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
             viewState = .error(error.localizedDescription)
         }
     }
 
-    private func loadSessionStatuses() async {
-        guard !sessions.isEmpty, !Task.isCancelled else { return }
-        let statuses = (try? await sessionsService.getSessionStatuses()) ?? [:]
-        guard !Task.isCancelled else { return }
-        sessionStatuses = statuses
+    private func loadSessionStatuses(refreshInactive: Bool = false, refreshAttention: Bool = false) async {
+        guard !sessions.isEmpty, !Task.isCancelled, !isLoading else { return }
+        outcomeRefreshGeneration &+= 1
+        let generation = outcomeRefreshGeneration
+        let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs)
+        let snapshot = await sessionsService.refreshSessionOutcomes(
+            in: sessions, previousStatuses: sessionStatuses, openedSessionIDs: requestedIDs, refreshInactive: refreshInactive
+        )
+        guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+        applyExecutionSnapshot(snapshot, requestedIDs: requestedIDs)
+        if refreshAttention {
+            let refreshed = await sessionsService.refreshUnreadResults(in: sessions, statuses: sessionStatuses)
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+            sessions = sessionsService.applyingConfirmedViewedMarkers(to: refreshed)
+        }
+    }
+
+    private func applyExecutionSnapshot(_ snapshot: SessionExecutionSnapshot, requestedIDs: Set<String>) {
+        sessions = sessionsService.applyingConfirmedViewedMarkers(to: snapshot.sessions)
+        sessionStatuses = snapshot.statuses
+        failedOutcomeSessionIDs = snapshot.failedOutcomeSessionIDs
+        openedSessionIDs.subtract(requestedIDs)
+        pruneExpandedProjects(using: snapshot.sessions)
     }
 
     private func retryLoadingSessions() {
@@ -456,6 +496,9 @@ struct SessionsListView: View {
     }
 
     private func handleCreatedSession(_ session: OCSession) {
+        outcomeRefreshGeneration &+= 1
+        openedSessionIDs.insert(session.id)
+        viewState = .loaded
         sessions.insert(session, at: 0)
         pruneExpandedProjects(using: sessions)
         onSelect(session)
@@ -465,6 +508,8 @@ struct SessionsListView: View {
         Task {
             do {
                 try await sessionsService.deleteSession(session)
+                outcomeRefreshGeneration &+= 1
+                if case .loading = viewState { viewState = .loaded }
                 sessions.removeAll { $0.id == session.id }
                 pruneExpandedProjects(using: sessions)
                 onDelete(session)
@@ -599,6 +644,7 @@ private struct NewSessionSheet: View {
         case error(String)
     }
 
+    let newSessionModel: @MainActor () async -> OCV2ModelRef?
     let onCreated: (OCSession) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -1008,7 +1054,8 @@ private struct NewSessionSheet: View {
             let session = try await sessionsService.createSession(
                 title: trimmedTitle.isEmpty ? nil : trimmedTitle,
                 workspaceDirectory: selectedWorkspace.directory,
-                clearsWorkspaceContext: selectedWorkspace.clearsWorkspaceContext
+                clearsWorkspaceContext: selectedWorkspace.clearsWorkspaceContext,
+                model: await newSessionModel()
             )
             onCreated(session)
             dismiss()

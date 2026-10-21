@@ -22,9 +22,50 @@ struct OpenCodePairingClient {
             )
         }
 
-        var request = URLRequest(url: link.url, cachePolicy: .reloadIgnoringLocalCacheData)
+        if link.urls.count == 1 {
+            return try await redeem(url: link.url, serverURL: link.serverURL, timeout: 30)
+        }
+
+        // All addresses share one code. A slow or unreachable LAN address must not
+        // hold up a working tunnel, and another address's 401 must not hide a success.
+        return try await withThrowingTaskGroup(of: PairingAttempt.self) { group in
+            for (url, serverURL) in zip(link.urls, link.serverURLs) {
+                group.addTask {
+                    do {
+                        return .paired(try await redeem(url: url, serverURL: serverURL, timeout: 5))
+                    } catch is CancellationError {
+                        return .cancelled
+                    } catch {
+                        return .failed(error as? OpenCodePairingError ?? .unreachable)
+                    }
+                }
+            }
+
+            var failure = OpenCodePairingError.unreachable
+            var wasCancelled = false
+            for try await attempt in group {
+                switch attempt {
+                case .paired(let credential):
+                    group.cancelAll()
+                    return credential
+                case .failed(let error):
+                    if error == .expiredOrUsed || failure == .unreachable {
+                        failure = error
+                    }
+                case .cancelled:
+                    wasCancelled = true
+                }
+            }
+            try Task.checkCancellation()
+            if wasCancelled && failure == .unreachable { throw CancellationError() }
+            throw failure
+        }
+    }
+
+    private func redeem(url: URL, serverURL: URL, timeout: TimeInterval) async throws -> DeepLinkConnection {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         request.httpMethod = "GET"
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let data: Data
@@ -51,11 +92,17 @@ struct OpenCodePairingClient {
         else { throw OpenCodePairingError.invalidResponse }
 
         return DeepLinkConnection(
-            serverURL: link.serverURL.absoluteString,
+            serverURL: serverURL.absoluteString,
             username: "opencode",
             password: credential.token
         )
     }
+}
+
+private enum PairingAttempt: Sendable {
+    case paired(DeepLinkConnection)
+    case failed(OpenCodePairingError)
+    case cancelled
 }
 
 private struct PairingSession: Decodable {
@@ -75,7 +122,7 @@ nonisolated private final class PairingRedirectDelegate: NSObject, URLSessionTas
     }
 }
 
-enum OpenCodePairingError: LocalizedError, Equatable {
+enum OpenCodePairingError: LocalizedError, Equatable, Sendable {
     case expiredOrUsed
     case invalidResponse
     case unreachable
@@ -88,7 +135,7 @@ enum OpenCodePairingError: LocalizedError, Equatable {
         case .invalidResponse:
             "The server did not return a pairing token. Run opencode pair to get a new link."
         case .unreachable:
-            "Could not reach the pairing server. Check that your iPhone can reach your computer, then try again. If the link was used, run opencode pair for a new one."
+            "Could not reach the pairing server. Check that OpenCode is running and the server or remote tunnel is reachable. Run opencode pair or opencode pair --remote for a new link."
         case .rejected(let status):
             "The server rejected pairing (HTTP \(status)). Run opencode pair to get a new link."
         }

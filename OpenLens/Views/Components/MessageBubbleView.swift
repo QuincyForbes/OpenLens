@@ -11,6 +11,7 @@ struct MessageBubbleView: View {
     private let assistantSegments: [ChatMessage.AssistantSegment]?
     private let streamingText: ChatMessage.StreamingTextProjection?
     private let animatesSubagentStatus: Bool
+    private let submissionState: PromptSubmission.State?
     @AppStorage("showThinking") private var showThinking: Bool = true
     @Environment(\.openLensTheme) private var theme
     @Environment(\.chatEasterEgg) private var chatEasterEgg
@@ -20,12 +21,14 @@ struct MessageBubbleView: View {
         message: ChatMessage,
         assistantSegments: [ChatMessage.AssistantSegment]? = nil,
         streamingText: ChatMessage.StreamingTextProjection? = nil,
-        animatesSubagentStatus: Bool = false
+        animatesSubagentStatus: Bool = false,
+        submissionState: PromptSubmission.State? = nil
     ) {
         self.message = message
         self.assistantSegments = assistantSegments
         self.streamingText = streamingText
         self.animatesSubagentStatus = animatesSubagentStatus
+        self.submissionState = submissionState
     }
 
     private var showsTranscriptStyleAssistantContent: Bool {
@@ -82,6 +85,15 @@ struct MessageBubbleView: View {
                 if let output = step.outputPreview {
                     appendCopyable(output, to: &lines)
                 }
+                if let partial = step.partialOutputPreview {
+                    appendCopyable("\(AppText.partialOutputBeforeError)\n\(partial)", to: &lines)
+                }
+                for file in step.files {
+                    appendCopyable("\(AppText.toolReturnedFile): \(file.title)", to: &lines)
+                }
+                if step.omittedFileCount > 0 {
+                    appendCopyable(AppText.toolFilesNotShown(step.omittedFileCount), to: &lines)
+                }
             }
         }
 
@@ -114,27 +126,53 @@ struct MessageBubbleView: View {
 
     private var userBubble: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            SkillMentionText(text: message.content, chipStyle: isRetroChat ? .retro : .standard(.appUserOnAccent))
-                .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
-                .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appUserOnAccent)
-                .padding(.horizontal, isRetroChat ? 14 : 16)
-                .padding(.vertical, isRetroChat ? 10 : 11)
-                .background {
-                    if isRetroChat {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(RetroChatStyle.playerFill)
-                            .shadow(color: RetroChatStyle.shadow, radius: 0, x: 3, y: 3)
-                    } else {
-                        bubbleFill(Color.appUserAccent)
+            if !message.imageAttachments.isEmpty || !message.fileAttachments.isEmpty {
+                MessageAttachmentsRow(images: message.imageAttachments, files: message.fileAttachments)
+            }
+            if !message.content.isEmpty || (message.imageAttachments.isEmpty && message.fileAttachments.isEmpty) {
+                SkillMentionText(text: message.content, chipStyle: isRetroChat ? .retro : .standard(.appUserOnAccent))
+                    .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appUserOnAccent)
+                    .padding(.horizontal, isRetroChat ? 14 : 16)
+                    .padding(.vertical, isRetroChat ? 10 : 11)
+                    .background {
+                        if isRetroChat {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(RetroChatStyle.playerFill)
+                                .shadow(color: RetroChatStyle.shadow, radius: 0, x: 3, y: 3)
+                        } else {
+                            bubbleFill(Color.appUserAccent)
+                        }
                     }
-                }
-                .overlay {
-                    if isRetroChat {
-                        RetroChatDoubleBorder(cornerRadius: 7)
-                    } else {
-                        bubbleStroke(theme.components.controlBorder)
+                    .overlay {
+                        if isRetroChat {
+                            RetroChatDoubleBorder(cornerRadius: 7)
+                        } else {
+                            bubbleStroke(theme.components.controlBorder)
+                        }
                     }
-                }
+            }
+            submissionStatus
+        }
+    }
+
+    @ViewBuilder
+    private var submissionStatus: some View {
+        switch submissionState {
+        case .sending:
+            Label(AppText.promptAdmissionSending, systemImage: "arrow.up.circle")
+                .foregroundStyle(.secondary)
+                .submissionStatusStyle()
+        case .uncertain:
+            Label(AppText.promptAdmissionUnconfirmed, systemImage: "questionmark.circle")
+                .foregroundStyle(.orange)
+                .submissionStatusStyle()
+        case .failed:
+            Label(AppText.promptAdmissionFailed, systemImage: "exclamationmark.circle")
+                .foregroundStyle(.red)
+                .submissionStatusStyle()
+        case .accepted, nil:
+            EmptyView()
         }
     }
 
@@ -329,6 +367,28 @@ struct MessageBubbleView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 2)
             }
+
+            if let partial = step.partialOutputPreview {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(AppText.partialOutputBeforeError)
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                    Text(partial)
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, design: .monospaced))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 2)
+            }
+
+            if !step.files.isEmpty || step.omittedFileCount > 0 {
+                ToolResultFilesStrip(
+                    files: step.files,
+                    omittedFileCount: step.omittedFileCount,
+                    usesRetroTypography: isRetroChat
+                )
+                .padding(.leading, 2)
+            }
         }
         .padding(.leading, 2)
     }
@@ -352,6 +412,7 @@ struct MessageBubbleView: View {
                 Spacer(minLength: 8)
 
                 subagentStatusView(for: step)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             if !step.detail.isEmpty {
@@ -441,6 +502,7 @@ struct MessageBubbleView: View {
     }
 
     private func subagentStatusText(for step: ChatMessage.PersistedSubagentStep) -> String {
+        if step.resultState == .cancelled { return "Cancelled" }
         if step.isError {
             return "Error"
         }
@@ -468,6 +530,7 @@ struct MessageBubbleView: View {
     }
 
     private func subagentIconName(for step: ChatMessage.PersistedSubagentStep) -> String {
+        if step.resultState == .cancelled { return "xmark.circle" }
         if step.isError {
             return "exclamationmark.circle.fill"
         }
@@ -1386,5 +1449,13 @@ private extension View {
         makeText: @escaping () -> String?
     ) -> some View {
         modifier(MessageCopyActions(canCopy: canCopy, makeText: makeText))
+    }
+}
+
+private extension View {
+    func submissionStatusStyle() -> some View {
+        font(.caption)
+            .labelStyle(.titleAndIcon)
+            .transition(.opacity)
     }
 }

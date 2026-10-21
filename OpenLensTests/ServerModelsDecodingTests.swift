@@ -17,20 +17,24 @@ struct ServerModelsDecodingTests {
         #expect(message.parentUserMessageID == "user-1")
     }
 
-    @Test func ocPartTypeRemainsAlignedWithKnownUpstreamCases() {
-        #expect(OCPartType(rawValue: "text") == .text)
-        #expect(OCPartType(rawValue: "reasoning") == .reasoning)
-        #expect(OCPartType(rawValue: "tool") == .tool)
-        #expect(OCPartType(rawValue: "file") == .file)
-        #expect(OCPartType(rawValue: "step-start") == .stepStart)
-        #expect(OCPartType(rawValue: "step-finish") == .stepFinish)
-        #expect(OCPartType(rawValue: "snapshot") == .snapshot)
-        #expect(OCPartType(rawValue: "patch") == .patch)
-        #expect(OCPartType(rawValue: "retry") == .retry)
-        #expect(OCPartType(rawValue: "compaction") == .compaction)
-        #expect(OCPartType(rawValue: "agent") == .agent)
-        #expect(OCPartType(rawValue: "subtask") == .subtask)
-        #expect(OCPartType(rawValue: "missing-case") == nil)
+    @Test func v2SessionDecodesItsCanonicalModelVariantAndAgent() throws {
+        let session = try JSONDecoder().decode(OCSession.self, from: Data(#"""
+        {"id":"ses_1","title":"Plan","agent":"plan","model":{"id":"claude-a","providerID":"anthropic","variant":"high"},"location":{"directory":"/workspace"},"time":{"created":1,"updated":2}}
+        """#.utf8))
+
+        #expect(session.agent == "plan")
+        #expect(session.model == OCV2ModelRef(id: "claude-a", providerID: "anthropic", variant: "high"))
+        #expect(session != session.withSelection(agent: "build", model: session.model))
+    }
+
+    @Test func unexpectedSelectionShapesDoNotHideTheSession() throws {
+        let session = try JSONDecoder().decode(OCSession.self, from: Data(#"""
+        {"id":"ses_1","title":"Odd","agent":7,"model":"anthropic/claude-a","time":{"created":1,"updated":2}}
+        """#.utf8))
+
+        #expect(session.id == "ses_1")
+        #expect(session.agent == nil)
+        #expect(session.model == nil)
     }
 
     @Test func decodesProviderModelCapabilitiesFromNestedOpenCodePayload() throws {

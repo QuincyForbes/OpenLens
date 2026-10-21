@@ -17,7 +17,7 @@ struct FormView: View {
     @State private var externalAcknowledgements: [String: Bool] = [:]
 
     private var visibleFields: [OCFormField] {
-        form.fields.filter { !$0.hidden }
+        InteractiveFormSafety.activeFields(for: form, answer: draftAnswer)
     }
 
     var body: some View {
@@ -27,6 +27,18 @@ struct FormView: View {
                     Text(form.title)
                         .font(.title3.weight(.semibold))
                         .accessibilityAddTraits(.isHeader)
+
+                    if form.isGlobal {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("This MCP interaction belongs to the workspace and is available from Inbox.")
+                                .font(.subheadline)
+                            if let directory = form.globalDirectory {
+                                Text(directory)
+                                    .font(.caption.monospaced())
+                            }
+                        }
+                        .foregroundStyle(.secondary)
+                    }
 
                     if form.hasUnsupportedFields {
                         unsupportedNotice
@@ -39,7 +51,7 @@ struct FormView: View {
                 .padding(20)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("Agent Form")
+            .navigationTitle(form.isGlobal ? "Global MCP Form" : "Agent Form")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -96,8 +108,7 @@ struct FormView: View {
                 case .number, .integer:
                     numericField(field)
                 case .boolean:
-                    Toggle(field.displayTitle, isOn: booleanBinding(for: field.key))
-                        .labelsHidden()
+                    booleanField(field)
                 case .multiselect:
                     multiselectField(field)
                 case .external:
@@ -115,6 +126,24 @@ struct FormView: View {
         }
         .padding(16)
         .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityIdentifier("form-field-\(field.key)")
+    }
+
+    @ViewBuilder
+    private func booleanField(_ field: OCFormField) -> some View {
+        if !field.required && field.booleanDefault == nil {
+            Picker(field.displayTitle, selection: optionalBooleanBinding(for: field.key)) {
+                Text("Not answered").tag(Optional<Bool>.none)
+                Text("No").tag(Optional(false))
+                Text("Yes").tag(Optional(true))
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("form-\(field.key)")
+        } else {
+            Toggle(field.displayTitle, isOn: booleanBinding(for: field.key))
+                .labelsHidden()
+                .accessibilityIdentifier("form-\(field.key)")
+        }
     }
 
     @ViewBuilder
@@ -197,18 +226,18 @@ struct FormView: View {
     }
 
     private var canSubmit: Bool {
-        InteractiveFormSafety.accepts(answer: formAnswer, for: form)
+        InteractiveFormSafety.submissionAnswer(draftAnswer, for: form) != nil
     }
 
     private func submit() {
-        guard canSubmit else { return }
-        onSubmit(formAnswer)
+        guard let answer = InteractiveFormSafety.submissionAnswer(draftAnswer, for: form) else { return }
+        onSubmit(answer)
     }
 
-    private var formAnswer: [String: OCFormValue] {
+    private var draftAnswer: [String: OCFormValue] {
         var answer: [String: OCFormValue] = [:]
 
-        for field in visibleFields {
+        for field in form.fields where !field.hidden {
             switch field.kind {
             case .string:
                 if let value = selectedString(for: field), !value.isEmpty {
@@ -271,14 +300,8 @@ struct FormView: View {
 
     private func numericValue(for field: OCFormField) -> Double? {
         let raw = numbers[field.key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard let value = Double(raw), value.isFinite,
-              field.kind != .integer || value.rounded() == value,
-              field.numberMinimum.map({ value >= $0 }) ?? true,
-              field.numberMaximum.map({ value <= $0 }) ?? true
-        else {
-            return nil
-        }
-        return value
+        guard !raw.isEmpty else { return nil }
+        return Double(raw) ?? .nan
     }
 
     private func multiselectValues(for field: OCFormField) -> [String] {
@@ -304,6 +327,10 @@ struct FormView: View {
 
     private func booleanBinding(for key: String) -> Binding<Bool> {
         Binding(get: { booleans[key, default: false] }, set: { booleans[key] = $0 })
+    }
+
+    private func optionalBooleanBinding(for key: String) -> Binding<Bool?> {
+        Binding(get: { booleans[key] }, set: { booleans[key] = $0 })
     }
 
     private func multiselectBinding(for key: String, value: String) -> Binding<Bool> {

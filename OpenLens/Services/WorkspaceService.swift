@@ -72,6 +72,15 @@ struct WorkspaceSnapshot: Sendable {
     let workingTreeSource: WorkspaceWorkingTreeSource
 }
 
+/// A file or folder inside a session's folder; `path` is relative to it.
+struct RepositoryEntry: Identifiable, Hashable, Sendable {
+    let path: String
+    let name: String
+    let isDirectory: Bool
+
+    var id: String { path }
+}
+
 struct WorkspaceFolderSnapshot: Sendable {
     let directory: String
     let folders: [WorkspaceFileItem]
@@ -91,6 +100,7 @@ final class WorkspaceService {
     }
 
     func loadWorkspace(path: String? = nil, sessionID: String? = nil) async throws -> WorkspaceSnapshot {
+        let revision = connection.projectContextRevision
         if ScreenshotFixtures.isEnabled {
             return ScreenshotFixtures.workspaceSnapshot(path: path)
         }
@@ -113,6 +123,9 @@ final class WorkspaceService {
         let commands = await commandsTask
         let fileItems = await filesTask
         let workingTreeSnapshot = await workingTreeTask
+        guard !Task.isCancelled, connection.projectContextRevision == revision else {
+            throw CancellationError()
+        }
 
         return WorkspaceSnapshot(
             currentProject: currentProject,
@@ -249,6 +262,76 @@ final class WorkspaceService {
             )
         }
         .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Files and folders at `relativePath` inside a session's folder, for
+    /// choosing a file to reference in a prompt.
+    func loadRepositoryEntries(at relativePath: String, in directory: String) async throws -> [RepositoryEntry] {
+        if ScreenshotFixtures.isEnabled {
+            return ScreenshotFixtures.repositoryEntries(at: relativePath)
+        }
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let entries = try await client.listFiles(path: relativePath.isEmpty ? "." : relativePath, directory: directory)
+        return Self.repositoryEntries(from: entries, directory: directory)
+    }
+
+    func readRepositoryFile(at relativePath: String, in directory: String) async throws -> String {
+        if ScreenshotFixtures.isEnabled {
+            return ScreenshotFixtures.repositoryFileContent
+        }
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let content = try await client.readFileContent(path: relativePath, directory: directory)
+        guard content.type != "binary", let text = content.content else {
+            throw OpenCodeError.invalidPayload(AppText.repositoryFileNotText)
+        }
+        return text
+    }
+
+    /// Opens a file a tool returned. Inline content is decoded off the main
+    /// actor; server files must be inside the session's folder.
+    func loadToolResultFile(_ file: ToolResultFile, sessionDirectory: String?) async throws -> ToolResultFileContent {
+        if let error = file.unavailableError { throw error }
+        let kind = file.kind
+        switch file.source {
+        case .tooLarge, .unavailable:
+            throw ToolResultFileError.unavailable
+        case let .dataURI(uri):
+            return try await Task.detached(priority: .userInitiated) {
+                try ToolResultFileContent.make(kind: kind, data: ToolResultFileContent.data(fromDataURI: uri))
+            }.value
+        case let .serverPath(path):
+            guard let sessionDirectory,
+                  let reference = try? ServerFileReference(path: path, sessionDirectory: sessionDirectory),
+                  let relativePath = reference.relativePath(in: sessionDirectory)
+            else {
+                throw ToolResultFileError.outsideSession
+            }
+            guard let client = connection.client else { throw OpenCodeError.notConnected }
+            let data = try await client.readFileData(path: relativePath, directory: sessionDirectory)
+            guard data.count <= ToolResultFileContent.maximumServerFileBytes else { throw ToolResultFileError.tooLarge }
+            return try await Task.detached(priority: .userInitiated) {
+                try ToolResultFileContent.make(kind: kind, data: data)
+            }.value
+        }
+    }
+
+    static func repositoryEntries(from entries: [OCWorkspaceFileEntry], directory: String) -> [RepositoryEntry] {
+        let root = directory.hasSuffix("/") ? String(directory.dropLast()) : directory
+        var seen = Set<String>()
+        return entries.compactMap { entry in
+            var path = entry.absolute.flatMap { $0.hasPrefix(root + "/") ? String($0.dropFirst(root.count + 1)) : nil }
+                ?? entry.path
+            let isDirectory = entry.type?.lowercased() == "directory" || path.hasSuffix("/")
+            while path.hasSuffix("/") { path.removeLast() }
+            let name = (path as NSString).lastPathComponent
+            guard !path.isEmpty, !path.hasPrefix("/"), path != ".", !name.hasPrefix("."),
+                  seen.insert(path).inserted else { return nil }
+            return RepositoryEntry(path: path, name: name, isDirectory: isDirectory)
+        }
+        .sorted {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
     }
 
     func loadCommands() async -> [WorkspaceCommandItem] {

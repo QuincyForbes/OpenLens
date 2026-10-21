@@ -119,6 +119,13 @@ struct ConnectionWelcomeView<ManualFields: View, ManualAccessories: View>: View 
                                 .frame(maxWidth: .infinity)
                                 .background(Color.appTertiary.opacity(0.7), in: RoundedRectangle(cornerRadius: 16))
                                 .accessibilityLabel("Terminal command: opencode pair")
+
+                            Text(AppText.connectionSetupRemoteHint)
+                                .font(.system(size: 14, design: .rounded))
+                                .foregroundStyle(Color.appSecondary)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
                         }
                         .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
                     case .scanner:
@@ -806,6 +813,11 @@ private struct ConnectionSetupTipsView: View {
 
     @ViewBuilder
     private var pairingTips: some View {
+        ConnectionSetupDetail(
+            systemImage: "globe",
+            title: AppText.connectionSetupRemoteTitle,
+            text: AppText.connectionSetupRemoteDetail
+        )
         ConnectionSetupDetail(
             systemImage: "wifi",
             title: AppText.connectionSetupNetworkTitle,

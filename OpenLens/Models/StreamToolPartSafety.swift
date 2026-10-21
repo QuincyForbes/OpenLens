@@ -81,7 +81,10 @@ nonisolated enum StreamToolPartSafety {
             title: StreamDisplayValue.preview(state.title, maximumBytes: maximumTitleBytes),
             error: StreamDisplayValue.preview(state.error, maximumBytes: maximumOutputBytes),
             metadata: sanitizedMetadata(state.metadata),
-            time: state.time
+            time: state.time,
+            // Already held to `ToolResultFileBudget` when decoded.
+            files: state.files,
+            omittedFileCount: state.omittedFileCount
         )
     }
 
@@ -102,10 +105,16 @@ nonisolated enum StreamToolPartSafety {
         guard let metadata else { return nil }
         var result: [String: AnyCodable] = [:]
 
-        for key in ["sessionId", "sessionID", "session_id"] {
-            guard let value = metadata[key]?.value as? String,
-                  let identifier = safeIdentifier(value) else { continue }
+        for key in OCSubagentMetadata.childIDKeys {
+            guard let identifier = OCSubagentMetadata.validChildID(metadata[key]) else { continue }
             result[key] = AnyCodable(identifier)
+        }
+
+        // V2 subagent success can mean that a background child was launched,
+        // not that the child finished. Retain only the released status values.
+        if let rawStatus = metadata["status"]?.value as? String,
+           let status = OCSubagentStatus(rawValue: rawStatus) {
+            result["status"] = AnyCodable(status.rawValue)
         }
 
         return result.isEmpty ? nil : result

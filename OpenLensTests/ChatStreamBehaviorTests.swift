@@ -25,7 +25,9 @@ struct ChatStreamBehaviorTests {
 
         #expect(client.pendingAssistantMessage?.content == "")
 
-        await waitForMainQueue(milliseconds: 80)
+        await waitForStreamingUpdate {
+            client.pendingAssistantMessage?.streamingTextProjection.copyText() == "Hello"
+        }
 
         #expect(client.pendingAssistantMessage?.content == "")
         #expect(client.pendingAssistantMessage?.streamingTextProjection.copyText() == "Hello")
@@ -78,7 +80,9 @@ struct ChatStreamBehaviorTests {
                 rawEvent: nil
             )
         )
-        await waitForMainQueue(milliseconds: 80)
+        await waitForStreamingUpdate {
+            visibleTranscriptRows(from: client.displayedMessages).first?.value == "First visible text."
+        }
 
         let timelineVersionAfterFirstVisibleText = client.timelineVersion
         let contentVersionAfterFirstVisibleText = client.contentVersion
@@ -105,7 +109,9 @@ struct ChatStreamBehaviorTests {
                 rawEvent: nil
             )
         )
-        await waitForMainQueue(milliseconds: 80)
+        await waitForStreamingUpdate {
+            visibleTranscriptRows(from: client.displayedMessages).first?.value == "First visible text. More text in the same part."
+        }
 
         #expect(client.timelineVersion == timelineVersionAfterFirstVisibleText)
         #expect(client.contentVersion > contentVersionAfterFirstVisibleText)
@@ -2489,18 +2495,6 @@ struct ChatStreamBehaviorTests {
     }
 
     @MainActor
-    @Test func finishLoadingReturnsGeneratingResponseToIdle() {
-        let client = ChatClient(demoMode: true)
-        client.responseState = .generating
-        client.isLoading = true
-
-        client.finishLoading()
-
-        #expect(!client.isLoading)
-        #expect(client.responseState == .idle)
-    }
-
-    @MainActor
     @Test func finishLoadingDoesNotForceScrollJump() {
         let client = ChatClient(demoMode: true)
         let initialScrollAnchor = client.scrollAnchor
@@ -3110,45 +3104,6 @@ struct ChatStreamBehaviorTests {
         }
 
         #expect(projection.copyText() == "Inspecting stream state")
-    }
-
-    @MainActor
-    @Test func textPartDeltaStillAppendsStreamingText() {
-        let delegate = SSEDelegateSpy()
-        let handler = makeHandler(delegate: delegate)
-        let messageID = "assistant-message"
-        delegate.pendingAssistantMessage = ChatMessage(
-            id: messageID,
-            role: .assistant,
-            content: "",
-            parts: [
-                OCPart(
-                    id: "text-part",
-                    sessionID: "session-1",
-                    messageID: messageID,
-                    type: .text,
-                    text: ""
-                )
-            ],
-            isStreaming: true
-        )
-
-        handler.handleEvent(
-            OCEvent(
-                type: "message.part.delta",
-                properties: AnyCodable([
-                    "sessionID": "session-1",
-                    "messageID": messageID,
-                    "partID": "text-part",
-                    "field": "text",
-                    "delta": "Hello"
-                ])
-            )
-        )
-
-        #expect(delegate.appendedStreamingTexts == ["Hello"])
-        #expect(delegate.appendedStreamingTextPartIDs == ["text-part"])
-        #expect(delegate.pendingAssistantMessage?.content == "")
     }
 
     @MainActor
@@ -4130,7 +4085,9 @@ struct ChatStreamBehaviorTests {
         #expect(client.bufferedStreamingMetricsForTesting.chunks == 200)
         #expect(client.bufferedStreamingMetricsForTesting.isBackpressured)
 
-        await waitForMainQueue(milliseconds: 80)
+        await waitForStreamingUpdate {
+            client.bufferedStreamingMetricsForTesting.chunks < 200
+        }
         #expect(client.bufferedStreamingMetricsForTesting.records == 1)
         #expect(client.bufferedStreamingMetricsForTesting.chunks < 200)
 
@@ -4139,7 +4096,9 @@ struct ChatStreamBehaviorTests {
         #expect(client.bufferedStreamingMetricsForTesting.chunks == 0)
         #expect(!client.bufferedStreamingMetricsForTesting.isBackpressured)
 
-        await waitForMainQueue(milliseconds: 120)
+        await waitForStreamingUpdate {
+            client.messages.last?.content == chunks.joined()
+        }
         #expect(client.messages.last?.content == chunks.joined())
     }
 
@@ -4239,6 +4198,8 @@ struct ChatStreamBehaviorTests {
     private func visibleTranscriptRows(from messages: [ChatMessage]) -> [VisibleTranscriptRow] {
         ChatTimeline.items(from: messages, showsThinking: true).map { item in
             switch item.content {
+            case .context(let entry):
+                VisibleTranscriptRow(id: item.id, kind: "context", value: entry.summary)
             case .message(let message):
                 VisibleTranscriptRow(id: item.id, kind: "message", value: message.content)
             case .streamingAssistantText(_, let projection):
@@ -4387,6 +4348,15 @@ struct ChatStreamBehaviorTests {
     }
 
     @MainActor
+    private func waitForStreamingUpdate(_ condition: @MainActor () -> Bool) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(2)
+        while !condition(), clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    @MainActor
     private func waitForMainQueue(milliseconds: Int) async {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(milliseconds)) {
@@ -4497,7 +4467,6 @@ private final class SSEDelegateSpy: SSEEventHandlerDelegate {
     var todos: [OCTodo] = []
     var hiddenTodoCount: Int = 0
     var appendedStreamingTexts: [String] = []
-    var appendedStreamingTextPartIDs: [String?] = []
     var clearedStreamingBuffers: [String] = []
     var layoutChangeCount = 0
     var contentChangeCount = 0
@@ -4529,7 +4498,6 @@ private final class SSEDelegateSpy: SSEEventHandlerDelegate {
         chunks: [String]
     ) {
         appendedStreamingTexts.append(text)
-        appendedStreamingTextPartIDs.append(partID)
     }
 
     func appendStreamingReasoning(messageID: String, partID: String, text: String, chunks: [String]) {
@@ -4550,18 +4518,4 @@ private final class SSEDelegateSpy: SSEEventHandlerDelegate {
     }
 
     func questionDidPresent() {}
-}
-
-private final class TestLiveActivityProvider: LiveActivityProviding {
-    var isActive: Bool { false }
-
-    func startActivity(sessionID: String?, directory: String?) {}
-
-    func update(pendingUserResponse: OpenLensActivityAttributes.PendingUserResponse?) {}
-
-    func endActivity(phase: OpenLensActivityAttributes.Phase) {}
-
-    func dismissImmediately() {}
-
-    func previewLiveActivity() {}
 }
