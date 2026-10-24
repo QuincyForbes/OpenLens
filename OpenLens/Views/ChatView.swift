@@ -315,6 +315,9 @@ struct ChatView: View {
                     },
                     onDismiss: {
                         chatClient.rejectQuestion()
+                    },
+                    onDefer: {
+                        chatClient.showQuestionSheet = false
                     }
                 )
                 .presentationDetents([.medium, .large])
@@ -330,7 +333,10 @@ struct ChatView: View {
                     onCancel: {
                         chatClient.cancelForm()
                     },
-                    isSubmitting: chatClient.isResolvingForm
+                    isSubmitting: chatClient.isResolvingForm,
+                    onDefer: {
+                        chatClient.showFormSheet = false
+                    }
                 )
                 .presentationDetents(ScreenshotFixtures.showsConditionalForm ? [.large] : [.medium, .large])
                 .interactiveDismissDisabled(chatClient.isResolvingForm)

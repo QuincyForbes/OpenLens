@@ -43,7 +43,8 @@ struct ConnectedRootView: View {
             if shouldUseConnectedRootSidebarLayout(horizontalSizeClass: horizontalSizeClass) {
                 ConnectedSidebarLayout(
                     chatClient: chatClient,
-                    initialSessions: initialSessions
+                    initialSessions: initialSessions,
+                    inboxPendingCount: inboxPendingCount
                 )
             } else {
                 TabView(selection: $router.selectedTab) {
@@ -206,6 +207,7 @@ struct ConnectedRootView: View {
 private struct ConnectedSidebarLayout: View {
     @Bindable var chatClient: ChatClient
     let initialSessions: SessionsListView.InitialState
+    var inboxPendingCount: Int = 0
 
     @Environment(AppRouter.self) private var router
 
@@ -232,6 +234,7 @@ private struct ConnectedSidebarLayout: View {
         VStack(spacing: 0) {
             ConnectedSidebarNavigation(
                 selectedTab: router.selectedTab,
+                badgeCounts: [.review: inboxPendingCount],
                 onSelect: { router.selectedTab = $0 }
             )
 
@@ -313,6 +316,7 @@ private struct ConnectedSidebarLayout: View {
 
 private struct ConnectedSidebarNavigation: View {
     let selectedTab: AppTab
+    var badgeCounts: [AppTab: Int] = [:]
     let onSelect: (AppTab) -> Void
 
     var body: some View {
@@ -327,10 +331,22 @@ private struct ConnectedSidebarNavigation: View {
                 Button {
                     onSelect(tab)
                 } label: {
-                    Label(sidebarTitle(for: tab), systemImage: tab.icon)
-                        .font(.system(size: 15, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.appPrimary)
-                        .symbolVariant(selectedTab == tab ? .fill : .none)
+                    HStack(spacing: 8) {
+                        Label(sidebarTitle(for: tab), systemImage: tab.icon)
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color.appPrimary)
+                            .symbolVariant(selectedTab == tab ? .fill : .none)
+                        Spacer(minLength: 0)
+                        if let count = badgeCounts[tab], count > 0 {
+                            Text("\(count)")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(Color.appOnAccent)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.appWarning, in: Capsule())
+                                .accessibilityLabel("\(count) pending")
+                        }
+                    }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)
                         .frame(height: 42)

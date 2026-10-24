@@ -8,6 +8,8 @@ struct FormView: View {
     let onSubmit: ([String: OCFormValue]) -> Void
     let onCancel: () -> Void
     let isSubmitting: Bool
+    /// Hides the sheet without cancelling; the form stays pending.
+    var onDefer: (() -> Void)? = nil
 
     @State private var strings: [String: String] = [:]
     @State private var numbers: [String: String] = [:]
@@ -54,12 +56,20 @@ struct FormView: View {
             .navigationTitle(form.isGlobal ? "Global MCP Form" : "Agent Form")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ToolbarItemGroup(placement: .cancellationAction) {
                     Button("Cancel") {
                         onCancel()
                     }
                     .disabled(isSubmitting)
                     .accessibilityHint("Cancels this form without submitting it")
+
+                    if let onDefer {
+                        Button("Later") {
+                            onDefer()
+                        }
+                        .disabled(isSubmitting)
+                        .accessibilityHint("Keeps the form pending so you can finish it later")
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(AppText.submit) {

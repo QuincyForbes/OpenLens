@@ -13,6 +13,7 @@ struct SessionsListView: View {
         case all = "All"
         case running = "Running"
         case unread = "Unread"
+        case attention = "Needs You"
 
         var id: String { rawValue }
     }
@@ -69,6 +70,8 @@ struct SessionsListView: View {
     @State private var showRenameAlert = false
     @State private var searchQuery = ""
     @State private var sessionFilter: SessionFilter = .all
+    /// Sessions with a permission, question or form waiting on the person.
+    @State private var attentionSessionIDs: Set<String> = []
     @State private var isOnScreen = true
     @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
@@ -82,6 +85,7 @@ struct SessionsListView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.sessionsService) private var sessionsService
+    @Environment(\.inboxService) private var inboxService
     @Environment(\.connection) private var connection
 
     init(
@@ -134,6 +138,10 @@ struct SessionsListView: View {
         sessions.filter { sessionStatuses[$0.id]?.type == .busy || sessionStatuses[$0.id]?.type == .retry }.count
     }
 
+    private var attentionSessionCount: Int {
+        sessions.filter { attentionSessionIDs.contains($0.id) }.count
+    }
+
     private var unreadSessionCount: Int {
         sessions.filter { session in
             let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
@@ -166,6 +174,8 @@ struct SessionsListView: View {
                 guard isBusy else { continue }
             case .unread:
                 guard !isBusy && session.hasUnreadResult else { continue }
+            case .attention:
+                guard attentionSessionIDs.contains(session.id) else { continue }
             }
             let groupTitle = projectTitle(for: session)
             if !trimmedQuery.isEmpty {
@@ -249,17 +259,25 @@ struct SessionsListView: View {
             let shouldRefreshAllInactive = !hasRefreshedInitialInactiveOutcomes
             hasRefreshedInitialInactiveOutcomes = true
             await loadSessionStatuses(refreshInactive: shouldRefreshAllInactive)
+            await refreshAttentionSessions()
             guard connection.serverCapabilities?.protocolVersion == .v2
                     || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
             var lastAttentionRefresh = Date()
+            var iteration = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
+                iteration += 1
                 // Desktop viewing can change idle rows without an active-entry
                 // transition. Reconcile attention periodically while visible.
                 let refreshAttention = Date().timeIntervalSince(lastAttentionRefresh) >= 30
                 await loadSessionStatuses(refreshAttention: refreshAttention)
                 if refreshAttention { lastAttentionRefresh = Date() }
+                // Pending permissions, questions and forms change rarely; three
+                // small inbox reads every ~6s keep the "Needs You" pill honest.
+                if iteration % 3 == 0 {
+                    await refreshAttentionSessions()
+                }
             }
         }
     }
@@ -329,7 +347,7 @@ struct SessionsListView: View {
     private var sessionList: some View {
         ScrollView {
             LazyVStack(spacing: isSidebar ? 12 : 18) {
-                if runningSessionCount > 0 || unreadSessionCount > 0 || sessionFilter != .all {
+                if runningSessionCount > 0 || unreadSessionCount > 0 || attentionSessionCount > 0 || sessionFilter != .all {
                     sessionFilterBar
                 }
 
@@ -354,7 +372,12 @@ struct SessionsListView: View {
                 case .all: nil
                 case .running: runningSessionCount > 0 ? runningSessionCount : nil
                 case .unread: unreadSessionCount > 0 ? unreadSessionCount : nil
+                case .attention: attentionSessionCount > 0 ? attentionSessionCount : nil
                 }
+                // Hide the attention pill until something actually needs a reply.
+                if filter == .attention, attentionSessionCount == 0, sessionFilter != .attention {
+                    EmptyView()
+                } else {
                 Button {
                     withAnimation(.snappy(duration: 0.2)) {
                         sessionFilter = filter
@@ -383,6 +406,7 @@ struct SessionsListView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                }
             }
             Spacer()
         }
@@ -497,6 +521,14 @@ struct SessionsListView: View {
 
             Spacer()
 
+            if attentionSessionIDs.contains(session.id) {
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.appWarning)
+                    .accessibilityLabel("Waiting for your response")
+                    .accessibilityIdentifier("session.needsAttention.\(session.id)")
+            }
+
             if !isBusy, session.hasUnreadResult, showsListExecutionOutcomes {
                 Text(AppText.unreadResult)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -610,6 +642,17 @@ struct SessionsListView: View {
             let refreshed = await sessionsService.refreshUnreadResults(in: sessions, statuses: sessionStatuses)
             guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
             sessions = sessionsService.applyingConfirmedViewedMarkers(to: refreshed)
+        }
+    }
+
+    private func refreshAttentionSessions() async {
+        guard !Task.isCancelled, let snapshot = try? await inboxService.loadInbox(), !Task.isCancelled else { return }
+        var ids = Set<String>()
+        ids.formUnion(snapshot.permissions.compactMap(\.sessionID))
+        ids.formUnion(snapshot.questions.map(\.sessionID))
+        ids.formUnion(snapshot.sessionForms.map(\.sessionID))
+        if ids != attentionSessionIDs {
+            attentionSessionIDs = ids
         }
     }
 

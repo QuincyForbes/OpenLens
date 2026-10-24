@@ -6,6 +6,8 @@ struct QuestionView: View {
     let request: OCQuestionRequest
     let onSubmit: ([[String]]) -> Void
     let onDismiss: () -> Void
+    /// Hides the sheet without answering; the question stays pending.
+    var onDefer: (() -> Void)? = nil
 
     /// Tracks selected option labels per question index.
     @State private var selections: [[String]] = []
@@ -60,6 +62,14 @@ struct QuestionView: View {
                     }
                     .accessibilityLabel("Dismiss question")
                     .accessibilityHint("Rejects the question without answering")
+                }
+                if let onDefer {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Later") {
+                            onDefer()
+                        }
+                        .accessibilityHint("Keeps the question pending so you can answer it later")
+                    }
                 }
                 ToolbarItem(placement: .keyboard) {
                     HStack {
