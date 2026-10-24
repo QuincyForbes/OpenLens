@@ -94,6 +94,8 @@ final class WorkspaceService {
     }
 
     private let connection: ConnectionManager
+    private var cachedSlashActionsByDirectory: [String: [WorkspaceSlashActionItem]] = [:]
+    private var cachedSkillsByDirectory: [String: [WorkspaceSkillItem]] = [:]
 
     init(connection: ConnectionManager) {
         self.connection = connection
@@ -380,6 +382,10 @@ final class WorkspaceService {
         }
 
         guard let client = connection.client else { return [] }
+        let cacheKey = (await client.currentContextDirectory()) ?? "__default__"
+        if let cached = cachedSlashActionsByDirectory[cacheKey], !cached.isEmpty {
+            return cached
+        }
 
         async let commandsTask = tryCommands(client)
         async let agentsTask = tryAgents(client)
@@ -404,13 +410,17 @@ final class WorkspaceService {
             )
         }
 
-        return (commands + agents)
+        let sorted = (commands + agents)
             .sorted { lhs, rhs in
                 if lhs.kind != rhs.kind {
                     return lhs.kind == .command
                 }
                 return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
+        if !sorted.isEmpty {
+            cachedSlashActionsByDirectory[cacheKey] = sorted
+        }
+        return sorted
     }
 
     func loadSkills() async -> [WorkspaceSkillItem] {
@@ -421,8 +431,11 @@ final class WorkspaceService {
         guard let client = connection.client else { return [] }
 
         let contextDirectory = await client.currentContextDirectory() ?? "nil"
+        if let cached = cachedSkillsByDirectory[contextDirectory], !cached.isEmpty {
+            return cached
+        }
         do {
-            return try await client.listSkills()
+            let loaded = try await client.listSkills()
                 .map { skill in
                     WorkspaceSkillItem(
                         id: skill.id,
@@ -431,6 +444,10 @@ final class WorkspaceService {
                     )
                 }
                 .sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
+            if !loaded.isEmpty {
+                cachedSkillsByDirectory[contextDirectory] = loaded
+            }
+            return loaded
         } catch {
             Logger.api.error("WorkspaceService failed to load skills for context directory \(contextDirectory, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return []

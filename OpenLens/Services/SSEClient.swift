@@ -981,9 +981,9 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
     /// Replaces the client-side location filter for the global native v2 stream.
     /// Reconnect also invalidates queued deliveries from the previous location.
     func updateContextDirectory(_ directory: String?) {
-        let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let normalizedDirectory = WorkspaceSelectionBuilder.normalizedDirectory(directory)
         queue.async { [self] in
-            guard contextDirectory != normalizedDirectory else { return }
+            guard WorkspaceSelectionBuilder.normalizedDirectory(contextDirectory) != normalizedDirectory else { return }
             contextDirectory = normalizedDirectory
 
             guard protocolVersion == .v2,

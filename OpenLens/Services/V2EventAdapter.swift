@@ -17,6 +17,15 @@ nonisolated struct V2EventAdapter {
         "session.tool.called", "session.tool.progress", "session.tool.success", "session.tool.failed"
     ]
 
+    private static let ignoredAdvisoryEvents: Set<String> = [
+        "session.usage.updated",
+        "shell.created",
+        "shell.updated",
+        "shell.output",
+        "shell.exited",
+        "shell.deleted",
+    ]
+
     mutating func event(_ envelope: [String: Any], directory: String?) throws -> OCEvent? {
         guard let type = envelope["type"] as? String,
               let data = envelope["data"] as? [String: Any] else {
@@ -25,12 +34,15 @@ nonisolated struct V2EventAdapter {
         if type == "server.connected" || type == "server.heartbeat" {
             return OCEvent(type: type, properties: AnyCodable([String: String]()))
         }
+        if Self.ignoredAdvisoryEvents.contains(type) {
+            return nil
+        }
         // A move can be published from its destination. Let the open chat
         // reconcile by identity across the directory filter; only REST may
         // choose and authorize the new workspace, never the event payload.
         if type == "session.moved" {
             guard let sessionID = data["sessionID"] as? String,
-                  StreamDisplayValue.fitsIdentifier(sessionID) else {
+                   StreamDisplayValue.fitsIdentifier(sessionID) else {
                 throw OpenCodeError.invalidPayload("Invalid native v2 move identity.")
             }
             return OCEvent(type: "session.reconcile", properties: AnyCodable([
@@ -38,12 +50,17 @@ nonisolated struct V2EventAdapter {
             ]))
         }
         if let directory {
-            guard let location = envelope["location"] as? [String: Any],
-                  let eventDirectory = location["directory"] as? String else {
+            if let location = envelope["location"] as? [String: Any],
+               let eventDirectory = location["directory"] as? String {
+                guard WorkspaceSelectionBuilder.normalizedDirectory(eventDirectory)
+                        == WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+                    return nil
+                }
+            } else if envelope["location"] != nil {
                 throw OpenCodeError.invalidPayload("Native v2 event has no location.")
-            }
-            guard WorkspaceSelectionBuilder.normalizedDirectory(eventDirectory)
-                    == WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+            } else if Self.contentEvents.contains(type) || type.hasPrefix("session.") || type.hasPrefix("permission.") || type.hasPrefix("form.") {
+                throw OpenCodeError.invalidPayload("Native v2 event has no location.")
+            } else {
                 return nil
             }
         }
@@ -136,9 +153,16 @@ nonisolated struct V2EventAdapter {
             throw OpenCodeError.invalidPayload("Invalid native v2 tool identity.")
         }
         let key = "\(sessionID)/\(messageID)/\(id)"
+        if type == "session.tool.input.delta" || type == "session.tool.input.ended" {
+            // Partial JSON is not displayable input; called carries the parsed object.
+            return nil
+        }
         if type == "session.tool.input.started" {
-            guard tools.count < Self.maximumTools, let name = data["name"] as? String else {
+            guard let name = data["name"] as? String else {
                 throw OpenCodeError.invalidPayload("Native v2 tool buffer is full or malformed.")
+            }
+            if tools.count >= Self.maximumTools {
+                tools.removeAll(keepingCapacity: true)
             }
             tools[key] = ["name": name, "state": ["status": "pending"]]
         }
@@ -147,9 +171,6 @@ nonisolated struct V2EventAdapter {
             return reconcile()
         }
         switch type {
-        case "session.tool.input.delta", "session.tool.input.ended":
-            // Partial JSON is not displayable input; called carries the parsed object.
-            return nil
         case "session.tool.called":
             state["status"] = "running"
             state["input"] = data["input"]

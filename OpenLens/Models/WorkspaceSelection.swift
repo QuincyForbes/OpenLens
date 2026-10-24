@@ -185,8 +185,8 @@ enum WorkspaceSelectionBuilder {
         }
 
         if isWindowsAbsolutePath(trimmed) {
-            var normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
-            while normalized.count > 3 && normalized.hasSuffix("/") {
+            var normalized = trimmed.replacingOccurrences(of: "/", with: "\\")
+            while normalized.count > 3 && normalized.hasSuffix("\\") {
                 normalized.removeLast()
             }
             return normalized

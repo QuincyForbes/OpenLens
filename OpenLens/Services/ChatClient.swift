@@ -1791,6 +1791,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         if reopeningCurrentSession {
             guard currentSession?.id == session.id, generation == streamSynchronizationGeneration,
                   revision == connection?.projectContextRevision else { return }
+        } else {
+            currentSession = session
         }
 
         // Session-scoped API calls can be read without a location, but the chat
@@ -1799,7 +1801,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         // opened from another directory does not inherit the previously viewed
         // project's name, branch, commands, or files.
         if reopeningCurrentSession,
-           currentSession?.directory != session.directory || sessionLocationState != .ready {
+           WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory) != WorkspaceSelectionBuilder.normalizedDirectory(session.directory)
+            || sessionLocationState != .ready {
             do {
                 try await applyRecoveredSession(session, generation: generation)
             } catch { return }
@@ -1861,8 +1864,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             guard sessionLocationState == .ready else { return }
             session = currentSession
         }
-        guard let directory = session.directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
-              connection?.selectedProjectDirectory != directory else { return }
+        guard let directory = WorkspaceSelectionBuilder.normalizedDirectory(session.directory),
+              WorkspaceSelectionBuilder.normalizedDirectory(connection?.selectedProjectDirectory) != directory else { return }
         await connection?.setProjectContext(directory: directory)
     }
 
@@ -1922,7 +1925,8 @@ final class ChatClient: SSEEventHandlerDelegate {
             throw error
         }
         if let previousDirectory,
-           let directory = session.directory, previousDirectory != directory {
+           let directory = session.directory,
+           WorkspaceSelectionBuilder.normalizedDirectory(previousDirectory) != WorkspaceSelectionBuilder.normalizedDirectory(directory) {
             sessionLocationState = .rebinding
             do {
                 try await connection?.rebindProjectContext(directory: directory, isCurrent: isCurrent)
@@ -4218,7 +4222,8 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     private func requireCurrentWorkLocation(_ context: SessionWorkContext) throws {
         guard currentSession?.id == context.session.id else { throw CancellationError() }
-        guard canCompose, currentSession?.directory == context.session.directory,
+        guard canCompose,
+              WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory) == WorkspaceSelectionBuilder.normalizedDirectory(context.session.directory),
               connection?.projectContextRevision == context.projectRevision else {
             throw SessionMovedBeforeSend()
         }

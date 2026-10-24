@@ -2131,7 +2131,7 @@ nonisolated struct OCProject: Decodable, Identifiable, Sendable {
     /// Convenience: extract a display name from the worktree path (last path component).
     var displayName: String? {
         guard let worktree, !worktree.isEmpty else { return nil }
-        return (worktree as NSString).lastPathComponent
+        return WorkspaceSelectionBuilder.displayName(for: worktree)
     }
 
     init(id: String, worktree: String?, vcsDir: String? = nil, vcs: String? = nil, time: OCProjectTime? = nil) {
@@ -2416,7 +2416,7 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
             parts = textParts + fileParts
         } else {
             parts = content.enumerated().map { index, item in
-                OCPart(
+                let rawPart = OCPart(
                     id: item.id ?? "\(id)-\(index)",
                     sessionID: sessionID,
                     messageID: id,
@@ -2426,6 +2426,11 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
                     tool: item.type == .tool ? item.name ?? item.tool : nil,
                     state: item.state
                 )
+                guard rawPart.type == .tool else { return rawPart }
+                if PreparedQuestionToolPayload.prepare(from: rawPart) != nil {
+                    return PreparedQuestionToolPayload.sanitizedPart(from: rawPart)
+                }
+                return StreamToolPartSafety.sanitize(rawPart)
             }
         }
         return OCMessageWithParts(info: info, parts: parts)
