@@ -1449,15 +1449,31 @@ private struct MessageCopyActions: ViewModifier {
     let onReuseInComposer: ((String) -> Void)?
     let onUndo: (() -> Void)?
 
+    private struct SelectableText: Identifiable {
+        let id = UUID()
+        let text: String
+    }
+
+    @State private var selectableText: SelectableText?
+
     func body(content: Content) -> some View {
         if canCopy {
             content
-                .textSelection(.enabled)
+                // Per-Text selection competes with this long-press menu and
+                // with scrolling. Selection lives in a dedicated sheet instead.
                 .contextMenu {
                     Button {
                         UIPasteboard.general.string = makeText()
                     } label: {
                         Label(AppText.copyMessage, systemImage: "doc.on.doc")
+                    }
+
+                    Button {
+                        if let text = makeText() {
+                            selectableText = SelectableText(text: text)
+                        }
+                    } label: {
+                        Label("Select Text", systemImage: "text.cursor")
                     }
 
                     if let onReuseInComposer {
@@ -1478,6 +1494,9 @@ private struct MessageCopyActions: ViewModifier {
                             Label("Undo Turn", systemImage: "arrow.uturn.backward")
                         }
                     }
+                }
+                .sheet(item: $selectableText) { item in
+                    SelectableTextSheet(text: item.text)
                 }
         } else {
             content

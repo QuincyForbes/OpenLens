@@ -209,14 +209,56 @@ struct MarkdownContentView: View {
         // Fast path: most assistant text is plain prose with no markdown markers.
         // Skipping the markdown parser here removes a significant CPU spike for
         // long messages while preserving markdown rendering when syntax is present.
-        guard needsInlineMarkdownParsing(text) else {
+        var attributed: AttributedString
+        if needsInlineMarkdownParsing(text) {
+            attributed = (try? AttributedString(
+                markdown: text,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )) ?? AttributedString(text)
+        } else if containsLinkCandidate(text) {
+            attributed = AttributedString(text)
+        } else {
             return nil
         }
+        return applyingDetectedLinks(to: attributed)
+    }
 
-        return try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )
+    private static let linkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+
+    private static func containsLinkCandidate(_ text: String) -> Bool {
+        text.contains("http://") || text.contains("https://") || text.contains("www.")
+    }
+
+    /// Plain prose (no Markdown) with bare URLs made tappable, or nil when the
+    /// text has no link so callers can keep their cheap `Text(String)` path.
+    static func linkedPlainText(_ text: String, underlined: Bool = false) -> AttributedString? {
+        guard containsLinkCandidate(text) else { return nil }
+        var result = applyingDetectedLinks(to: AttributedString(text))
+        if underlined {
+            for run in result.runs where run.link != nil {
+                result[run.range].underlineStyle = .single
+            }
+        }
+        return result
+    }
+
+    /// Bare URLs in prose become tappable. Markdown links already carry a
+    /// `.link` attribute and are left alone. Runs on `parserQueue`, never main.
+    private static func applyingDetectedLinks(to attributed: AttributedString) -> AttributedString {
+        var result = attributed
+        guard let linkDetector else { return result }
+        let plain = String(result.characters)
+        guard containsLinkCandidate(plain) else { return result }
+        let matches = linkDetector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain))
+        for match in matches {
+            guard let url = match.url,
+                  let range = Range(match.range, in: result),
+                  result[range].link == nil else { continue }
+            result[range].link = url
+        }
+        return result
     }
 
     private static func needsInlineMarkdownParsing(_ text: String) -> Bool {
@@ -524,6 +566,8 @@ private struct MarkdownInlineText: View {
         }
         .font(usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 17))
         .foregroundStyle(foregroundColor)
+        // Links inside `Text` render with the tint, not the foreground style.
+        .tint(usesRetroTypography ? RetroChatStyle.blueAccent : Color.appAccent)
     }
 }
 

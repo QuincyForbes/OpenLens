@@ -31,7 +31,14 @@ struct SkillMentionText: View {
     var body: some View {
         let mentions = SkillMention.mentionRanges(in: text, skillIDs: skillIDs)
         if mentions.isEmpty {
-            Text(text)
+            if let linked = MarkdownContentView.linkedPlainText(text, underlined: true) {
+                // User bubbles sit on the accent fill, so links keep the text
+                // color and are underlined instead of recolored.
+                Text(linked)
+                    .tint(chipStyle.color)
+            } else {
+                Text(text)
+            }
         } else {
             textWithChips(for: mentions)
                 .textRenderer(
