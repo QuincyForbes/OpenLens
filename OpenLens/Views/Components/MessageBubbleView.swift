@@ -266,7 +266,7 @@ struct MessageBubbleView: View {
                     color: isRetroChat ? RetroChatStyle.ink : Color.appPrimary
                 )
             } else if message.isStreaming {
-                Text(text)
+                LinkedPlainText(text: text, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
                     .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
                     .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
             } else {
@@ -384,7 +384,7 @@ struct MessageBubbleView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if let output = step.outputPreview {
-                Text(output)
+                LinkedPlainText(text: output, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
                     .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, design: .monospaced))
                     .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -2755,6 +2755,16 @@ private struct ChatMessagesListView: View {
                     }
                     .padding(.horizontal, isRetroChat ? 12 : 16)
                     .animation(.easeOut(duration: 0.22), value: chatClient.queuedPrompts)
+                    // Any tap gesture on an ancestor of a `Text` disables the
+                    // links inside it. Keyboard dismissal therefore lives on a
+                    // background layer that only receives taps on empty space.
+                    .background {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            }
+                    }
 
                     Color.clear
                         .frame(height: 17)
@@ -2815,11 +2825,6 @@ private struct ChatMessagesListView: View {
                     await chatClient.refreshCurrentSessionFromServer()
                 }
                 .scrollDismissesKeyboard(.interactively)
-                // Simultaneous so this never delays or swallows a bubble's
-                // long-press or a link tap inside the list.
-                .simultaneousGesture(TapGesture().onEnded {
-                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                })
 
                 if showsScrollToBottomButton {
                     Button {

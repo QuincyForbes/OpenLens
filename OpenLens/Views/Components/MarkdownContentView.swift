@@ -227,8 +227,13 @@ struct MarkdownContentView: View {
         types: NSTextCheckingResult.CheckingType.link.rawValue
     )
 
+    /// Cheap pre-check before the data detector: a scheme, `www.`, or a
+    /// domain-looking token such as `github.com/foo` or `example.dev`.
     private static func containsLinkCandidate(_ text: String) -> Bool {
-        text.contains("http://") || text.contains("https://") || text.contains("www.")
+        if text.contains("://") || text.contains("www.") || text.contains("mailto:") {
+            return true
+        }
+        return text.range(of: #"[A-Za-z0-9-]\.[A-Za-z]{2,}(/|\b)"#, options: .regularExpression) != nil
     }
 
     /// Plain prose (no Markdown) with bare URLs made tappable, or nil when the
@@ -544,6 +549,22 @@ struct MarkdownContentView: View {
         case 2: return 20
         case 3: return 18
         default: return 16
+        }
+    }
+}
+
+/// Plain text whose bare URLs are tappable. For short strings such as tool
+/// output previews, where a full Markdown pass is unnecessary.
+struct LinkedPlainText: View {
+    let text: String
+    var tint: Color = Color.appAccent
+
+    var body: some View {
+        if let linked = MarkdownContentView.linkedPlainText(text) {
+            Text(linked)
+                .tint(tint)
+        } else {
+            Text(text)
         }
     }
 }
