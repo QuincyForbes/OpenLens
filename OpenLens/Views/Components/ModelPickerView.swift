@@ -104,6 +104,9 @@ struct ModelPickerView: View {
         }
         .tint(isRetroChat ? RetroChatStyle.ink : Color.appAccent)
         .presentationBackground(isRetroChat ? RetroChatStyle.screenBottom : Color.appBackground)
+        .onChange(of: searchQuery, initial: true) { _, query in
+            cachedFilter = (query, computeFilter(for: query))
+        }
     }
 
     @ViewBuilder
@@ -568,26 +571,52 @@ struct ModelPickerView: View {
         }
     }
 
+    /// Filtering a few hundred models four ways on every body pass made each
+    /// keystroke in the search field stutter. Compute once per query instead.
+    private struct FilterResult {
+        var matchingIDs: Set<String>
+        var recent: [ChatClient.SelectableModel]
+        var grouped: [(provider: String, models: [ChatClient.SelectableModel])]
+    }
+
+    private var filterResult: FilterResult {
+        if let cached = cachedFilter, cached.query == searchQuery {
+            return cached.result
+        }
+        return computeFilter(for: searchQuery)
+    }
+
+    private func computeFilter(for query: String) -> FilterResult {
+        let matching = Self.models(matching: query, from: allModels)
+        let matchingIDs = Set(matching.map(\.id))
+        let recentIDs = Set(recentModels.map(\.id))
+        let result = FilterResult(
+            matchingIDs: matchingIDs,
+            recent: recentModels.filter { matchingIDs.contains($0.id) },
+            grouped: groupedModels.compactMap { group in
+                let models = group.models.filter {
+                    matchingIDs.contains($0.id) && !recentIDs.contains($0.id)
+                }
+                guard !models.isEmpty else { return nil }
+                return (provider: group.provider, models: models)
+            }
+        )
+        return result
+    }
+
+    @State private var cachedFilter: (query: String, result: FilterResult)?
+
     private var filteredModels: [ChatClient.SelectableModel] {
-        Self.models(matching: searchQuery, from: groupedModels.flatMap(\.models))
+        let ids = filterResult.matchingIDs
+        return allModels.filter { ids.contains($0.id) }
     }
 
     private var filteredRecentModels: [ChatClient.SelectableModel] {
-        let matchingIDs = Set(filteredModels.map(\.id))
-        return recentModels.filter { matchingIDs.contains($0.id) }
+        filterResult.recent
     }
 
     private var filteredGroupedModels: [(provider: String, models: [ChatClient.SelectableModel])] {
-        let matchingIDs = Set(filteredModels.map(\.id))
-        let recentIDs = Set(recentModels.map(\.id))
-
-        return groupedModels.compactMap { group in
-            let models = group.models.filter {
-                matchingIDs.contains($0.id) && !recentIDs.contains($0.id)
-            }
-            guard !models.isEmpty else { return nil }
-            return (provider: group.provider, models: models)
-        }
+        filterResult.grouped
     }
 
     static func models(
