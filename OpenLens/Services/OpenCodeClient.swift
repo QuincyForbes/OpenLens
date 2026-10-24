@@ -349,7 +349,7 @@ actor OpenCodeClient {
         }
     }
 
-    func listRecentMessages(sessionID: String, limit: Int = 60) async throws -> [OCMessageWithParts] {
+    func listRecentMessages(sessionID: String, limit: Int = 25) async throws -> [OCMessageWithParts] {
         try await listRecentTranscript(sessionID: sessionID, limit: limit).compactMap { entry in
             guard case .message(let message) = entry else { return nil }
             return message
@@ -358,11 +358,19 @@ actor OpenCodeClient {
 
     /// Fetches the most recent transcript page (`order: "desc"`) so opening or reconciling
     /// a multi-thousand-message session only downloads the latest page instead of the entire history.
-    func listRecentTranscript(sessionID: String, limit: Int = 60) async throws -> [OCTranscriptEntry] {
+    func listRecentTranscript(sessionID: String, limit: Int = 25) async throws -> [OCTranscriptEntry] {
+        try await listRecentTranscriptPage(sessionID: sessionID, cursor: nil, limit: limit).entries
+    }
+
+    func listRecentTranscriptPage(
+        sessionID: String,
+        cursor: String? = nil,
+        limit: Int = 25
+    ) async throws -> (entries: [OCTranscriptEntry], olderCursor: String?) {
         if usesV2 {
             let firstPage: OCV2PageResult<OCV2SessionMessage> = try await getV2Page(
                 endpoint: "/api/session/\(sessionID)/message",
-                cursor: nil,
+                cursor: cursor,
                 limit: limit,
                 order: "desc",
                 includesLocation: false,
@@ -371,9 +379,9 @@ actor OpenCodeClient {
             var entries = firstPage.values
             if entries.count >= 2, Self.isDescendingV2MessageOrder(entries) {
                 entries.reverse()
-                return OCTranscriptEntry.projectV2(entries, sessionID: sessionID)
+                return (OCTranscriptEntry.projectV2(entries, sessionID: sessionID), firstPage.nextCursor)
             }
-            if let nextCursor = firstPage.nextCursor, entries.count < limit {
+            if cursor == nil, let nextCursor = firstPage.nextCursor, entries.count < limit {
                 let secondPage: OCV2PageResult<OCV2SessionMessage> = try await getV2Page(
                     endpoint: "/api/session/\(sessionID)/message",
                     cursor: nextCursor,
@@ -383,10 +391,12 @@ actor OpenCodeClient {
                     queryItems: []
                 )
                 entries.append(contentsOf: secondPage.values)
+                return (OCTranscriptEntry.projectV2(entries, sessionID: sessionID), secondPage.nextCursor)
             }
-            return OCTranscriptEntry.projectV2(entries, sessionID: sessionID)
+            return (OCTranscriptEntry.projectV2(entries, sessionID: sessionID), firstPage.nextCursor)
         }
-        return try await listTranscript(sessionID: sessionID, limit: limit)
+        let entries = try await listTranscript(sessionID: sessionID, limit: limit)
+        return (entries, nil)
     }
 
     private nonisolated static func isDescendingV2MessageOrder(_ entries: [OCV2SessionMessage]) -> Bool {

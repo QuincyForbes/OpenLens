@@ -291,7 +291,7 @@ struct ChatView: View {
     }
 
     private var catalogContextID: String {
-        "\(connection.projectContextRevision):\(chatClient.currentSession?.id ?? ""):\(chatClient.sessionLocationState == .ready)"
+        "\(connection.projectContextRevision):\(chatClient.sessionLocationState == .ready)"
     }
 
     private var headerSession: OCSession? {

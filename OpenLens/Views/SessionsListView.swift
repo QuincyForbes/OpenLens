@@ -61,6 +61,7 @@ struct SessionsListView: View {
     @State private var showRenameAlert = false
     @State private var searchQuery = ""
     @State private var isOnScreen = true
+    @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
 
     let presentationStyle: PresentationStyle
@@ -216,7 +217,9 @@ struct SessionsListView: View {
         }
         .task(id: pollTaskKey) {
             guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
-            await loadSessionStatuses(refreshInactive: true)
+            let shouldRefreshAllInactive = !hasRefreshedInitialInactiveOutcomes
+            hasRefreshedInitialInactiveOutcomes = true
+            await loadSessionStatuses(refreshInactive: shouldRefreshAllInactive)
             guard connection.serverCapabilities?.protocolVersion == .v2
                     || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
             var lastAttentionRefresh = Date()

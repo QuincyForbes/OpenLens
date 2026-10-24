@@ -23,6 +23,7 @@ final class ConnectionManager: ConnectionProviding {
     private(set) var projectContextRevision: UInt = 0
     private var projectContextGeneration: UInt = 0
     @ObservationIgnored private var globalFormRecoveryDirectories: Set<String> = []
+    @ObservationIgnored private var cachedProjectMetadataByDirectory: [String: (pathInfo: OCPathInfo?, project: OCProject?, branch: String?)] = [:]
     private(set) var connectionMethod: ConnectionMethod?
     private(set) var serverURL: URL?
     private(set) var localNetworkAccessRequired: Bool = false
@@ -166,6 +167,7 @@ final class ConnectionManager: ConnectionProviding {
 
             self.client = apiClient
             globalFormRecoveryDirectories = []
+            cachedProjectMetadataByDirectory = [:]
             self.serverURL = baseURL
             self.selectedProjectDirectory = restoredProjectDirectory?.nilIfBlank
 
@@ -227,6 +229,7 @@ final class ConnectionManager: ConnectionProviding {
         sseClient = nil
         client = nil
         globalFormRecoveryDirectories = []
+        cachedProjectMetadataByDirectory = [:]
         serverURL = nil
         state = .disconnected
         serverVersion = nil
@@ -315,9 +318,15 @@ final class ConnectionManager: ConnectionProviding {
         selectedProjectDirectory = normalizedDirectory
         sseClient?.updateContextDirectory(normalizedDirectory)
         projectContextRevision &+= 1
-        currentProject = nil
-        projectName = nil
-        branch = nil
+        if let normalizedDirectory, let cached = cachedProjectMetadataByDirectory[normalizedDirectory] {
+            currentProject = cached.project
+            projectName = cached.project?.displayName ?? cached.project?.worktree
+            branch = cached.branch
+        } else {
+            currentProject = nil
+            projectName = nil
+            branch = nil
+        }
 
         if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
             savedConnectionsStore?.updateProjectSelection(
@@ -384,8 +393,8 @@ final class ConnectionManager: ConnectionProviding {
         }
 
         if selectedProjectDirectory == nil {
-            let serverDirectory = pathInfo?.directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-            let projectWorktree = project?.worktree?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+            let serverDirectory = WorkspaceSelectionBuilder.normalizedDirectory(pathInfo?.directory)
+            let projectWorktree = WorkspaceSelectionBuilder.normalizedDirectory(project?.worktree)
             let inferredDirectory = serverDirectory ?? projectWorktree
             let source = serverDirectory == nil ? "project worktree fallback" : "server directory"
             Logger.connection.debug("OpenLens initialized active project directory to \(inferredDirectory ?? "nil", privacy: .public) from \(source, privacy: .public)")
@@ -415,6 +424,10 @@ final class ConnectionManager: ConnectionProviding {
             guard !Task.isCancelled, generation == projectContextGeneration else { return }
             branch = nil
             Logger.connection.warning("Failed to fetch VCS info: \(error, privacy: .public)")
+        }
+
+        if let activeDirectory = selectedProjectDirectory {
+            cachedProjectMetadataByDirectory[activeDirectory] = (pathInfo: pathInfo, project: currentProject, branch: branch)
         }
     }
 

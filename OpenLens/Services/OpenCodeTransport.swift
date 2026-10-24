@@ -25,14 +25,20 @@ nonisolated protocol OpenCodeTransport: AnyObject, Sendable {
 }
 
 nonisolated final class DirectOpenCodeTransport: OpenCodeTransport, @unchecked Sendable {
-    private let session: URLSession
-
-    init() {
+    private static let sharedSession: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 300
-        configuration.waitsForConnectivity = true
-        session = URLSession(configuration: configuration)
+        configuration.waitsForConnectivity = false
+        configuration.httpMaximumConnectionsPerHost = 8
+        configuration.httpShouldUsePipelining = true
+        return URLSession(configuration: configuration)
+    }()
+
+    private let session: URLSession
+
+    init() {
+        session = Self.sharedSession
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {

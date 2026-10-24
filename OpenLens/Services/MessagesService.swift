@@ -42,14 +42,22 @@ final class MessagesService {
     }
 
     /// Fetch the ordered transcript in one read, keeping context outside chat roles.
-    func loadTranscript(sessionID: String) async throws -> SessionTranscript {
+    func loadTranscript(
+        sessionID: String,
+        cursor: String? = nil,
+        limit: Int = 25
+    ) async throws -> SessionTranscript {
         guard let client = connection.client else { throw OpenCodeError.notConnected }
-        let entries = try await client.listRecentTranscript(sessionID: sessionID)
-        return Self.transcript(from: entries)
+        let page = try await client.listRecentTranscriptPage(
+            sessionID: sessionID,
+            cursor: cursor,
+            limit: limit
+        )
+        return Self.transcript(from: page.entries, olderCursor: page.olderCursor)
     }
 
     /// Share domain conversion across both reads and fixture presentation.
-    static func transcript(from entries: [OCTranscriptEntry]) -> SessionTranscript {
+    static func transcript(from entries: [OCTranscriptEntry], olderCursor: String? = nil) -> SessionTranscript {
         return SessionTranscript(
             messages: entries.compactMap {
                 guard case .message(let message) = $0 else { return nil }
@@ -59,7 +67,8 @@ final class MessagesService {
                 guard case .context(let context) = $0 else { return nil }
                 return context
             },
-            entryOrder: entries.map(\.id)
+            entryOrder: entries.map(\.id),
+            olderCursor: olderCursor
         )
     }
 

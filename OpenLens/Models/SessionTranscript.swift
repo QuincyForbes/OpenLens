@@ -42,6 +42,7 @@ struct SessionTranscript {
     let messages: [ChatMessage]
     let contextEntries: [SessionContextEntry]
     let entryOrder: [String]
+    var olderCursor: String? = nil
 }
 
 nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {

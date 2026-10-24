@@ -140,6 +140,12 @@ final class ChatClient: SSEEventHandlerDelegate {
     private(set) var transcriptEntryOrder: [String] = []
     private(set) var displayedContextEntries: [SessionContextEntry] = []
     private(set) var displayedEntryOrder: [String] = []
+    private var olderTranscriptCursor: String?
+    private var isLoadingEarlierHistory = false
+    @ObservationIgnored private var cachedSessionTranscripts: [String: SessionTranscript] = [:]
+    @ObservationIgnored private var cachedSessionTranscriptOrder: [String] = []
+    private static let maximumCachedSessionTranscripts = 16
+    @ObservationIgnored private var cachedTurnDiffSummariesByMessageID: [String: [TurnFileChangeSummary]] = [:]
     private var activeContextSessionGeneration: UInt = 0
     private var activeContextTranscriptRevision: UInt = 0
     private var activeContextWasV2 = false
@@ -148,9 +154,23 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Live assistant reconciliation still runs through the existing message setter.
     func replaceTranscript(_ transcript: SessionTranscript) {
         activeContextTranscriptRevision &+= 1
+        olderTranscriptCursor = transcript.olderCursor
         contextEntries = transcript.contextEntries
         transcriptEntryOrder = transcript.entryOrder
         messages = transcript.messages
+        if let sessionID = currentSession?.id, !isOfflinePreviewMode {
+            cacheSessionTranscript(transcript, for: sessionID)
+        }
+    }
+
+    private func cacheSessionTranscript(_ transcript: SessionTranscript, for sessionID: String) {
+        cachedSessionTranscripts[sessionID] = transcript
+        cachedSessionTranscriptOrder.removeAll { $0 == sessionID }
+        cachedSessionTranscriptOrder.append(sessionID)
+        while cachedSessionTranscriptOrder.count > Self.maximumCachedSessionTranscripts {
+            let oldest = cachedSessionTranscriptOrder.removeFirst()
+            cachedSessionTranscripts.removeValue(forKey: oldest)
+        }
     }
 
     func timelineItems(showsThinking: Bool) -> [ChatTimelineItem] {
@@ -833,11 +853,55 @@ final class ChatClient: SSEEventHandlerDelegate {
     var displayedMessages: [ChatMessage] = []
 
     var hasEarlierMessages: Bool {
-        messages.count + contextEntries.count > displayLimit
+        messages.count + contextEntries.count > displayLimit || olderTranscriptCursor != nil
     }
 
     func loadEarlierMessages() {
         displayLimit += pageSize
+        guard messages.count + contextEntries.count < displayLimit,
+              let cursor = olderTranscriptCursor,
+              !isLoadingEarlierHistory,
+              let sessionID = currentSession?.id,
+              let messagesService else {
+            return
+        }
+        isLoadingEarlierHistory = true
+        let loadToken = sessionLoadToken
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isLoadingEarlierHistory = false }
+            guard let older = try? await messagesService.loadTranscript(
+                sessionID: sessionID,
+                cursor: cursor,
+                limit: 30
+            ),
+            !Task.isCancelled,
+            self.currentSession?.id == sessionID,
+            self.sessionLoadToken == loadToken else {
+                return
+            }
+            self.prependOlderTranscript(older)
+        }
+    }
+
+    private func prependOlderTranscript(_ older: SessionTranscript) {
+        let existingMessageIDs = Set(messages.map(\.id))
+        let existingContextIDs = Set(contextEntries.map(\.id))
+        let existingOrderSet = Set(transcriptEntryOrder)
+
+        let prependedMessages = older.messages.filter { !existingMessageIDs.contains($0.id) }
+        let prependedContexts = older.contextEntries.filter { !existingContextIDs.contains($0.id) }
+        let prependedOrder = older.entryOrder.filter { !existingOrderSet.contains($0) }
+
+        preserveTurnFileChanges(in: prependedMessages)
+        replaceTranscript(
+            SessionTranscript(
+                messages: prependedMessages + messages,
+                contextEntries: prependedContexts + contextEntries,
+                entryOrder: prependedOrder + transcriptEntryOrder,
+                olderCursor: older.olderCursor
+            )
+        )
     }
 
     private func rebuildDisplayedMessages() {
@@ -1745,6 +1809,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         resetSessionState()
 
         currentSession = session
+        if let cached = cachedSessionTranscripts[session.id] {
+            preserveTurnFileChanges(in: cached.messages)
+            replaceTranscript(cached)
+        }
 
         setupSSEHandlers(includesSynchronizationGap: false)
         let shouldLoadProviders = providers.isEmpty
@@ -1903,9 +1971,14 @@ final class ChatClient: SSEEventHandlerDelegate {
         do {
             inboxRecovered = await recoverSessionInbox() == .current
             guard isCurrent() else { return false }
-            let transcript = try await messagesService!.loadTranscript(sessionID: session.id)
-            let loaded = transcript.messages
+            let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 25
+            let rawTranscript = try await messagesService!.loadTranscript(
+                sessionID: session.id,
+                limit: fetchLimit
+            )
             guard isCurrent() else { return false }
+            let transcript = mergeTranscriptWithLoadedHistory(rawTranscript)
+            let loaded = transcript.messages
             resolveCompactionFromTranscript(transcript, sessionID: session.id)
             let loadedIDs = Set(transcript.entryOrder)
             queuedPrompts.removeAll { prompt in
@@ -1930,9 +2003,12 @@ final class ChatClient: SSEEventHandlerDelegate {
             prepareTurnDiffRefresh(for: visibleMessages)
             preserveTurnFileChanges(in: visibleMessages)
             let visibleIDs = Set(visibleOrder)
-            replaceTranscript(SessionTranscript(messages: visibleMessages,
+            replaceTranscript(SessionTranscript(
+                messages: visibleMessages,
                 contextEntries: transcript.contextEntries.filter { visibleIDs.contains($0.id) },
-                entryOrder: visibleOrder))
+                entryOrder: visibleOrder,
+                olderCursor: transcript.olderCursor
+            ))
             projectSessionInbox()
             // v2 sessions carry their canonical selection; transcript history
             // and saved defaults must not override it.
@@ -1964,10 +2040,58 @@ final class ChatClient: SSEEventHandlerDelegate {
     func unloadSession(ifMatching sessionID: String) {
         guard currentSession?.id == sessionID else { return }
         sessionLoadToken = nil
+        cachedSessionTranscripts.removeValue(forKey: sessionID)
+        cachedSessionTranscriptOrder.removeAll { $0 == sessionID }
         resetSessionState()
         currentSession = nil
         inputText = ""
         composerAttachments = []
+    }
+
+    private func mergeTranscriptWithLoadedHistory(_ incoming: SessionTranscript) -> SessionTranscript {
+        let existingByID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        let reusedMessages = incoming.messages.map { fresh -> ChatMessage in
+            guard let existing = existingByID[fresh.id],
+                  !existing.isStreaming,
+                  existing.role == fresh.role,
+                  existing.content == fresh.content,
+                  existing.parts.count == fresh.parts.count,
+                  existing.finish == fresh.finish,
+                  existing.cost == fresh.cost,
+                  existing.modelID == fresh.modelID,
+                  existing.providerID == fresh.providerID else {
+                return fresh
+            }
+            return existing
+        }
+
+        // Only preserve older in-memory pages when the incoming response is a partial tail page
+        // (`incoming.olderCursor != nil`). When `incoming.olderCursor == nil`, the server response
+        // contains the complete transcript.
+        guard incoming.olderCursor != nil,
+              let firstIncomingID = incoming.entryOrder.first,
+              let overlapIndex = transcriptEntryOrder.firstIndex(of: firstIncomingID),
+              overlapIndex > 0 else {
+            return SessionTranscript(
+                messages: reusedMessages,
+                contextEntries: incoming.contextEntries,
+                entryOrder: incoming.entryOrder,
+                olderCursor: incoming.olderCursor
+            )
+        }
+
+        let incomingIDSet = Set(incoming.entryOrder)
+        let prefixOrder = transcriptEntryOrder[..<overlapIndex].filter { !incomingIDSet.contains($0) }
+        let prefixIDSet = Set(prefixOrder)
+        let prefixMessages = messages.filter { prefixIDSet.contains($0.id) }
+        let prefixContexts = contextEntries.filter { prefixIDSet.contains($0.id) }
+
+        return SessionTranscript(
+            messages: prefixMessages + reusedMessages,
+            contextEntries: prefixContexts + incoming.contextEntries,
+            entryOrder: Array(prefixOrder) + incoming.entryOrder,
+            olderCursor: olderTranscriptCursor ?? incoming.olderCursor
+        )
     }
 
     nonisolated static func messagesBeforeRevert(
@@ -2260,6 +2384,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         turnFileDetailCache.removeAll()
         turnFileDetailCacheOrder.removeAll()
         pendingAssistantMessage = nil
+        olderTranscriptCursor = nil
+        isLoadingEarlierHistory = false
         contextEntries = []
         canonicalCompactionIDs = []
         transcriptEntryOrder = []
@@ -2495,10 +2621,18 @@ final class ChatClient: SSEEventHandlerDelegate {
     private func preserveTurnFileChanges(in loaded: [ChatMessage]) {
         let existingByID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
         for message in loaded {
+            if let cached = cachedTurnDiffSummariesByMessageID[message.id] {
+                if !cached.isEmpty {
+                    message.setTurnFileChanges(cached)
+                }
+                resolvedTurnDiffAssistantIDs.insert(message.id)
+                continue
+            }
             guard let existing = existingByID[message.id], !existing.turnFileChanges.isEmpty else {
                 continue
             }
             message.setTurnFileChanges(existing.turnFileChanges)
+            cachedTurnDiffSummariesByMessageID[message.id] = existing.turnFileChanges
             resolvedTurnDiffAssistantIDs.insert(message.id)
         }
     }
@@ -2563,7 +2697,9 @@ final class ChatClient: SSEEventHandlerDelegate {
                     return
                 }
 
-                message.setTurnFileChanges(files.map(TurnFileChangeSummary.init(file:)))
+                let summaries = files.map(TurnFileChangeSummary.init(file:))
+                message.setTurnFileChanges(summaries)
+                cachedTurnDiffSummariesByMessageID[message.id] = summaries
                 resolvedTurnDiffAssistantIDs.insert(message.id)
                 if !files.isEmpty {
                     timelineVersion &+= 1
@@ -5497,6 +5633,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         discardAllBufferedStreamingUpdates()
         streamingMessageIDRemaps.removeAll()
         pendingAssistantMessage = nil
+        olderTranscriptCursor = nil
+        isLoadingEarlierHistory = false
         contextEntries = []
         canonicalCompactionIDs = []
         transcriptEntryOrder = []
