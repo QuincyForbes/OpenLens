@@ -224,7 +224,8 @@ nonisolated struct V2EventAdapter {
                 return item
             }
             var copy = item
-            copy["text"] = StreamDisplayValue.preview(text, maximumBytes: maxTextBytes)
+            let preview: String = StreamDisplayValue.preview(text, maximumBytes: maxTextBytes)
+            copy["text"] = preview
             return copy
         }
     }

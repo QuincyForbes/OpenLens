@@ -31,7 +31,6 @@ nonisolated final class DirectOpenCodeTransport: OpenCodeTransport, @unchecked S
         configuration.timeoutIntervalForResource = 300
         configuration.waitsForConnectivity = false
         configuration.httpMaximumConnectionsPerHost = 8
-        configuration.httpShouldUsePipelining = true
         return URLSession(configuration: configuration)
     }()
 
