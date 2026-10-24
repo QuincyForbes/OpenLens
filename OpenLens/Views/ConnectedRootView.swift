@@ -14,8 +14,27 @@ struct ConnectedRootView: View {
 
     @Environment(AppRouter.self) private var router
     @Environment(\.connection) private var connection
+    @Environment(\.inboxService) private var inboxService
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var permissionSheetDetent = PermissionRequestSheet.defaultPresentationDetent
+    @State private var inboxPendingCount = 0
+
+    private struct InboxRefreshKey: Equatable {
+        let isActive: Bool
+        let permissionID: String?
+        let isLoading: Bool
+        let sessionID: String?
+    }
+
+    private var inboxRefreshKey: InboxRefreshKey {
+        InboxRefreshKey(
+            isActive: scenePhase == .active,
+            permissionID: chatClient.pendingPermission?.id,
+            isLoading: chatClient.isLoading,
+            sessionID: chatClient.currentSession?.id
+        )
+    }
 
     var body: some View {
         @Bindable var router = router
@@ -35,6 +54,7 @@ struct ConnectedRootView: View {
                     }
                     Tab(value: AppTab.review) {
                         tabNavigationView(for: .review)
+                            .badge(inboxPendingCount)
                     } label: {
                         tabLabel(for: .review, selectedTab: router.selectedTab)
                     }
@@ -82,6 +102,18 @@ struct ConnectedRootView: View {
         }
         .task(id: chatClient.isLoading) {
             await recoverSessionStateWhileLoading()
+        }
+        .task(id: inboxRefreshKey) {
+            // Permissions, questions and forms for sessions that are not open
+            // never reach the chat. Surface their count on the Review tab,
+            // where the Inbox lives, so nothing waits unnoticed.
+            guard inboxRefreshKey.isActive else { return }
+            while !Task.isCancelled {
+                if let snapshot = try? await inboxService.loadInbox() {
+                    inboxPendingCount = snapshot.pendingRequestCount
+                }
+                try? await Task.sleep(for: .seconds(20))
+            }
         }
     }
 

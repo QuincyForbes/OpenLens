@@ -83,15 +83,13 @@ struct ChatView: View {
             .environment(\.chatSkillIDs, availableSkills.map(\.id))
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
-            if let permission = chatClient.pendingPermission, !chatClient.showPermissionAlert {
-                Button {
-                    chatClient.showPermissionAlert = true
-                } label: {
+            if let attention = pendingAttention {
+                Button(action: attention.open) {
                     HStack(spacing: 8) {
-                        Image(systemName: "lock.shield.fill")
+                        Image(systemName: attention.icon)
                             .font(.system(size: 13))
                             .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
-                        Text(permission.title?.nilIfBlank ?? permission.toolDisplayName?.nilIfBlank ?? AppText.permissionRequired)
+                        Text(attention.title)
                             .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
                             .foregroundStyle(primaryTextColor)
                             .lineLimit(1)
@@ -106,7 +104,7 @@ struct ChatView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Permission required. Tap to review.")
+                .accessibilityLabel("\(attention.title). Tap to review.")
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -306,12 +304,9 @@ struct ChatView: View {
                     .presentationDragIndicator(.visible)
             }
         }
-        .sheet(isPresented: $chatClient.showQuestionSheet, onDismiss: {
-            // Handle swipe-dismiss: reject the question and clear state.
-            if chatClient.pendingQuestion != nil {
-                chatClient.rejectQuestion()
-            }
-        }) {
+        .sheet(isPresented: $chatClient.showQuestionSheet) {
+            // Swipe-dismiss only hides the sheet. The question stays pending and
+            // the review banner lets the person come back; rejecting is explicit.
             if let question = chatClient.pendingQuestion {
                 QuestionView(
                     request: question,
@@ -325,11 +320,7 @@ struct ChatView: View {
                 .presentationDetents([.medium, .large])
             }
         }
-        .sheet(isPresented: $chatClient.showFormSheet, onDismiss: {
-            if chatClient.pendingForm != nil {
-                chatClient.cancelForm()
-            }
-        }) {
+        .sheet(isPresented: $chatClient.showFormSheet) {
             if let form = chatClient.pendingForm {
                 FormView(
                     form: form,
@@ -364,6 +355,38 @@ struct ChatView: View {
 
     private var visualMode: ChatVisualMode {
         chatEasterEgg.visualMode
+    }
+
+    private struct PendingAttention {
+        let icon: String
+        let title: String
+        let open: () -> Void
+    }
+
+    /// An interaction the agent is blocked on while its sheet is hidden.
+    private var pendingAttention: PendingAttention? {
+        if let permission = chatClient.pendingPermission, !chatClient.showPermissionAlert {
+            return PendingAttention(
+                icon: "lock.shield.fill",
+                title: permission.title?.nilIfBlank ?? permission.toolDisplayName?.nilIfBlank ?? AppText.permissionRequired,
+                open: { chatClient.showPermissionAlert = true }
+            )
+        }
+        if chatClient.pendingQuestion != nil, !chatClient.showQuestionSheet {
+            return PendingAttention(
+                icon: "questionmark.circle.fill",
+                title: "The agent is waiting for your answer",
+                open: { chatClient.showQuestionSheet = true }
+            )
+        }
+        if let form = chatClient.pendingForm, !chatClient.showFormSheet, !chatClient.isResolvingForm {
+            return PendingAttention(
+                icon: "list.bullet.rectangle.fill",
+                title: form.title.nilIfBlank ?? "The agent is waiting for a form response",
+                open: { chatClient.showFormSheet = true }
+            )
+        }
+        return nil
     }
 
     private var catalogContextID: String {

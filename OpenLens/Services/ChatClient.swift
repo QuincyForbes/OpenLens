@@ -5016,11 +5016,13 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
             guard let self, self.pendingQuestion != nil || self.pendingForm != nil else { return }
             await MainActor.run {
-                Logger.chat.info("Interactive request timed out after \(Self.interactiveRequestTimeoutSeconds)s, auto-cancelling")
-                if self.pendingForm != nil {
-                    self.cancelForm()
-                } else {
-                    self.rejectQuestion()
+                // Never answer on the person's behalf. The agent stays blocked
+                // until they decide; re-surface the sheet once as a reminder.
+                Logger.chat.info("Interactive request still pending after \(Self.interactiveRequestTimeoutSeconds)s; re-presenting")
+                if self.pendingForm != nil, !self.showFormSheet, !self.isResolvingForm {
+                    self.showFormSheet = true
+                } else if self.pendingQuestion != nil, !self.showQuestionSheet {
+                    self.showQuestionSheet = true
                 }
             }
         }
