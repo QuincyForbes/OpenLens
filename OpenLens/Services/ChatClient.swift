@@ -1759,6 +1759,17 @@ final class ChatClient: SSEEventHandlerDelegate {
         let token = UUID()
         sessionLoadToken = token
         let reopeningCurrentSession = usesV2SessionAPI && currentSession?.id == session.id
+        if !reopeningCurrentSession {
+            if currentSession?.id != session.id {
+                composerAttachments = []
+            }
+            resetSessionState()
+            currentSession = session
+            if let cached = cachedSessionTranscripts[session.id] {
+                preserveTurnFileChanges(in: cached.messages)
+                replaceTranscript(cached)
+            }
+        }
         let generation = streamSynchronizationGeneration
         let revision = connection?.projectContextRevision
         if usesV2SessionAPI, let sessionsService {
@@ -1800,18 +1811,17 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         guard !Task.isCancelled, sessionLoadToken == token else { return }
 
-        // Attachments picked for one session must never be sent to another.
-        if currentSession?.id != session.id {
-            composerAttachments = []
-        }
-
-        // Drain any in-flight state from the previous session
-        resetSessionState()
-
-        currentSession = session
-        if let cached = cachedSessionTranscripts[session.id] {
-            preserveTurnFileChanges(in: cached.messages)
-            replaceTranscript(cached)
+        if reopeningCurrentSession {
+            // Drain any in-flight state from the previous session
+            let existingCached = cachedSessionTranscripts[session.id]
+            resetSessionState()
+            currentSession = session
+            if let existingCached {
+                preserveTurnFileChanges(in: existingCached.messages)
+                replaceTranscript(existingCached)
+            }
+        } else {
+            currentSession = session
         }
 
         setupSSEHandlers(includesSynchronizationGap: false)

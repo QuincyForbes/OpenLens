@@ -119,7 +119,7 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_ENTITLEMENTS: OpenLens/OpenLens.entitlements
         CODE_SIGN_STYLE: "$(OPENLENS_CODE_SIGN_STYLE)"
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 2
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
         ENABLE_PREVIEWS: YES
         ENABLE_USER_SCRIPT_SANDBOXING: NO
@@ -135,7 +135,7 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - $(inherited)
           - "@executable_path/Frameworks"
-        MARKETING_VERSION: 2.0
+        MARKETING_VERSION: 2.1
         PRODUCT_BUNDLE_IDENTIFIER: "$(OPENLENS_APP_BUNDLE_ID)"
         PRODUCT_NAME: "$(TARGET_NAME)"
         REGISTER_APP_GROUPS: YES
@@ -169,7 +169,7 @@ targets:
         ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME: WidgetBackground
         CODE_SIGN_ENTITLEMENTS: OpenLensActivityWidget/OpenLensActivityWidget.entitlements
         CODE_SIGN_STYLE: "$(OPENLENS_CODE_SIGN_STYLE)"
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 2
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: OpenLensActivityWidget/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: OpenLensActivityWidget
@@ -178,7 +178,7 @@ targets:
           - $(inherited)
           - "@executable_path/Frameworks"
           - "@executable_path/../../Frameworks"
-        MARKETING_VERSION: 2.0
+        MARKETING_VERSION: 2.1
         PRODUCT_BUNDLE_IDENTIFIER: "$(OPENLENS_WIDGET_BUNDLE_ID)"
         PRODUCT_NAME: "$(TARGET_NAME)"
         SKIP_INSTALL: YES
