@@ -1489,6 +1489,14 @@ private struct MessageCopyActions: ViewModifier {
                         Label("Select Text", systemImage: "text.cursor")
                     }
 
+                    // The menu body is built only when it opens, so joining the
+                    // full reply here is as cheap as the Copy action.
+                    if let shareText = makeText() {
+                        ShareLink(item: shareText) {
+                            Label("Share…", systemImage: "square.and.arrow.up")
+                        }
+                    }
+
                     if let onReuseInComposer {
                         Button {
                             if let text = makeText() {

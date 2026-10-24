@@ -646,7 +646,7 @@ struct SessionsListView: View {
     }
 
     private func refreshAttentionSessions() async {
-        guard !Task.isCancelled, let snapshot = try? await inboxService.loadInbox(), !Task.isCancelled else { return }
+        guard !Task.isCancelled, let snapshot = try? await inboxService.loadInbox(maxAge: 5), !Task.isCancelled else { return }
         var ids = Set<String>()
         ids.formUnion(snapshot.permissions.compactMap(\.sessionID))
         ids.formUnion(snapshot.questions.map(\.sessionID))

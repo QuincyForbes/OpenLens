@@ -472,7 +472,7 @@ struct ReviewRootView: View {
 
     private func refreshInboxBadgeCount() async {
         do {
-            let snapshot = try await inboxService.loadInbox()
+            let snapshot = try await inboxService.loadInbox(maxAge: 5)
             inboxBadgeCount = snapshot.pendingRequestCount
         } catch {
             inboxBadgeCount = 0

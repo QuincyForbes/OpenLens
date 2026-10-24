@@ -28,6 +28,11 @@ struct InboxSnapshot: Sendable {
 final class InboxService {
 
     private let connection: ConnectionManager
+    /// Several views poll the inbox on their own cadence. A short-lived cache
+    /// lets them share one read instead of three HTTP requests each.
+    private var cachedSnapshot: InboxSnapshot?
+    private var cachedSnapshotDate: Date?
+    private weak var cachedSnapshotClient: OpenCodeClient?
     private var formsClient: OpenCodeClient?
     private var globalFormsByDirectory: [String: [OCFormRequest]] = [:]
     private var formsLoadTask: Task<InboxLoadResult<[OCFormRequest]>, Never>?
@@ -40,9 +45,16 @@ final class InboxService {
         self.connection = connection
     }
 
-    func loadInbox() async throws -> InboxSnapshot {
+    func loadInbox(maxAge: TimeInterval = 0) async throws -> InboxSnapshot {
         if ScreenshotFixtures.isEnabled {
             return ScreenshotFixtures.inboxSnapshot
+        }
+
+        if maxAge > 0,
+           let cachedSnapshot, let cachedSnapshotDate,
+           cachedSnapshotClient === connection.client, connection.client != nil,
+           Date().timeIntervalSince(cachedSnapshotDate) < maxAge {
+            return cachedSnapshot
         }
 
         guard let client = connection.client else {
@@ -80,12 +92,21 @@ final class InboxService {
             )
         }
 
-        return InboxSnapshot(
+        let snapshot = InboxSnapshot(
             permissions: permissions,
             questions: questions,
             forms: forms,
             warning: errors.isEmpty ? nil : errors.joined(separator: "\n")
         )
+        cachedSnapshot = snapshot
+        cachedSnapshotDate = Date()
+        cachedSnapshotClient = client
+        return snapshot
+    }
+
+    private func invalidateCachedSnapshot() {
+        cachedSnapshot = nil
+        cachedSnapshotDate = nil
     }
 
     private func loadPermissions(using client: OpenCodeClient) async -> InboxLoadResult<[OCPermissionRequest]> {
@@ -247,6 +268,7 @@ final class InboxService {
             requestID: permission.id,
             reply: reply
         )
+        invalidateCachedSnapshot()
     }
 
     func respondToQuestion(requestID: String, answers: [[String]]) async throws {
@@ -259,6 +281,7 @@ final class InboxService {
         }
 
         let _ = try await client.replyToQuestion(requestID: requestID, answers: answers)
+        invalidateCachedSnapshot()
     }
 
     func rejectQuestion(requestID: String) async throws {
@@ -271,6 +294,7 @@ final class InboxService {
         }
 
         let _ = try await client.rejectQuestion(requestID: requestID)
+        invalidateCachedSnapshot()
     }
 
     func respondToForm(_ form: OCFormRequest, answer: [String: OCFormValue]) async throws {
@@ -304,6 +328,7 @@ final class InboxService {
 
     private func resolvedForm(_ form: OCFormRequest, using client: OpenCodeClient) {
         guard connection.client === client else { return }
+        invalidateCachedSnapshot()
         formsRevision &+= 1
         formsLoadTask = nil
         formsLoadDirectory = nil

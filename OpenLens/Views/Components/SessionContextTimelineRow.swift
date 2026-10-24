@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// A compact contextual record with locally owned disclosure state. Results
 /// remain selectable in place, without creating another navigation destination.
@@ -7,6 +8,12 @@ struct SessionContextTimelineRow: View {
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(\.colorScheme) private var colorScheme
     @State private var isExpanded = false
+    @State private var selectableDetails: SelectableDetails?
+
+    private struct SelectableDetails: Identifiable {
+        let id = UUID()
+        let text: String
+    }
 
     init(entry: SessionContextEntry, initiallyExpanded: Bool = false) {
         self.entry = entry
@@ -19,12 +26,29 @@ struct SessionContextTimelineRow: View {
                 label
             } else {
                 DisclosureGroup(isExpanded: $isExpanded) {
-                    Text(entry.details)
+                    // Same rule as message bubbles: per-Text selection fights
+                    // scrolling, so copying goes through a menu and a sheet.
+                    LinkedPlainText(text: entry.details, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
                         .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
                         .foregroundStyle(ink)
-                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 6)
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contextMenu {
+                            Button {
+                                UIPasteboard.general.string = entry.details
+                            } label: {
+                                Label(AppText.copyMessage, systemImage: "doc.on.doc")
+                            }
+                            Button {
+                                selectableDetails = SelectableDetails(text: entry.details)
+                            } label: {
+                                Label("Select Text", systemImage: "text.cursor")
+                            }
+                        }
+                        .sheet(item: $selectableDetails) { item in
+                            SelectableTextSheet(text: item.text)
+                        }
                 } label: {
                     label
                 }

@@ -1110,7 +1110,7 @@ struct MicroRootView: View {
 
         async let sessionsTask = sessionsService.listSessions()
         async let statusesTask = sessionsService.getSessionStatuses()
-        async let inboxTask = inboxService.loadInbox()
+        async let inboxTask = inboxService.loadInbox(maxAge: 3)
 
         do {
             let loadedSessions = try await sessionsTask

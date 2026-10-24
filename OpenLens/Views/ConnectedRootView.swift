@@ -110,7 +110,7 @@ struct ConnectedRootView: View {
             // where the Inbox lives, so nothing waits unnoticed.
             guard inboxRefreshKey.isActive else { return }
             while !Task.isCancelled {
-                if let snapshot = try? await inboxService.loadInbox() {
+                if let snapshot = try? await inboxService.loadInbox(maxAge: 5) {
                     inboxPendingCount = snapshot.pendingRequestCount
                 }
                 try? await Task.sleep(for: .seconds(20))

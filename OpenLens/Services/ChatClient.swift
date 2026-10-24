@@ -1073,6 +1073,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// notifications while that authoritative refresh is in flight.
     @ObservationIgnored private var streamSynchronizationTask: Task<Void, Never>?
     @ObservationIgnored private var preparedSessionID: String?
+    @ObservationIgnored private var composerDraftsBySessionID: [String: String] = [:]
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
@@ -1731,10 +1732,16 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// of flashing the previous session's messages on the first frame.
     func prepareForOpeningSession(_ session: OCSession) {
         guard !isDemoMode, !isRecordedReplayMode, currentSession?.id != session.id else { return }
+        // A half-typed prompt belongs to the session it was typed in. Park it
+        // and bring back whatever was drafted for the session being opened.
+        if let previousID = currentSession?.id {
+            composerDraftsBySessionID[previousID] = inputText
+        }
         composerAttachments = []
         resetSessionState()
         isStreamSynchronized = cachedSessionTranscripts[session.id] != nil
         currentSession = session
+        inputText = composerDraftsBySessionID[session.id] ?? ""
         preparedSessionID = session.id
         if let cached = cachedSessionTranscripts[session.id] {
             preserveTurnFileChanges(in: cached.messages)
