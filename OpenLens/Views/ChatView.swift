@@ -2815,9 +2815,11 @@ private struct ChatMessagesListView: View {
                     await chatClient.refreshCurrentSessionFromServer()
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .onTapGesture {
+                // Simultaneous so this never delays or swallows a bubble's
+                // long-press or a link tap inside the list.
+                .simultaneousGesture(TapGesture().onEnded {
                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                }
+                })
 
                 if showsScrollToBottomButton {
                     Button {

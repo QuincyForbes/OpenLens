@@ -773,11 +773,8 @@ private struct MarkdownCodeBlockView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemGray6))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .contextMenu {
-            Button(AppText.copyCode) {
-                UIPasteboard.general.string = chunks.joined()
-            }
-        }
+        // The header Copy button replaced the nested long-press menu, which
+        // hijacked the bubble's menu whenever the finger landed on a code block.
     }
 }
 

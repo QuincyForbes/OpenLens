@@ -71,10 +71,12 @@ struct MessageBubbleView: View {
 
     /// Deliberately called only from the Copy action. This is allowed to join
     /// a full response; doing it during every SwiftUI body update is not.
+    /// Timeline rows show one segment each, but Copy always means the whole
+    /// reply: copying a single paragraph or tool line surprised people.
     private func assistantCopyableText() -> String {
         var lines: [String] = []
 
-        for segment in visibleAssistantSegments {
+        for segment in message.assistantSegments {
             switch segment.kind {
             case .text(let text):
                 appendCopyable(segment.streamingText?.copyText() ?? text, to: &lines)
@@ -116,21 +118,31 @@ struct MessageBubbleView: View {
     }
 
     var body: some View {
+        // The long-press menu belongs to the bubble, not the full-width row:
+        // attaching it to the HStack made the highlight and preview cover the
+        // empty spacer area and look broken. A streaming bubble changes under
+        // the finger and would dismiss the menu, so it waits until finished.
         HStack(alignment: .bottom, spacing: isRetroChat ? 6 : 8) {
             if message.role == .user {
                 Spacer(minLength: isRetroChat ? 42 : 64)
                 userBubble
+                    .messageCopyActions(
+                        canCopy: canCopyText && !message.isStreaming,
+                        makeText: makeCopyText,
+                        onReuseInComposer: onReuseInComposer,
+                        onUndo: onUndo
+                    )
             } else {
                 assistantBubble
+                    .messageCopyActions(
+                        canCopy: canCopyText && !message.isStreaming,
+                        makeText: makeCopyText,
+                        onReuseInComposer: onReuseInComposer,
+                        onUndo: onUndo
+                    )
                 Spacer(minLength: isRetroChat ? 24 : 32)
             }
         }
-        .messageCopyActions(
-            canCopy: canCopyText,
-            makeText: makeCopyText,
-            onReuseInComposer: onReuseInComposer,
-            onUndo: onUndo
-        )
     }
 
     // MARK: - User Bubble
@@ -1461,6 +1473,7 @@ private struct MessageCopyActions: ViewModifier {
             content
                 // Per-Text selection competes with this long-press menu and
                 // with scrolling. Selection lives in a dedicated sheet instead.
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .contextMenu {
                     Button {
                         UIPasteboard.general.string = makeText()
