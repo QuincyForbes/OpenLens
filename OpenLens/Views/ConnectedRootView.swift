@@ -56,7 +56,11 @@ struct ConnectedRootView: View {
             PermissionRequestSheet(
                 permission: permission,
                 selectedDetent: $permissionSheetDetent,
-                initiallyConfirmsAllowAll: ScreenshotFixtures.opensPermissionAllowAllConfirmation
+                initiallyConfirmsAllowAll: ScreenshotFixtures.opensPermissionAllowAllConfirmation,
+                onDefer: {
+                    // Keep the request pending on the server; just stop blocking the app.
+                    chatClient.showPermissionAlert = false
+                }
             ) { reply in
                 await chatClient.respondToPermission(requestID: permission.id, reply: reply)
             }
@@ -157,6 +161,7 @@ struct ConnectedRootView: View {
     }
 
     private func selectChatSession(_ session: OCSession) {
+        chatClient.prepareForOpeningSession(session)
         router.selectChatSession(session)
     }
 
@@ -264,6 +269,7 @@ private struct ConnectedSidebarLayout: View {
     }
 
     private func selectChatSession(_ session: OCSession) {
+        chatClient.prepareForOpeningSession(session)
         router.selectChatSession(session)
     }
 
@@ -343,7 +349,7 @@ private struct SessionChatDestinationView: View {
             .background(Color.appBackground)
             .toolbar(.visible, for: .navigationBar)
             .task(id: session.id) {
-                if chatClient.currentSession?.id != session.id {
+                if chatClient.needsSessionLoad(session) {
                     await chatClient.loadSession(session)
                 } else {
                     await chatClient.restoreProjectContext(for: session)

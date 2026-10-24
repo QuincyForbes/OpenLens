@@ -83,6 +83,33 @@ struct ChatView: View {
             .environment(\.chatSkillIDs, availableSkills.map(\.id))
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
+            if let permission = chatClient.pendingPermission, !chatClient.showPermissionAlert {
+                Button {
+                    chatClient.showPermissionAlert = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
+                        Text(permission.title?.nilIfBlank ?? permission.toolDisplayName?.nilIfBlank ?? AppText.permissionRequired)
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
+                            .foregroundStyle(primaryTextColor)
+                            .lineLimit(1)
+                        Spacer()
+                        Text("Review")
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .semibold))
+                            .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background((isRetroChat ? RetroChatStyle.danger : Color.appWarning).opacity(0.10))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Permission required. Tap to review.")
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if let error = chatClient.presentedError {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -1516,6 +1543,7 @@ struct PermissionRequestSheet: View {
     let permission: OCPermissionRequest
     @Binding var selectedDetent: PresentationDetent
     private let initiallyConfirmsAllowAll: Bool
+    private let onDefer: (() -> Void)?
     let onRespond: (OCPermissionReply) async -> Bool
 
     @State private var pendingReply: OCPermissionReply?
@@ -1525,6 +1553,7 @@ struct PermissionRequestSheet: View {
         permission: OCPermissionRequest,
         selectedDetent: Binding<PresentationDetent>,
         initiallyConfirmsAllowAll: Bool = false,
+        onDefer: (() -> Void)? = nil,
         onRespond: @escaping (OCPermissionReply) async -> Bool
     ) {
         let safePermission = Self.safeDisplayPermission(permission)
@@ -1533,6 +1562,7 @@ struct PermissionRequestSheet: View {
         self.permission = safePermission
         self._selectedDetent = selectedDetent
         self.initiallyConfirmsAllowAll = initiallyConfirmsAllowAll && canOfferAllowAll
+        self.onDefer = onDefer
         self.onRespond = onRespond
         self._confirmsAllowAll = State(initialValue: initiallyConfirmsAllowAll && canOfferAllowAll)
     }
@@ -1925,6 +1955,19 @@ struct PermissionRequestSheet: View {
                         selectedDetent = Self.allowAllDetent(for: permission)
                     }
                 }
+            }
+
+            if let onDefer {
+                Button(action: onDefer) {
+                    Text("Decide Later")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.appSecondary)
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isResponding)
+                .accessibilityHint("Keeps the request pending and lets you use the rest of the app")
             }
         }
         .padding(.top, 2)
@@ -2641,6 +2684,12 @@ private struct ChatMessagesListView: View {
     private let settledBottomTolerance: CGFloat = 8
     private let scrollToBottomVisibilityThreshold: CGFloat = 56
 
+    init(chatClient: ChatClient) {
+        self._chatClient = Bindable(wrappedValue: chatClient)
+        let showsThinking = UserDefaults.standard.object(forKey: "showThinking") as? Bool ?? true
+        self._timelineItems = State(initialValue: chatClient.timelineItems(showsThinking: showsThinking))
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
@@ -2731,19 +2780,6 @@ private struct ChatMessagesListView: View {
                 }
                 .onChange(of: chatClient.scrollAnchor) {
                     requestForcedScrollToBottom(using: proxy)
-                }
-                .onChange(of: timelineItems.isEmpty, initial: true) { wasEmpty, isEmpty in
-                    if wasEmpty && !isEmpty && followLatest {
-                        DispatchQueue.main.async {
-                            requestForcedScrollToBottom(using: proxy)
-                        }
-                    }
-                }
-                .onChange(of: chatClient.currentSession?.id) { _, _ in
-                    followLatest = true
-                    DispatchQueue.main.async {
-                        requestForcedScrollToBottom(using: proxy)
-                    }
                 }
                 .refreshable {
                     guard !chatClient.isOfflinePreviewMode else { return }

@@ -153,14 +153,23 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Install one canonical snapshot atomically with respect to presentation.
     /// Live assistant reconciliation still runs through the existing message setter.
     func replaceTranscript(_ transcript: SessionTranscript) {
-        activeContextTranscriptRevision &+= 1
         olderTranscriptCursor = transcript.olderCursor
-        contextEntries = transcript.contextEntries
-        transcriptEntryOrder = transcript.entryOrder
-        messages = transcript.messages
         if let sessionID = currentSession?.id, !isOfflinePreviewMode {
             cacheSessionTranscript(transcript, for: sessionID)
         }
+        let messagesUnchanged = messages.count == transcript.messages.count
+            && zip(messages, transcript.messages).allSatisfy { $0 === $1 }
+        let contextsUnchanged = contextEntries.count == transcript.contextEntries.count
+            && zip(contextEntries, transcript.contextEntries).allSatisfy {
+                $0.id == $1.id && $0.title == $1.title && $0.summary == $1.summary && $0.details == $1.details
+            }
+        if messagesUnchanged && contextsUnchanged && transcriptEntryOrder == transcript.entryOrder {
+            return
+        }
+        activeContextTranscriptRevision &+= 1
+        contextEntries = transcript.contextEntries
+        transcriptEntryOrder = transcript.entryOrder
+        messages = transcript.messages
     }
 
     private func cacheSessionTranscript(_ transcript: SessionTranscript, for sessionID: String) {
@@ -1063,6 +1072,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// reconciled against the session and transcript endpoints. Coalesce gap
     /// notifications while that authoritative refresh is in flight.
     @ObservationIgnored private var streamSynchronizationTask: Task<Void, Never>?
+    @ObservationIgnored private var preparedSessionID: String?
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
@@ -1716,6 +1726,28 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
     }
 
+    /// Prepares `ChatClient` synchronously before `NavigationStack` pushes `ChatView`
+    /// so Frame 0 already has `session` (and any cached transcript) installed instead
+    /// of flashing the previous session's messages on the first frame.
+    func prepareForOpeningSession(_ session: OCSession) {
+        guard !isDemoMode, !isRecordedReplayMode, currentSession?.id != session.id else { return }
+        composerAttachments = []
+        resetSessionState()
+        isStreamSynchronized = cachedSessionTranscripts[session.id] != nil
+        currentSession = session
+        preparedSessionID = session.id
+        if let cached = cachedSessionTranscripts[session.id] {
+            preserveTurnFileChanges(in: cached.messages)
+            replaceTranscript(cached)
+        }
+    }
+
+    /// True when the destination view must run the authoritative load: either
+    /// the session is not the current one, or it was only prepared on frame 0.
+    func needsSessionLoad(_ session: OCSession) -> Bool {
+        currentSession?.id != session.id || preparedSessionID == session.id
+    }
+
     func loadSession(_ session: OCSession) async {
         if isDemoMode {
             resetSessionState()
@@ -1758,17 +1790,12 @@ final class ChatClient: SSEEventHandlerDelegate {
         var session = session
         let token = UUID()
         sessionLoadToken = token
-        let reopeningCurrentSession = usesV2SessionAPI && currentSession?.id == session.id
-        if !reopeningCurrentSession {
-            if currentSession?.id != session.id {
-                composerAttachments = []
-            }
-            resetSessionState()
-            currentSession = session
-            if let cached = cachedSessionTranscripts[session.id] {
-                preserveTurnFileChanges(in: cached.messages)
-                replaceTranscript(cached)
-            }
+        let wasAlreadyPreparedForSession = preparedSessionID == session.id && currentSession?.id == session.id
+        preparedSessionID = nil
+        let reopeningCurrentSession = usesV2SessionAPI && currentSession?.id == session.id && !wasAlreadyPreparedForSession
+        if !reopeningCurrentSession && !wasAlreadyPreparedForSession {
+            prepareForOpeningSession(session)
+            preparedSessionID = nil
         }
         let generation = streamSynchronizationGeneration
         let revision = connection?.projectContextRevision
@@ -4763,7 +4790,10 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     @discardableResult
     func respondToPermission(requestID: String, reply: OCPermissionReply) async -> Bool {
-        guard sessionLocationState == .ready else { return false }
+        guard sessionLocationState == .ready else {
+            errorMessage = "Failed to respond to permission: The session is still rebinding its location. Try again in a moment."
+            return false
+        }
         guard let questionService else {
             errorMessage = "Failed to respond to permission: Not connected."
             return false
