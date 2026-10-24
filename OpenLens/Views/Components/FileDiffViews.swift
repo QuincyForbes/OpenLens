@@ -132,11 +132,11 @@ struct FileDiffDetailView: View {
                                 Label("Copy New File Content", systemImage: "doc.text")
                             }
                         }
-                        if let patch = file.patch, !patch.isEmpty {
+                        if let beforeText = file.beforeText, !beforeText.isEmpty {
                             Button {
-                                UIPasteboard.general.string = patch
+                                UIPasteboard.general.string = beforeText
                             } label: {
-                                Label("Copy Patch Diff", systemImage: "plus.forwardslash.minus")
+                                Label("Copy Original Content", systemImage: "clock.arrow.circlepath")
                             }
                         }
                     } label: {
