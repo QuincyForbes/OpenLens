@@ -1515,6 +1515,11 @@ private struct MessageCopyActions: ViewModifier {
                             Label("Undo Turn", systemImage: "arrow.uturn.backward")
                         }
                     }
+                } preview: {
+                    // A dedicated preview is stable: iOS no longer snapshots the
+                    // live, transparent, multi-Text row, which produced the
+                    // flickering highlight and the oddly shaped card.
+                    MessagePreviewCard(text: makeText() ?? "")
                 }
                 .sheet(item: $selectableText) { item in
                     SelectableTextSheet(text: item.text)
@@ -1522,6 +1527,30 @@ private struct MessageCopyActions: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// Bounded card shown while the long-press menu is open. Shows enough of the
+/// message to confirm which one was pressed without laying out a huge reply.
+private struct MessagePreviewCard: View {
+    let text: String
+
+    private var snippet: String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let end = trimmed.index(trimmed.startIndex, offsetBy: 600, limitedBy: trimmed.endIndex) ?? trimmed.endIndex
+        return end == trimmed.endIndex ? trimmed : String(trimmed[..<end]) + "…"
+    }
+
+    var body: some View {
+        Text(snippet.isEmpty ? " " : snippet)
+            .font(.system(size: 15))
+            .foregroundStyle(Color.appPrimary)
+            .lineLimit(14)
+            .multilineTextAlignment(.leading)
+            .padding(16)
+            .frame(maxWidth: 340, alignment: .leading)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

@@ -2879,27 +2879,53 @@ private struct ChatMessagesListView: View {
         case .context(let entry):
             SessionContextTimelineRow(entry: entry, initiallyExpanded: ScreenshotFixtures.expandsContextDetails)
         case .message(let message):
-            MessageBubbleView(
-                message: message,
-                submissionState: message.role == .user
-                    ? chatClient.promptSubmissionState(forMessageID: message.id)
-                    : nil,
-                onReuseInComposer: chatClient.canCompose ? { text in
-                    chatClient.inputText = text
-                } : nil,
-                onUndo: chatClient.canUndo(message) ? {
-                    Task { await chatClient.undo(message) }
-                } : nil
-            )
+            VStack(alignment: .leading, spacing: 4) {
+                MessageBubbleView(
+                    message: message,
+                    submissionState: message.role == .user
+                        ? chatClient.promptSubmissionState(forMessageID: message.id)
+                        : nil,
+                    onReuseInComposer: chatClient.canCompose ? { text in
+                        chatClient.inputText = text
+                    } : nil,
+                    onUndo: chatClient.canUndo(message) ? {
+                        Task { await chatClient.undo(message) }
+                    } : nil
+                )
+                if message.role == .assistant, !message.isStreaming, !message.content.isEmpty {
+                    MessageActionsBar(
+                        message: message,
+                        isRetroChat: isRetroChat,
+                        onReuseInComposer: chatClient.canCompose ? { text in
+                            chatClient.inputText = text
+                        } : nil
+                    )
+                }
+            }
         case .assistantSegment(let message, let segment):
-            AssistantSegmentTimelineRow(
-                message: message,
-                segmentID: segment.id,
-                animatesSubagentStatus: item.animatesSubagentStatus,
-                onReuseInComposer: chatClient.canCompose ? { text in
-                    chatClient.inputText = text
-                } : nil
-            )
+            VStack(alignment: .leading, spacing: 4) {
+                AssistantSegmentTimelineRow(
+                    message: message,
+                    segmentID: segment.id,
+                    animatesSubagentStatus: item.animatesSubagentStatus,
+                    onReuseInComposer: chatClient.canCompose ? { text in
+                        chatClient.inputText = text
+                    } : nil
+                )
+                // One always-visible action row under the finished reply, so
+                // copy and share never depend on a long-press landing right.
+                if !message.isStreaming,
+                   message.assistantSegments.last?.id == segment.id,
+                   !message.content.isEmpty {
+                    MessageActionsBar(
+                        message: message,
+                        isRetroChat: isRetroChat,
+                        onReuseInComposer: chatClient.canCompose ? { text in
+                            chatClient.inputText = text
+                        } : nil
+                    )
+                }
+            }
         case .streamingAssistantText(let message, let projection):
             MessageBubbleView(
                 message: message,
@@ -3218,6 +3244,81 @@ private struct QueuedPromptBubbleView: View {
 
     private var isRetroChat: Bool {
         chatEasterEgg.visualMode.isRetro
+    }
+}
+
+/// Compact icon row under a finished assistant reply: copy, share, select,
+/// reuse. Uses the materialized `content` so it never joins chunks on main.
+private struct MessageActionsBar: View {
+    let message: ChatMessage
+    let isRetroChat: Bool
+    let onReuseInComposer: ((String) -> Void)?
+
+    private struct SelectableText: Identifiable {
+        let id = UUID()
+        let text: String
+    }
+
+    @State private var didCopy = false
+    @State private var selectableText: SelectableText?
+
+    private var tint: Color {
+        isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            actionButton(
+                systemImage: didCopy ? "checkmark" : "doc.on.doc",
+                label: didCopy ? "Copied" : AppText.copyMessage,
+                tint: didCopy ? .green : tint
+            ) {
+                UIPasteboard.general.string = message.content
+                didCopy = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(1.4))
+                    didCopy = false
+                }
+            }
+
+            ShareLink(item: message.content) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(tint)
+                    .frame(width: 32, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share message")
+
+            actionButton(systemImage: "text.cursor", label: "Select Text", tint: tint) {
+                selectableText = SelectableText(text: message.content)
+            }
+
+            if let onReuseInComposer {
+                actionButton(systemImage: "arrow.up.doc", label: "Reuse in Composer", tint: tint) {
+                    onReuseInComposer(message.content)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, isRetroChat ? 8 : 2)
+        .sheet(item: $selectableText) { item in
+            SelectableTextSheet(text: item.text)
+        }
+    }
+
+    private func actionButton(systemImage: String, label: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 32, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }
 

@@ -220,7 +220,7 @@ struct MarkdownContentView: View {
         } else {
             return nil
         }
-        return applyingDetectedLinks(to: attributed)
+        return applyingDetectedLinks(to: attributed, linkColor: Color.appAccent)
     }
 
     private static let linkDetector = try? NSDataDetector(
@@ -238,30 +238,39 @@ struct MarkdownContentView: View {
 
     /// Plain prose (no Markdown) with bare URLs made tappable, or nil when the
     /// text has no link so callers can keep their cheap `Text(String)` path.
+    /// `underlined` without a color is for text on the accent fill (user
+    /// bubbles), where recoloring would make the link unreadable.
     static func linkedPlainText(_ text: String, underlined: Bool = false) -> AttributedString? {
         guard containsLinkCandidate(text) else { return nil }
-        var result = applyingDetectedLinks(to: AttributedString(text))
-        if underlined {
-            for run in result.runs where run.link != nil {
-                result[run.range].underlineStyle = .single
-            }
-        }
-        return result
+        return applyingDetectedLinks(
+            to: AttributedString(text),
+            linkColor: underlined ? nil : Color.appAccent
+        )
     }
 
     /// Bare URLs in prose become tappable. Markdown links already carry a
-    /// `.link` attribute and are left alone. Runs on `parserQueue`, never main.
-    private static func applyingDetectedLinks(to attributed: AttributedString) -> AttributedString {
+    /// `.link` attribute and only get styled. The bubble's `foregroundStyle`
+    /// would otherwise paint links the same as body text, so the run itself
+    /// carries the color and underline. Runs on `parserQueue`, never main.
+    private static func applyingDetectedLinks(to attributed: AttributedString, linkColor: Color?) -> AttributedString {
         var result = attributed
-        guard let linkDetector else { return result }
-        let plain = String(result.characters)
-        guard containsLinkCandidate(plain) else { return result }
-        let matches = linkDetector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain))
-        for match in matches {
-            guard let url = match.url,
-                  let range = Range(match.range, in: result),
-                  result[range].link == nil else { continue }
-            result[range].link = url
+        if let linkDetector {
+            let plain = String(result.characters)
+            if containsLinkCandidate(plain) {
+                let matches = linkDetector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain))
+                for match in matches {
+                    guard let url = match.url,
+                          let range = Range(match.range, in: result),
+                          result[range].link == nil else { continue }
+                    result[range].link = url
+                }
+            }
+        }
+        for run in result.runs where run.link != nil {
+            result[run.range].underlineStyle = .single
+            if let linkColor {
+                result[run.range].foregroundColor = linkColor
+            }
         }
         return result
     }
