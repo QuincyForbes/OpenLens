@@ -9,6 +9,14 @@ struct SessionsListView: View {
         case sidebar
     }
 
+    enum SessionFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case running = "Running"
+        case unread = "Unread"
+
+        var id: String { rawValue }
+    }
+
     private struct NewSessionRequest: Identifiable {
         let id = UUID()
     }
@@ -60,6 +68,7 @@ struct SessionsListView: View {
     @State private var renameTitleText = ""
     @State private var showRenameAlert = false
     @State private var searchQuery = ""
+    @State private var sessionFilter: SessionFilter = .all
     @State private var isOnScreen = true
     @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
@@ -118,7 +127,18 @@ struct SessionsListView: View {
     }
 
     private var isSearching: Bool {
-        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sessionFilter != .all
+    }
+
+    private var runningSessionCount: Int {
+        sessions.filter { sessionStatuses[$0.id]?.type == .busy || sessionStatuses[$0.id]?.type == .retry }.count
+    }
+
+    private var unreadSessionCount: Int {
+        sessions.filter { session in
+            let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
+            return !isBusy && session.hasUnreadResult
+        }.count
     }
 
     private struct PollTaskKey: Equatable {
@@ -138,6 +158,15 @@ struct SessionsListView: View {
         let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
         for session in sessions {
+            let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
+            switch sessionFilter {
+            case .all:
+                break
+            case .running:
+                guard isBusy else { continue }
+            case .unread:
+                guard !isBusy && session.hasUnreadResult else { continue }
+            }
             let groupTitle = projectTitle(for: session)
             if !trimmedQuery.isEmpty {
                 let matchesTitle = session.title.localizedCaseInsensitiveContains(trimmedQuery)
@@ -300,6 +329,10 @@ struct SessionsListView: View {
     private var sessionList: some View {
         ScrollView {
             LazyVStack(spacing: isSidebar ? 12 : 18) {
+                if runningSessionCount > 0 || unreadSessionCount > 0 || sessionFilter != .all {
+                    sessionFilterBar
+                }
+
                 ForEach(groupedSessions) { group in
                     projectSection(group)
                 }
@@ -310,6 +343,48 @@ struct SessionsListView: View {
         }
         .refreshable {
             await loadSessions()
+        }
+    }
+
+    private var sessionFilterBar: some View {
+        HStack(spacing: 8) {
+            ForEach(SessionFilter.allCases) { filter in
+                let isSelected = sessionFilter == filter
+                let count: Int? = switch filter {
+                case .all: nil
+                case .running: runningSessionCount > 0 ? runningSessionCount : nil
+                case .unread: unreadSessionCount > 0 ? unreadSessionCount : nil
+                }
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        sessionFilter = filter
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(filter.rawValue)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        if let count {
+                            Text("\(count)")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(
+                                    isSelected ? Color.white.opacity(0.22) : Color.appAccent.opacity(0.16),
+                                    in: Capsule()
+                                )
+                        }
+                    }
+                    .foregroundStyle(isSelected ? Color.appOnAccent : Color.appSecondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        isSelected ? Color.appAccent : Color.appTertiary,
+                        in: Capsule()
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
         }
     }
 

@@ -118,6 +118,32 @@ struct FileDiffDetailView: View {
             .navigationTitle(fileTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Button {
+                            UIPasteboard.general.string = file.path
+                        } label: {
+                            Label("Copy File Path", systemImage: "doc.on.doc")
+                        }
+                        if let afterText = file.afterText, !afterText.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = afterText
+                            } label: {
+                                Label("Copy New File Content", systemImage: "doc.text")
+                            }
+                        }
+                        if let patch = file.patch, !patch.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = patch
+                            } label: {
+                                Label("Copy Patch Diff", systemImage: "plus.forwardslash.minus")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("Diff actions")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
                         dismiss()

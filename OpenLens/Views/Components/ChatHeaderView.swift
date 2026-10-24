@@ -10,6 +10,11 @@ struct ChatHeaderToolbar: ToolbarContent {
     let isRecordingStream: Bool
     let visualMode: ChatVisualMode
     let onToggleRecording: (() -> Void)?
+    var onShowInsights: (() -> Void)? = nil
+    var onShowContext: (() -> Void)? = nil
+    var onRenameSession: (() -> Void)? = nil
+    var onSyncSession: (() -> Void)? = nil
+    var onScrollToBottom: (() -> Void)? = nil
 
     private var statusColor: Color {
         if visualMode.isRetro {
@@ -122,6 +127,42 @@ struct ChatHeaderToolbar: ToolbarContent {
                 }
                 .accessibilityLabel(recordingLabel)
                 .accessibilityHint(statusText)
+            }
+        } else if onShowInsights != nil || onShowContext != nil || onRenameSession != nil || onSyncSession != nil {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if let onShowInsights {
+                        Button(action: onShowInsights) {
+                            Label("Session Insights", systemImage: "chart.bar.xaxis")
+                        }
+                    }
+                    if let onShowContext {
+                        Button(action: onShowContext) {
+                            Label("Inspect Context", systemImage: "text.bubble")
+                        }
+                    }
+                    if let onRenameSession {
+                        Button(action: onRenameSession) {
+                            Label("Rename Session", systemImage: "pencil")
+                        }
+                    }
+                    Divider()
+                    if let onSyncSession {
+                        Button(action: onSyncSession) {
+                            Label("Sync Session", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    if let onScrollToBottom {
+                        Button(action: onScrollToBottom) {
+                            Label("Jump to Latest", systemImage: "arrow.down.to.line")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
+                }
+                .accessibilityLabel("Session actions")
             }
         }
     }

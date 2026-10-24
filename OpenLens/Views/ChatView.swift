@@ -22,12 +22,16 @@ struct ChatView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.connection) private var connection
+    @Environment(\.sessionsService) private var sessionsService
     @Environment(\.workspaceService) private var workspaceService
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @AppStorage(FeatureFlags.debugFeaturesKey) private var debugFeaturesEnabled: Bool = FeatureFlags.debugFeaturesDefault
 
     @State private var showModelPicker = false
     @State private var showContextStatus = false
+    @State private var showSessionInsights = false
+    @State private var showRenameSessionAlert = false
+    @State private var renameSessionDraft = ""
     @State private var showTodoList = false
     @State private var availableSlashActions: [WorkspaceSlashActionItem] = []
     @State private var selectedSlashAction: WorkspaceSlashActionItem?
@@ -145,7 +149,23 @@ struct ChatView: View {
                     } else {
                         chatClient.startStreamRecording()
                     }
-                }
+                },
+                onShowInsights: chatClient.currentSession != nil ? {
+                    showSessionInsights = true
+                } : nil,
+                onShowContext: (chatClient.showsActiveContext || chatClient.contextUsageSummary != nil) ? {
+                    showContextStatus = true
+                } : nil,
+                onRenameSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
+                    renameSessionDraft = chatClient.currentSession?.title ?? ""
+                    showRenameSessionAlert = true
+                } : nil,
+                onSyncSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
+                    Task { await chatClient.refreshCurrentSessionFromServer() }
+                } : nil,
+                onScrollToBottom: !chatClient.displayedMessages.isEmpty ? {
+                    chatClient.scrollAnchor &+= 1
+                } : nil
             )
         }
         .onAppear {
@@ -220,6 +240,35 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showModelPicker) {
             modelPickerSheet
+        }
+        .sheet(isPresented: $showSessionInsights) {
+            NavigationStack {
+                InsightsRootView(chatClient: chatClient, sessionID: chatClient.currentSession?.id)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button(AppText.done) {
+                                showSessionInsights = false
+                            }
+                        }
+                    }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(Color.appBackground)
+        }
+        .alert("Rename Session", isPresented: $showRenameSessionAlert) {
+            TextField("Session title", text: $renameSessionDraft)
+            Button("Save") {
+                let trimmed = renameSessionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, let session = chatClient.currentSession, trimmed != session.title else { return }
+                Task {
+                    if let updated = try? await sessionsService.updateTitle(session: session, newTitle: trimmed),
+                       chatClient.currentSession?.id == session.id {
+                        chatClient.currentSession = updated
+                    }
+                }
+            }
+            Button(AppText.cancel, role: .cancel) {}
         }
         .sheet(isPresented: $showContextStatus) {
             if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
@@ -2683,6 +2732,19 @@ private struct ChatMessagesListView: View {
                 .onChange(of: chatClient.scrollAnchor) {
                     requestForcedScrollToBottom(using: proxy)
                 }
+                .onChange(of: timelineItems.isEmpty, initial: true) { wasEmpty, isEmpty in
+                    if wasEmpty && !isEmpty && followLatest {
+                        DispatchQueue.main.async {
+                            requestForcedScrollToBottom(using: proxy)
+                        }
+                    }
+                }
+                .onChange(of: chatClient.currentSession?.id) { _, _ in
+                    followLatest = true
+                    DispatchQueue.main.async {
+                        requestForcedScrollToBottom(using: proxy)
+                    }
+                }
                 .refreshable {
                     guard !chatClient.isOfflinePreviewMode else { return }
                     await chatClient.refreshCurrentSessionFromServer()
@@ -2815,7 +2877,11 @@ private struct ChatMessagesListView: View {
                 proxy.scrollTo(bottomAnchorID, anchor: .bottom)
             }
         } else {
-            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+            }
         }
     }
 

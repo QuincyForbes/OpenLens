@@ -112,9 +112,11 @@ struct WorkspaceRootView: View {
             selectedDiffFile = nil
             pendingWorkspaceAction = nil
         }
-        .task(id: chatClient.currentSession?.id) {
-            guard chatClient.currentSession != nil else { return }
-            await refreshWorkspace()
+        .onChange(of: chatClient.currentSession?.id) { _, newID in
+            guard newID != nil else { return }
+            Task {
+                await refreshWorkspace()
+            }
         }
         .refreshable {
             await refreshWorkspace()

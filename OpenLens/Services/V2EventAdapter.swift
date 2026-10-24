@@ -178,7 +178,7 @@ nonisolated struct V2EventAdapter {
             state["metadata"] = data["metadata"]
         case "session.tool.success", "session.tool.failed":
             state["status"] = type.hasSuffix("success") ? "completed" : "error"
-            state["content"] = data["content"]
+            state["content"] = Self.boundedToolContent(data["content"])
             state["error"] = data["error"]
             state["metadata"] = data["metadata"]
         default:
@@ -210,5 +210,22 @@ nonisolated struct V2EventAdapter {
             tools[key] = tool
         }
         return make("message.part.updated", ["part": toolPart, "preparedPart": safePart])
+    }
+
+    /// Bounds text items inside `session.tool.success` before JSON re-encoding so a
+    /// 200 KB file read does not get serialized and decoded only to be truncated to 720 bytes.
+    private static func boundedToolContent(_ rawContent: Any?) -> Any? {
+        guard let items = rawContent as? [[String: Any]] else { return rawContent }
+        let maxTextBytes = StreamToolPartSafety.maximumOutputBytes * 2
+        return items.map { item in
+            guard item["type"] as? String == "text",
+                  let text = item["text"] as? String,
+                  text.utf8.count > maxTextBytes else {
+                return item
+            }
+            var copy = item
+            copy["text"] = StreamDisplayValue.preview(text, maximumBytes: maxTextBytes)
+            return copy
+        }
     }
 }
