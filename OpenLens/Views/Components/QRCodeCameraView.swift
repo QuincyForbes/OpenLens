@@ -21,6 +21,7 @@ struct QRCodeCameraView: View {
     @State private var cameraAccess: CameraAccess = .checking
     @State private var errorMessage: String?
     @State private var hasScanned = false
+    @State private var lastRejectedCode: String?
 
     private var cameraIsActive: Bool {
         isActive && scenePhase == .active
@@ -62,6 +63,7 @@ struct QRCodeCameraView: View {
         .task(id: cameraIsActive) {
             guard cameraIsActive else { return }
             hasScanned = false
+            lastRejectedCode = nil
             await updateCameraAccess()
         }
         .task(id: errorMessage) {
@@ -69,6 +71,7 @@ struct QRCodeCameraView: View {
             do {
                 try await Task.sleep(for: .seconds(3))
                 errorMessage = nil
+                lastRejectedCode = nil
             } catch {
                 // The screen disappeared or a newer error replaced this one.
             }
@@ -107,11 +110,16 @@ struct QRCodeCameraView: View {
     }
 
     private func updateCameraAccess() async {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        switch status {
         case .authorized:
-            cameraAccess = AVCaptureDevice.default(for: .video) == nil ? .unavailable : .authorized
+            let hasDevice = await Self.hasVideoCaptureDevice()
+            guard !Task.isCancelled else { return }
+            cameraAccess = hasDevice ? .authorized : .unavailable
         case .notDetermined:
-            guard AVCaptureDevice.default(for: .video) != nil else {
+            let hasDevice = await Self.hasVideoCaptureDevice()
+            guard !Task.isCancelled else { return }
+            guard hasDevice else {
                 cameraAccess = .unavailable
                 return
             }
@@ -125,6 +133,12 @@ struct QRCodeCameraView: View {
         }
     }
 
+    private static func hasVideoCaptureDevice() async -> Bool {
+        await Task.detached(priority: .userInitiated) {
+            AVCaptureDevice.default(for: .video) != nil
+        }.value
+    }
+
     private func openCameraSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         openURL(url)
@@ -133,12 +147,15 @@ struct QRCodeCameraView: View {
     private func handleCode(_ code: String) {
         guard isActive && scenePhase == .active else { return }
         guard !hasScanned else { return }
+        guard code != lastRejectedCode else { return }
 
         guard let scannedCode = ScannedOpenLensCode(rawValue: code) else {
+            lastRejectedCode = code
             errorMessage = AppText.qrInvalid
             return
         }
 
+        lastRejectedCode = nil
         hasScanned = true
         onScanned(scannedCode)
     }
@@ -174,28 +191,34 @@ private struct CameraPreview: UIViewRepresentable {
         let session = AVCaptureSession()
         context.coordinator.session = session
 
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            return view
-        }
-
-        session.addInput(input)
-
-        let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else { return view }
-
-        session.addOutput(output)
-        output.setMetadataObjectsDelegate(context.coordinator, queue: .main)
-        output.metadataObjectTypes = [.qr]
-
         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.videoGravity = .resizeAspectFill
         view.setPreviewLayer(previewLayer)
-
         context.coordinator.previewLayer = previewLayer
 
+        let output = AVCaptureMetadataOutput()
+        output.setMetadataObjectsDelegate(context.coordinator, queue: .main)
+
         context.coordinator.captureQueue.async {
+            session.beginConfiguration()
+            if session.canSetSessionPreset(.hd1280x720) {
+                session.sessionPreset = .hd1280x720
+            }
+            guard let device = AVCaptureDevice.default(for: .video),
+                  let input = try? AVCaptureDeviceInput(device: device),
+                  session.canAddInput(input) else {
+                session.commitConfiguration()
+                return
+            }
+            session.addInput(input)
+
+            guard session.canAddOutput(output) else {
+                session.commitConfiguration()
+                return
+            }
+            session.addOutput(output)
+            output.metadataObjectTypes = [.qr]
+            session.commitConfiguration()
             session.startRunning()
         }
 

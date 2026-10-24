@@ -342,31 +342,18 @@ private struct SessionChatDestinationView: View {
     @Bindable var chatClient: ChatClient
     let session: OCSession
 
-    @State private var isReady = false
-
     var body: some View {
-        Group {
-            if isReady {
-                ChatView(chatClient: chatClient, initialSession: session)
-                    .id(session.id)
-            } else {
-                ProgressView()
-                    .tint(Color.appSecondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ChatView(chatClient: chatClient, initialSession: session)
+            .id(session.id)
+            .background(Color.appBackground)
+            .toolbar(.visible, for: .navigationBar)
+            .task(id: session.id) {
+                if chatClient.currentSession?.id != session.id {
+                    await chatClient.loadSession(session)
+                } else {
+                    await chatClient.restoreProjectContext(for: session)
+                }
             }
-        }
-        .background(Color.appBackground)
-        .toolbar(.visible, for: .navigationBar)
-        .task(id: session.id) {
-            isReady = false
-            if chatClient.currentSession?.id != session.id {
-                await chatClient.loadSession(session)
-            } else {
-                await chatClient.restoreProjectContext(for: session)
-            }
-            guard !Task.isCancelled, chatClient.currentSession?.id == session.id else { return }
-            isReady = true
-        }
     }
 }
 

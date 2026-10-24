@@ -161,12 +161,20 @@ actor OpenCodeClient {
             guard !directories.isEmpty else { return try await listSessions() }
 
             var sessionsByID: [String: OCSession] = [:]
-            for directory in directories {
-                var request = makeRequest(path: "/session", method: "GET")
-                request.setValue(directory, forHTTPHeaderField: "x-opencode-directory")
-                let (data, response) = try await transport.data(for: request)
-                try validateResponse(response, data: data)
-                let sessions: [OCSession] = try decode(data)
+            let directoryResults = try await withThrowingTaskGroup(of: (Int, [OCSession]).self) { group in
+                for (index, directory) in directories.enumerated() {
+                    group.addTask {
+                        (index, try await self.listSessions(inDirectory: directory))
+                    }
+                }
+                var collected: [(Int, [OCSession])] = []
+                collected.reserveCapacity(directories.count)
+                for try await item in group {
+                    collected.append(item)
+                }
+                return collected.sorted { $0.0 < $1.0 }
+            }
+            for (_, sessions) in directoryResults {
                 for session in sessions where sessionsByID[session.id] == nil {
                     sessionsByID[session.id] = session
                 }
@@ -180,6 +188,14 @@ actor OpenCodeClient {
             includesLocation: false,
             allowsEmptyContinuationPages: true
         )
+    }
+
+    private func listSessions(inDirectory directory: String) async throws -> [OCSession] {
+        var request = makeRequest(path: "/session", method: "GET")
+        request.setValue(directory, forHTTPHeaderField: "x-opencode-directory")
+        let (data, response) = try await transport.data(for: request)
+        try validateResponse(response, data: data)
+        return try decode(data)
     }
 
     func getSession(id: String) async throws -> OCSession {
@@ -688,9 +704,12 @@ actor OpenCodeClient {
 
     func listProviders() async throws -> OCProviderResponse {
         if usesV2 {
-            let modelsResponse: OCV2Located<[OCV2ModelInfo]> = try await getV2Located("/api/model")
-            let defaultResponse: OCV2Located<OCV2ModelInfo>? = try? await getV2Located("/api/model/default")
-            let providersResponse: OCV2Located<[OCV2ProviderInfo]>? = try? await getV2Located("/api/provider")
+            async let modelsRequest: OCV2Located<[OCV2ModelInfo]> = getV2Located("/api/model")
+            async let defaultRequest: OCV2Located<OCV2ModelInfo>? = try? getV2Located("/api/model/default")
+            async let providersRequest: OCV2Located<[OCV2ProviderInfo]>? = try? getV2Located("/api/provider")
+            let modelsResponse = try await modelsRequest
+            let defaultResponse = await defaultRequest
+            let providersResponse = await providersRequest
             let providerNames = Dictionary(
                 (providersResponse?.data ?? []).map { ($0.id, $0.name?.nilIfBlank ?? $0.id) },
                 uniquingKeysWith: { first, _ in first }
@@ -913,6 +932,31 @@ actor OpenCodeClient {
         }
 
         return try await get("/project")
+    }
+
+    /// Fetches both path and project metadata in a single `/api/location` request on v2,
+    /// or concurrently via `/path` and `/project/current` on v1.
+    func getLocationMetadata() async -> (pathInfo: OCPathInfo?, project: OCProject?) {
+        if usesV2 {
+            let revision = contextRevision
+            guard let location: OCV2LocationInfo = try? await getV2("/api/location"),
+                  !Task.isCancelled, contextRevision == revision else {
+                return (nil, nil)
+            }
+            contextDirectory = location.directory
+            let pathInfo = OCPathInfo(
+                state: nil,
+                config: nil,
+                worktree: location.project?.directory ?? location.directory,
+                directory: location.directory
+            )
+            let project = location.project.map { OCProject(id: $0.id, worktree: $0.directory) }
+            return (pathInfo, project)
+        }
+
+        async let pathTask: OCPathInfo? = try? get("/path")
+        async let projectTask: OCProject? = try? get("/project/current")
+        return await (pathTask, projectTask)
     }
 
     func getCurrentProject() async throws -> OCProject {

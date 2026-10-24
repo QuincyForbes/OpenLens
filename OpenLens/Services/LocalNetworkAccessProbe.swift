@@ -27,7 +27,8 @@ final class LocalNetworkAccessProbe: LocalNetworkAccessProbing {
     private let queue = DispatchQueue(label: "app.openlens.local-network-probe")
 
     func probe(_ url: URL) async -> LocalNetworkAccessProbeResult {
-        guard let endpoint = endpoint(for: url) else {
+        guard Self.requiresLocalNetworkProbe(for: url),
+              let endpoint = endpoint(for: url) else {
             return .continueConnection
         }
 
@@ -44,6 +45,40 @@ final class LocalNetworkAccessProbe: LocalNetworkAccessProbing {
                 coordinator.cancel()
             }
         }
+    }
+
+    /// Public internet hosts (such as `opencode pair --remote` tunnels) never trigger
+    /// the iOS Local Network permission prompt and should not pay an extra TCP handshake.
+    nonisolated static func requiresLocalNetworkProbe(for url: URL) -> Bool {
+        guard let rawHost = url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !rawHost.isEmpty else {
+            return false
+        }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host == "localhost" || host.hasSuffix(".local") || host.hasSuffix(".local.") {
+            return true
+        }
+        if host.contains(":") {
+            // IPv6 loopback, link-local (fe80::/10), or unique local (fc00::/7)
+            return host == "::1" || host.hasPrefix("fe80:") || host.hasPrefix("fc") || host.hasPrefix("fd")
+        }
+        let octets = host.split(separator: ".").compactMap { UInt8($0) }
+        if octets.count == 4 {
+            switch (octets[0], octets[1]) {
+            case (10, _),
+                 (127, _),
+                 (169, 254),
+                 (192, 168):
+                return true
+            case (172, 16...31),
+                 (100, 64...127):
+                return true
+            default:
+                return false
+            }
+        }
+        // Single-label local hostnames (no dots) use local resolution.
+        return !host.contains(".")
     }
 
     private func endpoint(for url: URL) -> NWEndpoint? {

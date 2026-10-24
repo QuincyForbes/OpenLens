@@ -125,6 +125,13 @@ struct ConnectView: View {
         .onChange(of: connection.state) { _, newState in
             connectionStateChanged(to: newState)
         }
+        .onChange(of: setupStep) { _, newStep in
+            if newStep == .manual {
+                startNearbyDiscovery()
+            } else {
+                discovery.stopBrowsing()
+            }
+        }
         .onAppear {
             guard !consumePendingDeepLinkIfNeeded() else { return }
             prefillFromMostRecentConnectionIfNeeded()
@@ -584,7 +591,7 @@ struct ConnectView: View {
         connectionStatus?.phase = .connected
         guard !isAutoReconnect else { return }
         isFinishingConnection = true
-        try? await Task.sleep(for: .seconds(1.1))
+        try? await Task.sleep(for: .milliseconds(350))
         isFinishingConnection = false
     }
 

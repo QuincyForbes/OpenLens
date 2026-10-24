@@ -13,6 +13,8 @@ final class BonjourDiscovery {
 
     private var browser: NWBrowser?
     private var stopWorkItem: DispatchWorkItem?
+    private var resolvingServiceNames = Set<String>()
+    private var resolvingConnections: [String: NWConnection] = [:]
 
     struct DiscoveredServer: Identifiable, Hashable, Sendable {
         let id: String
@@ -111,6 +113,11 @@ final class BonjourDiscovery {
         stopWorkItem = nil
         browser?.cancel()
         browser = nil
+        for connection in resolvingConnections.values {
+            connection.cancel()
+        }
+        resolvingConnections.removeAll()
+        resolvingServiceNames.removeAll()
         isSearching = false
     }
 
@@ -119,6 +126,8 @@ final class BonjourDiscovery {
             if case .service(let name, let type, let domain, _) = result.endpoint {
                 // Only care about opencode services
                 guard name.localizedCaseInsensitiveContains("opencode") else { continue }
+                guard !discoveredServers.contains(where: { $0.id == name }),
+                      resolvingServiceNames.insert(name).inserted else { continue }
 
                 // Resolve the service to get host/port
                 resolveService(name: name, type: type, domain: domain)
@@ -131,6 +140,7 @@ final class BonjourDiscovery {
             to: .service(name: name, type: type, domain: domain, interface: nil),
             using: .tcp
         )
+        resolvingConnections[name] = connection
 
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -159,6 +169,8 @@ final class BonjourDiscovery {
 
                     Task { @MainActor [weak self] in
                         guard let self else { return }
+                        self.resolvingConnections.removeValue(forKey: name)
+                        self.resolvingServiceNames.remove(name)
                         if !self.discoveredServers.contains(where: { $0.id == server.id }) {
                             self.discoveredServers.append(server)
                         }
@@ -169,6 +181,10 @@ final class BonjourDiscovery {
             case .failed, .cancelled, .waiting:
                 // Cancel the connection to prevent leaks in non-ready states
                 connection.cancel()
+                Task { @MainActor [weak self] in
+                    self?.resolvingConnections.removeValue(forKey: name)
+                    self?.resolvingServiceNames.remove(name)
+                }
 
             default:
                 break

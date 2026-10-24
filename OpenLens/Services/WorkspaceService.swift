@@ -109,15 +109,14 @@ final class WorkspaceService {
             throw OpenCodeError.notConnected
         }
 
-        let pathInfo = await tryPathInfo(client)
-        async let currentProjectTask = tryCurrentProject(client)
+        async let locationMetadata = client.getLocationMetadata()
         async let projectsTask = tryProjects(client)
         async let vcsTask = tryVCS(client)
         async let commandsTask = tryCommands(client)
         async let filesTask = tryFiles(client, path: path)
         async let workingTreeTask = tryWorkingTree(client, sessionID: sessionID)
 
-        let currentProject = await currentProjectTask
+        let (pathInfo, currentProject) = await locationMetadata
         let projects = await projectsTask
         let vcsInfo = await vcsTask
         let commands = await commandsTask
@@ -158,11 +157,10 @@ final class WorkspaceService {
             throw OpenCodeError.notConnected
         }
 
-        let pathInfo = await tryPathInfo(client)
-        async let currentProjectTask = tryCurrentProject(client)
+        async let locationMetadata = client.getLocationMetadata()
         async let projectsTask = tryProjects(client)
 
-        let currentProject = await currentProjectTask
+        let (pathInfo, currentProject) = await locationMetadata
         let projects = await projectsTask
 
         var snapshot = WorkspaceSelectionSnapshot(

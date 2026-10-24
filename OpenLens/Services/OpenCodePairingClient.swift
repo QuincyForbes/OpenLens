@@ -2,15 +2,20 @@ import Foundation
 
 /// Resolves OpenCode pairing links into reusable connection credentials.
 struct OpenCodePairingClient {
-    private let session: URLSession
-
-    init(session: URLSession? = nil) {
+    nonisolated private static let defaultSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
-        self.session = session ?? URLSession(configuration: configuration)
+        return URLSession(configuration: configuration)
+    }()
+    nonisolated private static let redirectDelegate = PairingRedirectDelegate()
+
+    private let session: URLSession
+
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.defaultSession
     }
 
     func pair(using link: OpenCodePairingLink) async throws -> DeepLinkConnection {
@@ -32,7 +37,7 @@ struct OpenCodePairingClient {
             for (url, serverURL) in zip(link.urls, link.serverURLs) {
                 group.addTask {
                     do {
-                        return .paired(try await redeem(url: url, serverURL: serverURL, timeout: 5))
+                        return .paired(try await redeem(url: url, serverURL: serverURL, timeout: 10))
                     } catch is CancellationError {
                         return .cancelled
                     } catch {
@@ -71,7 +76,7 @@ struct OpenCodePairingClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request, delegate: PairingRedirectDelegate())
+            (data, response) = try await session.data(for: request, delegate: Self.redirectDelegate)
         } catch {
             if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()

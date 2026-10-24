@@ -208,6 +208,24 @@ struct OpenLensAppConnectionStateTests {
         #expect(BonjourDiscovery.isLocalNetworkPolicyDeniedDNSCode(-65570))
         #expect(!BonjourDiscovery.isLocalNetworkPolicyDeniedDNSCode(-65569))
     }
+
+    @Test(arguments: [
+        ("http://192.168.1.50:4096", true),
+        ("http://10.0.0.12:4096", true),
+        ("http://172.16.0.4:4096", true),
+        ("http://100.64.0.3:49374", true),
+        ("http://localhost:4096", true),
+        ("http://macbook-pro.local:4096", true),
+        ("http://[fe80::1]:4096", true),
+        ("http://[fd00::1]:49374", true),
+        ("https://random-route.opentunnel.xyz", false),
+        ("https://my-tunnel.trycloudflare.com", false),
+        ("https://opencode.example.com", false),
+    ])
+    func localNetworkProbeOnlyTargetsLocalAndPrivateHosts(rawURL: String, expected: Bool) throws {
+        let url = try #require(URL(string: rawURL))
+        #expect(LocalNetworkAccessProbe.requiresLocalNetworkProbe(for: url) == expected)
+    }
 }
 
 @MainActor

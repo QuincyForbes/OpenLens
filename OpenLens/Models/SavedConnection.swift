@@ -329,13 +329,21 @@ final class SavedConnectionsStore {
     func updateProjectSelection(connectionID: String, directory: String?) {
         guard let index = connections.firstIndex(where: { $0.id == connectionID }) else { return }
         let normalizedDirectory = normalizeProjectDirectory(directory)
-        connections[index].selectedProjectDirectory = normalizedDirectory
+        let updatedRecent: [String]?
         if let normalizedDirectory {
-            connections[index].recentProjectDirectories = Self.updatedRecentProjectDirectories(
+            updatedRecent = Self.updatedRecentProjectDirectories(
                 existing: connections[index].recentProjectDirectories ?? [],
                 selected: normalizedDirectory
             )
+        } else {
+            updatedRecent = connections[index].recentProjectDirectories
         }
+        guard connections[index].selectedProjectDirectory != normalizedDirectory
+                || connections[index].recentProjectDirectories != updatedRecent else {
+            return
+        }
+        connections[index].selectedProjectDirectory = normalizedDirectory
+        connections[index].recentProjectDirectories = updatedRecent
         persist()
     }
 

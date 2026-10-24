@@ -1744,16 +1744,24 @@ final class ChatClient: SSEEventHandlerDelegate {
         currentSession = session
 
         setupSSEHandlers()
-        if providers.isEmpty {
+        let shouldLoadProviders = providers.isEmpty
+        if shouldLoadProviders, !usesV2SessionAPI {
             await loadProviders()
         }
         guard !Task.isCancelled, currentSession?.id == session.id else { return }
         restoredWorkspaceRevision = connection?.projectContextRevision
-        let didLoadMessages = await loadMessages()
-        guard !Task.isCancelled, currentSession?.id == session.id else { return }
-        let permissionRecovered = await recoverPendingPermission()
-        let questionRecovered = await recoverPendingQuestions()
-        let formRecovered = await recoverPendingForms()
+        async let providersTask: Void = (shouldLoadProviders && usesV2SessionAPI) ? loadProviders() : ()
+        async let messagesTask = loadMessages()
+        async let permissionTask = recoverPendingPermission()
+        async let questionTask = recoverPendingQuestions()
+        async let formTask = recoverPendingForms()
+        let (didLoadMessages, permissionRecovered, questionRecovered, formRecovered, _) = await (
+            messagesTask,
+            permissionTask,
+            questionTask,
+            formTask,
+            providersTask
+        )
         guard !Task.isCancelled, currentSession?.id == session.id else { return }
         isStreamSynchronized = didLoadMessages && permissionRecovered && questionRecovered && formRecovered
     }
@@ -1937,8 +1945,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             return false
         }
 
-        let statusRecovered = await refreshCurrentSessionStatus()
-        await loadTodos()
+        async let statusTask = refreshCurrentSessionStatus()
+        async let todosTask: Void = loadTodos()
+        let statusRecovered = await statusTask
+        await todosTask
         return inboxRecovered && statusRecovered && !Task.isCancelled && currentSession?.id == session.id
     }
 
@@ -2326,17 +2336,21 @@ final class ChatClient: SSEEventHandlerDelegate {
                     guard generation == self.streamSynchronizationGeneration else { continue }
                     try await self.applyRecoveredSession(session, generation: generation)
 
-                    guard await self.loadMessages(), self.currentSession?.id == sessionID else {
+                    async let messagesTask = self.loadMessages()
+                    async let permissionTask = self.recoverPendingPermission(sessionID: sessionID)
+                    async let questionTask = self.recoverPendingQuestions()
+                    async let formTask = self.recoverPendingForms()
+                    let (didLoadMessages, permissionRecovered, questionRecovered, formRecovered) = await (
+                        messagesTask,
+                        permissionTask,
+                        questionTask,
+                        formTask
+                    )
+                    guard didLoadMessages, self.currentSession?.id == sessionID else {
                         if !Task.isCancelled, generation != self.streamSynchronizationGeneration { continue }
                         break
                     }
-                    guard await self.recoverPendingPermission(sessionID: sessionID),
-                          !Task.isCancelled, self.currentSession?.id == sessionID,
-                          self.streamSynchronizationToken == token else { break }
-                    guard await self.recoverPendingQuestions(),
-                          !Task.isCancelled, self.currentSession?.id == sessionID,
-                          self.streamSynchronizationToken == token else { break }
-                    guard await self.recoverPendingForms(),
+                    guard permissionRecovered, questionRecovered, formRecovered,
                           !Task.isCancelled, self.currentSession?.id == sessionID,
                           self.streamSynchronizationToken == token else { break }
                 } catch is CancellationError {
@@ -2487,6 +2501,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
     }
 
+    private static let maximumConcurrentTurnDiffLoads = 4
+
     private func scheduleTurnDiffLoads(for candidateMessages: [ChatMessage]) {
         guard !isOfflinePreviewMode,
               let sessionID = currentSession?.id,
@@ -2494,7 +2510,12 @@ final class ChatClient: SSEEventHandlerDelegate {
             return
         }
 
-        for message in candidateMessages where message.role == .assistant && !message.isStreaming {
+        // Prioritize the most recent assistant messages and cap in-flight diff requests
+        // so opening a chat does not saturate the connection pool with 15 simultaneous diffs.
+        for message in candidateMessages.reversed() where message.role == .assistant && !message.isStreaming {
+            guard turnDiffTasksByAssistantID.count < Self.maximumConcurrentTurnDiffLoads else {
+                break
+            }
             guard message.parentUserMessageID != nil,
                   !resolvedTurnDiffAssistantIDs.contains(message.id),
                   turnDiffTasksByAssistantID[message.id] == nil else {
@@ -2505,6 +2526,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             turnDiffTasksByAssistantID[assistantMessageID] = Task { @MainActor [weak self, weak message] in
                 guard let self, let message else { return }
                 await self.loadTurnDiffSummary(for: message, sessionID: sessionID)
+                if self.currentSession?.id == sessionID {
+                    self.scheduleTurnDiffLoads(for: self.displayedMessages)
+                }
             }
         }
     }

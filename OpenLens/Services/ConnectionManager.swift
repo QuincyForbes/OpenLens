@@ -173,8 +173,6 @@ final class ConnectionManager: ConnectionProviding {
                 protocolVersion: capabilities.protocolVersion.rawValue
             )
 
-            await refreshProjectMetadata()
-
             savedConnectionsStore?.saveConnection(
                 serverURL: urlString,
                 username: username,
@@ -195,7 +193,10 @@ final class ConnectionManager: ConnectionProviding {
             )
             self.sseClient = sse
             configureSSECallbacks(sse)
-            await connectSSEAndWait(sse)
+
+            async let metadataRefresh: Void = refreshProjectMetadata()
+            async let sseConnect: Void = connectSSEAndWait(sse)
+            _ = await (metadataRefresh, sseConnect)
         } catch {
             guard !Task.isCancelled else { return }
             state = .error(error.localizedDescription)
@@ -367,9 +368,7 @@ final class ConnectionManager: ConnectionProviding {
         }
 
         let generation = projectContextGeneration
-        let pathInfo = try? await client.getPath()
-        guard !Task.isCancelled, generation == projectContextGeneration else { return }
-        let project = try? await client.getCurrentProject()
+        let (pathInfo, project) = await client.getLocationMetadata()
         guard !Task.isCancelled, generation == projectContextGeneration else { return }
 
         Logger.connection.debug("OpenCode reported directory \(pathInfo?.directory ?? "nil", privacy: .public), worktree \(pathInfo?.worktree ?? "nil", privacy: .public), and project worktree \(project?.worktree ?? "nil", privacy: .public)")

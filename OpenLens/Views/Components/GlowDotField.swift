@@ -267,26 +267,32 @@ private struct GlowDotFieldRenderer {
                 var alphaScale = depthFade
 
                 if let lens {
-                    let (distance, normal) = GlowDotField.roundedRectDistance(
-                        from: CGPoint(x: x, y: y),
-                        to: lens.rect,
-                        cornerRadius: lens.cornerRadius
-                    )
-                    if distance < 0 {
-                        alphaScale *= 1 - lens.progress
-                    } else {
-                        let halo = exp(-Double(distance) / 42) * lens.progress
-                        let pull = min(Double(distance), 20) * halo
-                        x -= Double(normal.dx) * pull
-                        y -= Double(normal.dy) * pull
-                        let angle = atan2(y - Double(lens.rect.midY), x - Double(lens.rect.midX))
-                        glow += halo * 1.3 * (0.65 + 0.35 * cos(angle - time * 1.6))
-                        if lens.orbit > 0 {
-                            // How far this dot trails the comet head, going around in its direction.
-                            var trail = (time * Self.orbitSpeed - angle).truncatingRemainder(dividingBy: 2 * .pi)
-                            if trail < 0 { trail += 2 * .pi }
-                            let comet = exp(-trail * 1.8) + exp(-(2 * .pi - trail) * 12)
-                            glow += halo * lens.orbit * 2.2 * comet
+                    let maxHaloDistance: CGFloat = 180
+                    let cgX = CGFloat(x)
+                    let cgY = CGFloat(y)
+                    let haloBounds = lens.rect.insetBy(dx: -maxHaloDistance, dy: -maxHaloDistance)
+                    if haloBounds.contains(CGPoint(x: cgX, y: cgY)) {
+                        let (distance, normal) = GlowDotField.roundedRectDistance(
+                            from: CGPoint(x: cgX, y: cgY),
+                            to: lens.rect,
+                            cornerRadius: lens.cornerRadius
+                        )
+                        if distance < 0 {
+                            alphaScale *= 1 - lens.progress
+                        } else if distance < maxHaloDistance {
+                            let halo = exp(-Double(distance) / 42) * lens.progress
+                            let pull = min(Double(distance), 20) * halo
+                            x -= Double(normal.dx) * pull
+                            y -= Double(normal.dy) * pull
+                            let angle = atan2(y - Double(lens.rect.midY), x - Double(lens.rect.midX))
+                            glow += halo * 1.3 * (0.65 + 0.35 * cos(angle - time * 1.6))
+                            if lens.orbit > 0 {
+                                // How far this dot trails the comet head, going around in its direction.
+                                var trail = (time * Self.orbitSpeed - angle).truncatingRemainder(dividingBy: 2 * .pi)
+                                if trail < 0 { trail += 2 * .pi }
+                                let comet = exp(-trail * 1.8) + exp(-(2 * .pi - trail) * 12)
+                                glow += halo * lens.orbit * 2.2 * comet
+                            }
                         }
                     }
                 }

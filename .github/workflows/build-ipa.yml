@@ -1,0 +1,60 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - perf/pairing-and-chat-latency
+
+jobs:
+  build-ipa:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Using Xcode: $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build OpenLens (Release iOS)
+        run: |
+          xcodebuild \
+            -project OpenLens.xcodeproj \
+            -scheme OpenLens \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/OpenLens.app"
+          test -d "$APP_PATH"
+          rm -rf build/ipa Payload OpenLens.ipa
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/OpenLens.app
+          (cd build/ipa && ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/OpenLens.ipa")
+          ls -lh "$GITHUB_WORKSPACE/OpenLens.ipa"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenLens-ipa
+          path: OpenLens.ipa
+          if-no-files-found: error

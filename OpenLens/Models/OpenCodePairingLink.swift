@@ -24,6 +24,9 @@ struct OpenCodePairingLink: Equatable, Sendable {
 
         var links: [URL] = []
         var servers: [URL] = []
+        var seenServers = Set<URL>()
+        links.reserveCapacity(payload.urls.count)
+        servers.reserveCapacity(payload.urls.count)
         for address in payload.urls {
             guard var components = URLComponents(string: address),
                   ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
@@ -36,7 +39,7 @@ struct OpenCodePairingLink: Equatable, Sendable {
 
             components.path = ""
             guard let server = components.url else { return nil }
-            if servers.contains(server) { continue }
+            guard seenServers.insert(server).inserted else { continue }
             components.path = "/auth/connect/\(payload.code)"
             guard let link = components.url else { return nil }
             servers.append(server)
@@ -86,9 +89,10 @@ struct OpenCodePairingLink: Equatable, Sendable {
         self.serverURLs = [serverURL]
     }
 
+    private static let allowedCodeScalars = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_".unicodeScalars)
+
     private static func isValidCode(_ code: String) -> Bool {
-        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
-        return !code.isEmpty && code.allSatisfy { allowed.contains($0) }
+        !code.isEmpty && code.unicodeScalars.allSatisfy { allowedCodeScalars.contains($0) }
     }
 
     private static func decodeCredentials(from fragment: String) -> OpenCodePairingCredentials? {

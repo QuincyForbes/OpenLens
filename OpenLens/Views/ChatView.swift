@@ -162,10 +162,11 @@ struct ChatView: View {
             chatClient.setupSSEHandlers()
             if initialSession == nil {
                 await chatClient.ensureSession()
+                async let permissionLoad = chatClient.recoverPendingPermission()
+                async let questionLoad = chatClient.recoverPendingQuestions()
+                async let formLoad = chatClient.recoverPendingForms()
+                _ = await (permissionLoad, questionLoad, formLoad)
             }
-            await chatClient.recoverPendingPermission()
-            await chatClient.recoverPendingQuestions()
-            await chatClient.recoverPendingForms()
         }
         .task(id: catalogContextID) {
             clearSelectedSlashAction()
@@ -176,8 +177,9 @@ struct ChatView: View {
             chatClient.updateSlashCatalog(commands: [], agents: [])
             chatClient.updateSkillCatalog([])
             guard chatClient.sessionLocationState == .ready else { return }
-            await loadCommands(force: true)
-            await loadSkills(force: true)
+            async let commandsLoad: Void = loadCommands(force: true)
+            async let skillsLoad: Void = loadSkills(force: true)
+            _ = await (commandsLoad, skillsLoad)
         }
         // Watch completion/visibility inputs, not the viewed marker this
         // acknowledgement writes. The service merges confirmed markers into
@@ -198,11 +200,15 @@ struct ChatView: View {
                 chatClient.setupSSEHandlers()
                 chatClient.synchronizeCurrentSessionFromServer()
                 Task {
-                    await loadCommands(force: true)
-                    await chatClient.recoverPendingPermission()
-                    await chatClient.recoverPendingQuestions()
-                    await chatClient.recoverPendingForms()
-                    await loadSkills(force: true)
+                    async let commandsLoad: Void = loadCommands(force: true)
+                    async let skillsLoad: Void = loadSkills(force: true)
+                    if chatClient.currentSession == nil {
+                        async let permissionLoad = chatClient.recoverPendingPermission()
+                        async let questionLoad = chatClient.recoverPendingQuestions()
+                        async let formLoad = chatClient.recoverPendingForms()
+                        _ = await (permissionLoad, questionLoad, formLoad)
+                    }
+                    _ = await (commandsLoad, skillsLoad)
                 }
             }
         }

@@ -57,11 +57,21 @@ enum KeychainService {
 
     @discardableResult
     static func saveData(key: String, data: Data) -> Bool {
-        // Delete existing item first (upsert pattern)
-        let deleteQuery = baseQuery(key: key)
-        SecItemDelete(deleteQuery as CFDictionary)
+        let query = baseQuery(key: key)
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
 
-        var addQuery = baseQuery(key: key)
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        if updateStatus != errSecItemNotFound {
+            SecItemDelete(query as CFDictionary)
+        }
+
+        var addQuery = query
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
