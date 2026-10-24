@@ -434,7 +434,7 @@ final class SessionsService {
         return await withTaskGroup(of: (String, OCSession?).self) { group in
             var remaining = sessions.makeIterator()
             // Limit concurrent reads; callers choose the total candidate set.
-            for _ in 0..<4 {
+            for _ in 0..<8 {
                 guard let session = remaining.next() else { break }
                 group.addTask { (session.id, try? await self.getSession(id: session.id)) }
             }

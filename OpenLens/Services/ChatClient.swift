@@ -1729,6 +1729,9 @@ final class ChatClient: SSEEventHandlerDelegate {
                 try await applyRecoveredSession(session, generation: generation)
             } catch { return }
         } else {
+            // Suppress reconnect gap callbacks triggered by switching project context
+            // while this authoritative session load is already about to fetch everything.
+            connection?.sseClient?.onSynchronizationGap = nil
             await restoreProjectContext(for: session)
         }
         guard !Task.isCancelled, sessionLoadToken == token else { return }
@@ -1743,7 +1746,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         currentSession = session
 
-        setupSSEHandlers()
+        setupSSEHandlers(includesSynchronizationGap: false)
         let shouldLoadProviders = providers.isEmpty
         let shouldLoadV2Providers = shouldLoadProviders && usesV2SessionAPI
         if shouldLoadProviders, !usesV2SessionAPI {
@@ -1764,6 +1767,11 @@ final class ChatClient: SSEEventHandlerDelegate {
             providersTask
         )
         guard !Task.isCancelled, currentSession?.id == session.id else { return }
+        if let stream = connection?.sseClient {
+            let gapGen = await stream.synchronizationGeneration()
+            _ = await stream.acknowledgeSynchronization(since: gapGen)
+        }
+        setupSSEHandlers(includesSynchronizationGap: true)
         isStreamSynchronized = didLoadMessages && permissionRecovered && questionRecovered && formRecovered
     }
 
@@ -4453,7 +4461,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     // MARK: - SSE Setup
 
-    func setupSSEHandlers() {
+    func setupSSEHandlers(includesSynchronizationGap: Bool = true) {
         guard let connection, let sseClient = connection.sseClient else { return }
 
         // Keep SSE handler's refs in sync
@@ -4465,8 +4473,12 @@ final class ChatClient: SSEEventHandlerDelegate {
         sseClient.onInboundEvent = { [weak self] inboundEvent in
             self?.receiveStreamEvent(inboundEvent)
         }
-        sseClient.onSynchronizationGap = { [weak self] _ in
-            self?.synchronizeCurrentSessionFromServer()
+        if includesSynchronizationGap {
+            sseClient.onSynchronizationGap = { [weak self] _ in
+                self?.synchronizeCurrentSessionFromServer()
+            }
+        } else {
+            sseClient.onSynchronizationGap = nil
         }
     }
 
