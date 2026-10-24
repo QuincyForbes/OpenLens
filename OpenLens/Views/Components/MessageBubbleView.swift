@@ -12,6 +12,8 @@ struct MessageBubbleView: View {
     private let streamingText: ChatMessage.StreamingTextProjection?
     private let animatesSubagentStatus: Bool
     private let submissionState: PromptSubmission.State?
+    private let onReuseInComposer: ((String) -> Void)?
+    private let onUndo: (() -> Void)?
     @AppStorage("showThinking") private var showThinking: Bool = true
     @Environment(\.openLensTheme) private var theme
     @Environment(\.chatEasterEgg) private var chatEasterEgg
@@ -22,13 +24,17 @@ struct MessageBubbleView: View {
         assistantSegments: [ChatMessage.AssistantSegment]? = nil,
         streamingText: ChatMessage.StreamingTextProjection? = nil,
         animatesSubagentStatus: Bool = false,
-        submissionState: PromptSubmission.State? = nil
+        submissionState: PromptSubmission.State? = nil,
+        onReuseInComposer: ((String) -> Void)? = nil,
+        onUndo: (() -> Void)? = nil
     ) {
         self.message = message
         self.assistantSegments = assistantSegments
         self.streamingText = streamingText
         self.animatesSubagentStatus = animatesSubagentStatus
         self.submissionState = submissionState
+        self.onReuseInComposer = onReuseInComposer
+        self.onUndo = onUndo
     }
 
     private var showsTranscriptStyleAssistantContent: Bool {
@@ -119,7 +125,12 @@ struct MessageBubbleView: View {
                 Spacer(minLength: isRetroChat ? 24 : 32)
             }
         }
-        .messageCopyActions(canCopy: canCopyText, makeText: makeCopyText)
+        .messageCopyActions(
+            canCopy: canCopyText,
+            makeText: makeCopyText,
+            onReuseInComposer: onReuseInComposer,
+            onUndo: onUndo
+        )
     }
 
     // MARK: - User Bubble
@@ -691,6 +702,11 @@ private struct DeferredReasoningTextView: View {
         ) ?? text.endIndex
         self.fallbackPreview = String(text[..<end])
         self.fallbackIsTruncated = end != text.endIndex
+        self._prepared = State(
+            initialValue: text.utf8.count <= 4_096
+                ? CompletedReasoningTextPreparation.prepare(text)
+                : nil
+        )
     }
 
     var body: some View {
@@ -702,10 +718,16 @@ private struct DeferredReasoningTextView: View {
             }
         }
         .onAppear {
-            requestPreparation(for: text)
+            if prepared == nil {
+                requestPreparation(for: text)
+            }
         }
         .onChange(of: text) { _, newText in
-            requestPreparation(for: newText)
+            if newText.utf8.count <= 4_096 {
+                prepared = CompletedReasoningTextPreparation.prepare(newText)
+            } else {
+                requestPreparation(for: newText)
+            }
         }
     }
 
@@ -1424,6 +1446,8 @@ private struct StreamingTextTail: View {
 private struct MessageCopyActions: ViewModifier {
     let canCopy: Bool
     let makeText: () -> String?
+    let onReuseInComposer: ((String) -> Void)?
+    let onUndo: (() -> Void)?
 
     func body(content: Content) -> some View {
         if canCopy {
@@ -1436,6 +1460,24 @@ private struct MessageCopyActions: ViewModifier {
                         Label(AppText.copyMessage, systemImage: "doc.on.doc")
                     }
 
+                    if let onReuseInComposer {
+                        Button {
+                            if let text = makeText() {
+                                onReuseInComposer(text)
+                            }
+                        } label: {
+                            Label("Reuse in Composer", systemImage: "arrow.up.doc")
+                        }
+                    }
+
+                    if let onUndo {
+                        Divider()
+                        Button(role: .destructive) {
+                            onUndo()
+                        } label: {
+                            Label("Undo Turn", systemImage: "arrow.uturn.backward")
+                        }
+                    }
                 }
         } else {
             content
@@ -1446,9 +1488,16 @@ private struct MessageCopyActions: ViewModifier {
 private extension View {
     func messageCopyActions(
         canCopy: Bool,
-        makeText: @escaping () -> String?
+        makeText: @escaping () -> String?,
+        onReuseInComposer: ((String) -> Void)? = nil,
+        onUndo: (() -> Void)? = nil
     ) -> some View {
-        modifier(MessageCopyActions(canCopy: canCopy, makeText: makeText))
+        modifier(MessageCopyActions(
+            canCopy: canCopy,
+            makeText: makeText,
+            onReuseInComposer: onReuseInComposer,
+            onUndo: onUndo
+        ))
     }
 }
 

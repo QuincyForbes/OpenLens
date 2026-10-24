@@ -61,6 +61,22 @@ struct MarkdownContentView: View {
         self.usesRetroTypography = usesRetroTypography
     }
 
+    /// Returns cached or small-message prepared blocks synchronously on the caller's thread
+    /// so `DeferredMarkdownTextView` renders at its final height on the very first frame
+    /// without a 2-pass placeholder height jump inside `LazyVStack`.
+    static func cachedOrImmediatePrepared(for text: String) -> Prepared? {
+        let key = cacheKey(for: text)
+        if let cached = blockCache.object(forKey: key) {
+            return Prepared(cacheKey: key.intValue, blocks: cached.blocks)
+        }
+        guard text.utf8.count <= 4_096 else {
+            return nil
+        }
+        let parsed = parseBlocks(from: text)
+        blockCache.setObject(BlocksBox(parsed), forKey: key)
+        return Prepared(cacheKey: key.intValue, blocks: parsed)
+    }
+
     /// The completion runs on the main queue, but all O(n) work (hashing,
     /// cache lookup and markdown parsing) has completed before that hop.
     static func prepare(_ text: String, completion: @escaping (Prepared) -> Void) {
@@ -637,6 +653,7 @@ private struct MarkdownCodeBlockView: View {
     let usesRetroTypography: Bool
 
     @State private var visibleChunkCount: Int?
+    @State private var didCopy = false
 
     private var shownChunkCount: Int {
         min(visibleChunkCount ?? Self.initialChunkLimit, chunks.count)
@@ -647,14 +664,40 @@ private struct MarkdownCodeBlockView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let language {
-                Text(language)
-                    .font(usesRetroTypography ? RetroChatStyle.smallFont : .system(size: 11, weight: .medium))
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(language ?? "code")
+                    .font(usesRetroTypography ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    UIPasteboard.general.string = chunks.joined()
+                    didCopy = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(1.5))
+                        didCopy = false
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(didCopy ? "Copied" : "Copy")
+                            .font(usesRetroTypography ? RetroChatStyle.smallFont : .system(size: 11, weight: .medium, design: .rounded))
+                    }
+                    .foregroundStyle(didCopy ? Color.green : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(.systemGray5).opacity(0.8), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(AppText.copyCode)
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -721,6 +764,7 @@ struct DeferredMarkdownTextView: View {
         ) ?? text.endIndex
         self.fallbackPreview = String(text[..<end])
         self.fallbackIsTruncated = end != text.endIndex
+        self._prepared = State(initialValue: MarkdownContentView.cachedOrImmediatePrepared(for: text))
     }
 
     var body: some View {
@@ -737,17 +781,23 @@ struct DeferredMarkdownTextView: View {
             }
         }
         .onAppear {
-            requestPreparation(for: text)
+            if prepared == nil {
+                requestPreparation(for: text)
+            }
         }
         .onChange(of: text) { _, newText in
-            requestPreparation(for: newText)
+            if let immediate = MarkdownContentView.cachedOrImmediatePrepared(for: newText) {
+                prepared = immediate
+            } else {
+                requestPreparation(for: newText)
+            }
         }
     }
 
     private var plainText: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(fallbackPreview)
-                .font(usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 16))
+                .font(usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 17))
                 .foregroundStyle(foregroundColor)
 
             if fallbackIsTruncated {

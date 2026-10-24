@@ -2014,6 +2014,8 @@ final class ChatClient: SSEEventHandlerDelegate {
                 }
                 visibleMessages = Self.messagesBeforeRevert(mergedMessages, revert: revert)
             }
+            let hadNoTranscript = messages.isEmpty && contextEntries.isEmpty
+            let previousLastEntryID = transcriptEntryOrder.last ?? messages.last?.id
             prepareTurnDiffRefresh(for: visibleMessages)
             preserveTurnFileChanges(in: visibleMessages)
             let visibleIDs = Set(visibleOrder)
@@ -2035,7 +2037,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
             Logger.debug.info("messages count: \(visibleMessages.count)")
             self.contentVersion &+= 1
-            self.scrollAnchor &+= 1
+            let newLastEntryID = visibleOrder.last ?? visibleMessages.last?.id
+            if hadNoTranscript || previousLastEntryID != newLastEntryID {
+                self.scrollAnchor &+= 1
+            }
         } catch is CancellationError {
             return false
         } catch {

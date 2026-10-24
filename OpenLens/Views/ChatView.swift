@@ -2649,7 +2649,7 @@ private struct ChatMessagesListView: View {
                     .frame(width: 0, height: 0)
                     .accessibilityHidden(true)
                 }
-                .defaultScrollAnchor(ScreenshotFixtures.scrollsToContextDetailsEnd ? .bottom : nil)
+                .defaultScrollAnchor(.bottom)
                 .onScrollGeometryChange(for: ChatScrollState.self) { geometry in
                     ChatScrollPolicy.state(
                         contentHeight: geometry.contentSize.height,
@@ -2749,13 +2749,22 @@ private struct ChatMessagesListView: View {
                 message: message,
                 submissionState: message.role == .user
                     ? chatClient.promptSubmissionState(forMessageID: message.id)
-                    : nil
+                    : nil,
+                onReuseInComposer: chatClient.canCompose ? { text in
+                    chatClient.inputText = text
+                } : nil,
+                onUndo: chatClient.canUndo(message) ? {
+                    Task { await chatClient.undo(message) }
+                } : nil
             )
         case .assistantSegment(let message, let segment):
             AssistantSegmentTimelineRow(
                 message: message,
                 segmentID: segment.id,
-                animatesSubagentStatus: item.animatesSubagentStatus
+                animatesSubagentStatus: item.animatesSubagentStatus,
+                onReuseInComposer: chatClient.canCompose ? { text in
+                    chatClient.inputText = text
+                } : nil
             )
         case .streamingAssistantText(let message, let projection):
             MessageBubbleView(
@@ -3082,13 +3091,15 @@ private struct AssistantSegmentTimelineRow: View {
     let message: ChatMessage
     let segmentID: String
     let animatesSubagentStatus: Bool
+    var onReuseInComposer: ((String) -> Void)? = nil
 
     var body: some View {
         if let segment = message.assistantSegment(withID: segmentID) {
             MessageBubbleView(
                 message: message,
                 assistantSegments: [segment],
-                animatesSubagentStatus: animatesSubagentStatus
+                animatesSubagentStatus: animatesSubagentStatus,
+                onReuseInComposer: onReuseInComposer
             )
         }
     }
