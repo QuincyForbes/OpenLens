@@ -167,15 +167,35 @@ final class InboxService {
         var currentForms: [OCFormRequest] = []
         var errors: [String] = []
         let directories: [String?] = [activeDirectory] + rememberedDirectories.filter { $0 != activeDirectory }.map(Optional.some)
-        for (index, directory) in directories.enumerated() {
-            do {
-                let recovered = try await client.listPendingForms(directory: directory)
-                guard formsClient === client, connection.client === client else {
-                    return InboxLoadResult(value: nil, error: OpenCodeError.notConnected)
+        let directoryResults = await withTaskGroup(of: (Int, String?, Result<[OCFormRequest], Error>).self) { group in
+            for (index, directory) in directories.enumerated() {
+                group.addTask {
+                    do {
+                        let recovered = try await client.listPendingForms(directory: directory)
+                        return (index, directory, .success(recovered))
+                    } catch {
+                        return (index, directory, .failure(error))
+                    }
                 }
-                guard formsRevision == revision else {
-                    return InboxLoadResult(value: nil, error: nil, formsRevision: revision)
-                }
+            }
+            var collected: [(Int, String?, Result<[OCFormRequest], Error>)] = []
+            collected.reserveCapacity(directories.count)
+            for await item in group {
+                collected.append(item)
+            }
+            return collected.sorted { $0.0 < $1.0 }
+        }
+
+        guard formsClient === client, connection.client === client else {
+            return InboxLoadResult(value: nil, error: OpenCodeError.notConnected)
+        }
+        guard formsRevision == revision else {
+            return InboxLoadResult(value: nil, error: nil, formsRevision: revision)
+        }
+
+        for (index, directory, result) in directoryResults {
+            switch result {
+            case .success(let recovered):
                 // A successful read is authoritative even if ordinary forms
                 // remain. Never carry another workspace's session forms over.
                 if let directory { globalFormsByDirectory.removeValue(forKey: directory) }
@@ -191,13 +211,7 @@ final class InboxService {
                     }
                 }
                 if index == 0 { currentForms = recovered }
-            } catch {
-                guard formsClient === client, connection.client === client else {
-                    return InboxLoadResult(value: nil, error: OpenCodeError.notConnected)
-                }
-                guard formsRevision == revision else {
-                    return InboxLoadResult(value: nil, error: nil, formsRevision: revision)
-                }
+            case .failure(let error):
                 // A failed read cannot prove settlement. Keep the last known
                 // global interactions reachable and expose a retry warning.
                 errors.append(error.localizedDescription)

@@ -13,6 +13,7 @@ struct ConnectedRootView: View {
     let initialSessions: SessionsListView.InitialState
 
     @Environment(AppRouter.self) private var router
+    @Environment(\.connection) private var connection
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var permissionSheetDetent = PermissionRequestSheet.defaultPresentationDetent
 
@@ -108,9 +109,11 @@ struct ConnectedRootView: View {
         guard chatClient.isLoading else { return }
 
         while !Task.isCancelled, chatClient.isLoading {
-            await chatClient.refreshCurrentSessionStatus()
-            await chatClient.recoverPendingPermission()
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            async let statusRefresh = chatClient.refreshCurrentSessionStatus()
+            async let permissionRefresh = chatClient.recoverPendingPermission()
+            _ = await (statusRefresh, permissionRefresh)
+            let interval: UInt64 = connection.sseClient?.state == .connected ? 3_000_000_000 : 1_000_000_000
+            try? await Task.sleep(nanoseconds: interval)
         }
     }
 

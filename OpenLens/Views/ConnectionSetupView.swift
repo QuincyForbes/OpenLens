@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum ConnectionSetupStep: Equatable {
     case welcome
@@ -193,7 +194,13 @@ struct ConnectionWelcomeView<ManualFields: View, ManualAccessories: View>: View 
                         .accessibilityIdentifier("connection.setup.scan")
                         .transition(actionTransition)
                 case .scanner:
-                    EmptyView()
+                    ConnectionSetupButton(
+                        title: "Paste pairing link",
+                        isPrimary: true,
+                        action: pastePairingLinkFromClipboard
+                    )
+                    .accessibilityIdentifier("connection.setup.paste")
+                    .transition(actionTransition)
                 case .manual:
                     ConnectionSetupButton(title: AppText.connect, action: onConnectManually)
                         .disabled(!canConnectManually)
@@ -443,6 +450,19 @@ struct ConnectionWelcomeView<ManualFields: View, ManualAccessories: View>: View 
     private func handleScan(_ code: ScannedOpenLensCode) {
         sendPulse(from: viewfinderFrame)
         onScanned(code)
+    }
+
+    private func pastePairingLinkFromClipboard() {
+        guard let raw = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            showManualForm()
+            return
+        }
+        if let scanned = ScannedOpenLensCode(rawValue: raw) {
+            handleScan(scanned)
+        } else {
+            showManualForm()
+        }
     }
 
     private func retryAttempt() {

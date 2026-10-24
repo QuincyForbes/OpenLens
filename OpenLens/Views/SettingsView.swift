@@ -5,6 +5,7 @@ struct SettingsView: View {
     private let repositoryURL = URL(string: "https://github.com/martynpekala/OpenLens")!
 
     @Environment(\.connection) private var connection
+    @Environment(\.savedConnections) private var savedConnections
     @Environment(\.liveActivity) private var liveActivity
     @Environment(\.requestReviewPrompt) private var requestReviewPrompt
     @Environment(\.gitHubStarsService) private var gitHubStars
@@ -20,6 +21,65 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            if let host = connection.serverHostDisplay {
+                Section("Connected Server") {
+                    detailRow("Server", value: host)
+                    if let capabilities = connection.serverCapabilities {
+                        let versionText = connection.serverVersion.map { " · \($0)" } ?? ""
+                        detailRow("Protocol", value: "\(capabilities.protocolVersion.rawValue.uppercased())\(versionText)")
+                    } else if let version = connection.serverVersion {
+                        detailRow("Version", value: version)
+                    }
+                    if let directory = connection.selectedProjectDirectory {
+                        detailRow("Workspace", value: directory)
+                    }
+                }
+            }
+
+            if savedConnections.connections.count > 1 {
+                Section("Saved Servers") {
+                    ForEach(savedConnections.connections) { saved in
+                        let isActive = saved.id == savedConnections.activeConnectionID
+                        Button {
+                            guard !isActive else { return }
+                            Task {
+                                await connection.connect(
+                                    url: saved.serverURL,
+                                    username: saved.username,
+                                    password: saved.password,
+                                    method: .manual
+                                )
+                            }
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(saved.displayName)
+                                        .font(.system(size: 14, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(Color.appPrimary)
+                                    Text(saved.username)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if isActive {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Color.appUserAccent)
+                                }
+                            }
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            if !isActive {
+                                Button(role: .destructive) {
+                                    savedConnections.removeConnection(saved)
+                                } label: {
+                                    Label("Forget", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Section(AppText.settingsAppPreferences) {
                 Toggle(isOn: $showThinking) {
                     preferenceLabel(AppText.showThinking, subtitle: AppText.showThinkingSubtitle, icon: "brain")

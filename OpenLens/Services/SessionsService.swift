@@ -505,14 +505,37 @@ final class SessionsService {
     }
 
     private func loadMessages(for sessions: [OCSession], client: OpenCodeClient) async throws -> [[OCMessageWithParts]] {
-        var messagesBySession: [[OCMessageWithParts]] = []
-        messagesBySession.reserveCapacity(sessions.count)
+        guard !sessions.isEmpty else { return [] }
 
-        for session in sessions {
-            messagesBySession.append(try await client.listMessages(sessionID: session.id))
+        let indexedResults = try await withThrowingTaskGroup(of: (Int, [OCMessageWithParts]).self) { group in
+            var nextIndex = 0
+            let maxConcurrency = 6
+            for _ in 0..<min(maxConcurrency, sessions.count) {
+                let current = nextIndex
+                let sessionID = sessions[current].id
+                nextIndex += 1
+                group.addTask {
+                    (current, try await client.listMessages(sessionID: sessionID))
+                }
+            }
+
+            var collected: [(Int, [OCMessageWithParts])] = []
+            collected.reserveCapacity(sessions.count)
+            for try await item in group {
+                collected.append(item)
+                if nextIndex < sessions.count {
+                    let current = nextIndex
+                    let sessionID = sessions[current].id
+                    nextIndex += 1
+                    group.addTask {
+                        (current, try await client.listMessages(sessionID: sessionID))
+                    }
+                }
+            }
+            return collected.sorted { $0.0 < $1.0 }
         }
 
-        return messagesBySession
+        return indexedResults.map(\.1)
     }
 
     private func mayContainActivitySince(_ session: OCSession, startOfDay: Date) -> Bool {

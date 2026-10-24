@@ -391,11 +391,24 @@ nonisolated enum SSEInboundEvent {
             return .messageUpdated(update, rawEvent: rawEvent)
 
         case "message.part.updated":
-            guard let properties = event.properties?.value as? [String: Any],
-                  let partDictionary = properties["part"] as? [String: Any],
-                  let partData = try? JSONSerialization.data(withJSONObject: partDictionary),
-                  let part = try? JSONDecoder().decode(OCPart.self, from: partData),
-                  StreamDisplayValue.fitsIdentifier(part.id),
+            guard let properties = event.properties?.value as? [String: Any] else {
+                return nil
+            }
+            let part: OCPart
+            let alreadySanitizedTool: Bool
+            if let preparedPart = properties["preparedPart"] as? OCPart {
+                part = preparedPart
+                alreadySanitizedTool = preparedPart.type == .tool
+            } else {
+                guard let partDictionary = properties["part"] as? [String: Any],
+                      let partData = try? JSONSerialization.data(withJSONObject: partDictionary),
+                      let decodedPart = try? JSONDecoder().decode(OCPart.self, from: partData) else {
+                    return nil
+                }
+                part = decodedPart
+                alreadySanitizedTool = false
+            }
+            guard StreamDisplayValue.fitsIdentifier(part.id),
                   StreamDisplayValue.fitsIdentifier(part.sessionID),
                   StreamDisplayValue.fitsIdentifier(part.messageID) else {
                 return nil
@@ -403,7 +416,7 @@ nonisolated enum SSEInboundEvent {
             let questionPayload = PreparedQuestionToolPayload.prepare(from: part)
             let deliveryPart = questionPayload.map { _ in
                 PreparedQuestionToolPayload.sanitizedPart(from: part)
-            } ?? StreamToolPartSafety.sanitize(part)
+            } ?? (alreadySanitizedTool ? part : StreamToolPartSafety.sanitize(part))
             let text = deliveryPart.type == .reasoning ? deliveryPart.text : deliveryPart.renderableText
             let textChunks = text.map(SSETextChunker.chunks)
             return .partUpdated(

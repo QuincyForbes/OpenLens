@@ -91,17 +91,50 @@ final class ReviewService {
             throw OpenCodeError.notConnected
         }
 
-        let candidateMessages = messages
-            .filter { $0.info.role == .user }
-            .sorted { lhs, rhs in
-                (lhs.info.createdTimestamp ?? 0) > (rhs.info.createdTimestamp ?? 0)
+        let candidateMessages = Array(
+            messages
+                .filter { $0.info.role == .user }
+                .sorted { lhs, rhs in
+                    (lhs.info.createdTimestamp ?? 0) > (rhs.info.createdTimestamp ?? 0)
+                }
+                .prefix(20)
+        )
+
+        let diffsByIndex = try await withThrowingTaskGroup(of: (Int, [OCFileDiff]).self) { group in
+            var nextIndex = 0
+            let maxConcurrency = 6
+            for _ in 0..<min(maxConcurrency, candidateMessages.count) {
+                let current = nextIndex
+                let messageID = candidateMessages[current].id
+                nextIndex += 1
+                group.addTask {
+                    let diffs = try await client.getSessionDiff(sessionID: sessionID, messageID: messageID)
+                    return (current, diffs)
+                }
             }
+
+            var collected: [(Int, [OCFileDiff])] = []
+            collected.reserveCapacity(candidateMessages.count)
+            for try await result in group {
+                collected.append(result)
+                if nextIndex < candidateMessages.count {
+                    let current = nextIndex
+                    let messageID = candidateMessages[current].id
+                    nextIndex += 1
+                    group.addTask {
+                        let diffs = try await client.getSessionDiff(sessionID: sessionID, messageID: messageID)
+                        return (current, diffs)
+                    }
+                }
+            }
+            return collected.sorted { $0.0 < $1.0 }
+        }
 
         var seenFingerprints = Set<String>()
         var changeSets: [ReviewChangeSet] = []
 
-        for message in candidateMessages.prefix(20) {
-            let diffs = try await client.getSessionDiff(sessionID: sessionID, messageID: message.id)
+        for (index, diffs) in diffsByIndex {
+            let message = candidateMessages[index]
             let files = diffs.map(ReviewFileChange.init(diff:))
 
             guard !files.isEmpty else { continue }

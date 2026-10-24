@@ -165,17 +165,26 @@ nonisolated struct V2EventAdapter {
             id: id, sessionID: sessionID, messageID: messageID, type: .tool,
             callID: id, tool: tool["name"] as? String, state: decodedState
         ))
-        guard let part = try JSONSerialization.jsonObject(with: JSONEncoder().encode(safePart)) as? [String: Any] else {
-            throw OpenCodeError.invalidPayload("Invalid v2 tool projection.")
+        var toolPart: [String: Any] = [
+            "id": safePart.id,
+            "sessionID": safePart.sessionID,
+            "messageID": safePart.messageID,
+            "type": "tool",
+            "callID": safePart.callID ?? id,
+        ]
+        if let name = safePart.tool { toolPart["tool"] = name }
+        if let safeState = safePart.state,
+           let stateObj = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(safeState)) as? [String: Any] {
+            toolPart["state"] = stateObj
         }
         // Retain only the same bounded fields used by chat, never raw tool input.
         tool["name"] = safePart.tool
-        tool["state"] = part["state"]
+        tool["state"] = toolPart["state"]
         if type == "session.tool.success" || type == "session.tool.failed" {
             tools.removeValue(forKey: key)
         } else {
             tools[key] = tool
         }
-        return make("message.part.updated", ["part": part])
+        return make("message.part.updated", ["part": toolPart, "preparedPart": safePart])
     }
 }

@@ -999,6 +999,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// reconciled against the session and transcript endpoints. Coalesce gap
     /// notifications while that authoritative refresh is in flight.
     @ObservationIgnored private var streamSynchronizationTask: Task<Void, Never>?
+    @ObservationIgnored private var coalescedReconcileTask: Task<Void, Never>?
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
@@ -2310,6 +2311,8 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// in flight collapse into one follow-up pass, preserving the newest state
     /// without concurrent requests racing to overwrite the chat.
     func synchronizeCurrentSessionFromServer() {
+        coalescedReconcileTask?.cancel()
+        coalescedReconcileTask = nil
         guard !isOfflinePreviewMode,
               !isDemoMode,
               !isRecordedReplayMode,
@@ -4503,8 +4506,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             } else if event.type == "session.reconcile" {
                 if (event.properties?.value as? [String: Any])?["locationChanged"] as? Bool == true {
                     sessionLocationState = .rebinding
+                    synchronizeCurrentSessionFromServer()
+                } else {
+                    scheduleCoalescedReconcile()
                 }
-                synchronizeCurrentSessionFromServer()
             } else {
                 refreshInboxAfterChange()
             }
@@ -4516,7 +4521,20 @@ final class ChatClient: SSEEventHandlerDelegate {
         sseHandler?.handleInboundEvent(inboundEvent)
         if usesV2SessionAPI, case .cold(.sessionUpdated(let update), _) = inboundEvent,
            let update, update.sessionID == currentSession?.id, update.refreshesTranscript {
-            synchronizeCurrentSessionFromServer()
+            scheduleCoalescedReconcile()
+        }
+    }
+
+    /// Coalesces back-to-back v2 `session.reconcile` events (such as `session.execution.succeeded`
+    /// immediately followed by `session.idle`) so the first sync pass is not immediately
+    /// invalidated and restarted by the second event arriving a few milliseconds later.
+    private func scheduleCoalescedReconcile() {
+        guard coalescedReconcileTask == nil else { return }
+        coalescedReconcileTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(45))
+            guard !Task.isCancelled, let self else { return }
+            self.coalescedReconcileTask = nil
+            self.synchronizeCurrentSessionFromServer()
         }
     }
 

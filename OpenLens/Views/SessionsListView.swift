@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Session list view with create, delete, and select.
 /// Uses SessionsService directly with view-local state.
@@ -55,6 +56,11 @@ struct SessionsListView: View {
     @State private var newSessionRequest: NewSessionRequest?
     @State private var sessionToDelete: OCSession?
     @State private var showDeleteConfirmation = false
+    @State private var sessionToRename: OCSession?
+    @State private var renameTitleText = ""
+    @State private var showRenameAlert = false
+    @State private var searchQuery = ""
+    @State private var isOnScreen = true
     @State private var expandedProjectIDs = Set<String>()
 
     let presentationStyle: PresentationStyle
@@ -110,19 +116,40 @@ struct SessionsListView: View {
         presentationStyle == .sidebar
     }
 
+    private var isSearching: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private struct PollTaskKey: Equatable {
+        let scenePhase: ScenePhase
+        let isPollingActive: Bool
+    }
+
+    private var pollTaskKey: PollTaskKey {
+        PollTaskKey(scenePhase: scenePhase, isPollingActive: isSidebar || isOnScreen)
+    }
+
     private var groupedSessions: [SessionProjectGroup] {
         var groupedByID: [String: [OCSession]] = [:]
         var groupOrder: [String] = []
         var titles: [String: String] = [:]
         var subtitles: [String: String?] = [:]
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
         for session in sessions {
+            let groupTitle = projectTitle(for: session)
+            if !trimmedQuery.isEmpty {
+                let matchesTitle = session.title.localizedCaseInsensitiveContains(trimmedQuery)
+                let matchesProject = groupTitle.localizedCaseInsensitiveContains(trimmedQuery)
+                let matchesID = session.id.localizedCaseInsensitiveContains(trimmedQuery)
+                guard matchesTitle || matchesProject || matchesID else { continue }
+            }
             let groupID = projectGroupID(for: session)
             if groupedByID[groupID] == nil {
                 groupOrder.append(groupID)
             }
             groupedByID[groupID, default: []].append(session)
-            titles[groupID] = projectTitle(for: session)
+            titles[groupID] = groupTitle
             subtitles[groupID] = projectSubtitle(for: session)
         }
 
@@ -163,6 +190,23 @@ struct SessionsListView: View {
         } message: { _ in
             Text(AppText.deleteSessionMessage)
         }
+        .alert(
+            "Rename Session",
+            isPresented: $showRenameAlert,
+            presenting: sessionToRename
+        ) { session in
+            TextField("Session title", text: $renameTitleText)
+            Button("Save") {
+                renameSession(session, newTitle: renameTitleText)
+            }
+            Button(AppText.cancel, role: .cancel) {}
+        }
+        .onAppear {
+            isOnScreen = true
+        }
+        .onDisappear {
+            isOnScreen = false
+        }
         .onChange(of: selectedSessionID, initial: true) { previousID, currentID in
             // Queue affected rows for the existing poll without restarting catalog recovery.
             openedSessionIDs.formUnion([previousID, currentID].compactMap { $0 })
@@ -170,8 +214,8 @@ struct SessionsListView: View {
         .onChange(of: sessionsService.confirmedViewedMarkers, initial: true) { _, _ in
             sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
         }
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
+        .task(id: pollTaskKey) {
+            guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
             await loadSessionStatuses(refreshInactive: true)
             guard connection.serverCapabilities?.protocolVersion == .v2
                     || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
@@ -205,6 +249,7 @@ struct SessionsListView: View {
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .navigationTitle(AppText.sessions)
+                .searchable(text: $searchQuery, prompt: "Search sessions or projects")
                 .toolbar {
                     if let host = connection.serverHostDisplay {
                         ToolbarItem(placement: .principal) {
@@ -266,7 +311,7 @@ struct SessionsListView: View {
     }
 
     private func projectSection(_ group: SessionProjectGroup) -> some View {
-        let isExpanded = expandedProjectIDs.contains(group.id)
+        let isExpanded = isSearching || expandedProjectIDs.contains(group.id)
         let displayedSessions = isExpanded ? group.sessions : group.visibleSessions
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -316,6 +361,19 @@ struct SessionsListView: View {
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
+                        Button {
+                            renameTitleText = session.title
+                            sessionToRename = session
+                            showRenameAlert = true
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button {
+                            UIPasteboard.general.string = session.id
+                        } label: {
+                            Label("Copy Session ID", systemImage: "doc.on.doc")
+                        }
+                        Divider()
                         Button(role: .destructive) {
                             sessionToDelete = session
                             showDeleteConfirmation = true
@@ -513,6 +571,21 @@ struct SessionsListView: View {
                 sessions.removeAll { $0.id == session.id }
                 pruneExpandedProjects(using: sessions)
                 onDelete(session)
+            } catch {
+                viewState = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func renameSession(_ session: OCSession, newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != session.title else { return }
+        Task {
+            do {
+                let updated = try await sessionsService.updateTitle(session: session, newTitle: trimmed)
+                if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+                    sessions[index] = updated
+                }
             } catch {
                 viewState = .error(error.localizedDescription)
             }

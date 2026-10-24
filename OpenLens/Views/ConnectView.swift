@@ -284,18 +284,52 @@ struct ConnectView: View {
     private var manualConnectionFields: some View {
         VStack(spacing: 0) {
             manualField(systemImage: "link") {
-                TextField(
-                    AppText.server,
-                    text: $manualURL,
-                    prompt: Text("192.168.1.50:4096")
-                        .foregroundStyle(Color.appSecondary.opacity(0.55))
-                )
-                    .font(.system(size: 15, design: .monospaced))
-                    .foregroundStyle(Color.appPrimary)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .textContentType(.URL)
-                    .focused($focusedManualField, equals: .serverURL)
+                HStack(spacing: 8) {
+                    TextField(
+                        AppText.server,
+                        text: $manualURL,
+                        prompt: Text("192.168.1.50:4096")
+                            .foregroundStyle(Color.appSecondary.opacity(0.55))
+                    )
+                        .font(.system(size: 15, design: .monospaced))
+                        .foregroundStyle(Color.appPrimary)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .textContentType(.URL)
+                        .focused($focusedManualField, equals: .serverURL)
+
+                    if !manualURL.isEmpty {
+                        Button {
+                            manualURL = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.appSecondary.opacity(0.55))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear server address")
+                    } else {
+                        Button {
+                            if let pasted = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               !pasted.isEmpty {
+                                if let code = ScannedOpenLensCode(rawValue: pasted) {
+                                    handleScannedCode(code)
+                                } else {
+                                    manualURL = pasted
+                                }
+                            }
+                        } label: {
+                            Label("Paste", systemImage: "doc.on.clipboard")
+                                .labelStyle(.iconOnly)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Color.appSecondary)
+                                .padding(6)
+                                .background(Color.appSurface.opacity(0.8), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Paste server address or pairing link")
+                    }
+                }
             }
 
             savedServerSuggestions

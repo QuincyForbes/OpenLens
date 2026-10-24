@@ -159,16 +159,39 @@ final class SessionInsightsService {
     }
 
     private static func messageTitle(for message: ChatMessage) -> String {
-        let normalized = message.content
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Inspect a bounded prefix and collapse whitespace in one pass instead of
+        // running full-string replacements and regex over potentially large responses.
+        var collapsed = ""
+        collapsed.reserveCapacity(92)
+        var lastWasSpace = true
+        var inspectedCount = 0
 
-        guard !normalized.isEmpty else {
+        for character in message.content {
+            guard inspectedCount < 512 else { break }
+            inspectedCount += 1
+
+            if character.isWhitespace || character.isNewline {
+                if !lastWasSpace {
+                    collapsed.append(" ")
+                    lastWasSpace = true
+                }
+            } else {
+                collapsed.append(character)
+                lastWasSpace = false
+                if collapsed.count > 88 {
+                    break
+                }
+            }
+        }
+
+        if collapsed.last == " " {
+            collapsed.removeLast()
+        }
+
+        guard !collapsed.isEmpty else {
             return message.finish?.trimmedNilIfBlank ?? "Assistant response"
         }
 
-        let collapsed = normalized.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         if collapsed.count <= 88 {
             return collapsed
         }

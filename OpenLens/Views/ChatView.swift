@@ -2683,6 +2683,10 @@ private struct ChatMessagesListView: View {
                 .onChange(of: chatClient.scrollAnchor) {
                     requestForcedScrollToBottom(using: proxy)
                 }
+                .refreshable {
+                    guard !chatClient.isOfflinePreviewMode else { return }
+                    await chatClient.refreshCurrentSessionFromServer()
+                }
                 .scrollDismissesKeyboard(.interactively)
                 .onTapGesture {
                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
