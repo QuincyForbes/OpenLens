@@ -44,7 +44,7 @@ final class MessagesService {
     /// Fetch the ordered transcript in one read, keeping context outside chat roles.
     func loadTranscript(sessionID: String) async throws -> SessionTranscript {
         guard let client = connection.client else { throw OpenCodeError.notConnected }
-        let entries = try await client.listTranscript(sessionID: sessionID)
+        let entries = try await client.listRecentTranscript(sessionID: sessionID)
         return Self.transcript(from: entries)
     }
 

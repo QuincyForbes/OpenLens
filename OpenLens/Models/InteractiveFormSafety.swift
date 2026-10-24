@@ -17,7 +17,9 @@ nonisolated enum InteractiveFormSafety {
     static let maximumPatternBytes = 1_024
 
     static func fitsGlobalDirectory(_ directory: String) -> Bool {
-        directory.hasPrefix("/") && directory.utf8.count <= 4_096 && !directory.contains("\0")
+        WorkspaceSelectionBuilder.isAbsoluteServerDirectory(directory)
+            && directory.utf8.count <= 4_096
+            && !directory.contains("\0")
     }
 
     static func sanitize(_ request: OCFormRequest) -> OCFormRequest? {

@@ -213,7 +213,7 @@ final class WorkspaceService {
     }
 
     func loadFolders(in directory: String) async throws -> WorkspaceFolderSnapshot {
-        guard directory.hasPrefix("/"),
+        guard WorkspaceSelectionBuilder.isAbsoluteServerDirectory(directory),
               let directory = WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
             throw OpenCodeError.invalidPayload("Choose an absolute folder path on the connected computer.")
         }

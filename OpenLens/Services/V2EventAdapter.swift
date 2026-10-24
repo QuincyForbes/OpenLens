@@ -42,7 +42,10 @@ nonisolated struct V2EventAdapter {
                   let eventDirectory = location["directory"] as? String else {
                 throw OpenCodeError.invalidPayload("Native v2 event has no location.")
             }
-            guard eventDirectory == directory else { return nil }
+            guard WorkspaceSelectionBuilder.normalizedDirectory(eventDirectory)
+                    == WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+                return nil
+            }
         }
         func make(_ name: String, _ payload: [String: Any]) -> OCEvent {
             OCEvent(type: name, properties: AnyCodable(payload))

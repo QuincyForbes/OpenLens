@@ -17,7 +17,7 @@ final class ReviewService {
             throw OpenCodeError.notConnected
         }
 
-        let messages = try await client.listMessages(sessionID: sessionID)
+        let messages = try await client.listRecentMessages(sessionID: sessionID)
         let userMessages = messages.filter { $0.info.role == .user }
 
         // Without a user message nothing can have been changed.

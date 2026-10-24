@@ -157,17 +157,47 @@ enum WorkspaceSelectionBuilder {
         ] + snapshot.projects.map { ($0.worktree, $0.id) }
     }
 
-    nonisolated static func normalizedDirectory(_ value: String?) -> String? {
+    nonisolated static func isWindowsAbsolutePath(_ path: String) -> Bool {
+        let bytes = Array(path.utf8)
+        guard bytes.count >= 3 else { return false }
+        let first = bytes[0]
+        let isDriveLetter = (first >= 65 && first <= 90) || (first >= 97 && first <= 122)
+        return isDriveLetter && bytes[1] == 58 && (bytes[2] == 47 || bytes[2] == 92)
+    }
+
+    nonisolated static func isAbsoluteServerDirectory(_ value: String?) -> Bool {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else {
+            return false
+        }
+        return trimmed.hasPrefix("/") || isWindowsAbsolutePath(trimmed)
+    }
+
+    nonisolated static func normalizedDirectory(_ value: String?) -> String? {
+        guard var trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
             return nil
+        }
+
+        // Heal Windows drive paths that were previously prefixed with "/" by iOS URL(fileURLWithPath:).
+        if trimmed.hasPrefix("/"), isWindowsAbsolutePath(String(trimmed.dropFirst())) {
+            trimmed.removeFirst()
+        }
+
+        if isWindowsAbsolutePath(trimmed) {
+            var normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
+            while normalized.count > 3 && normalized.hasSuffix("/") {
+                normalized.removeLast()
+            }
+            return normalized
         }
 
         return URL(fileURLWithPath: trimmed).standardizedFileURL.path
     }
 
     nonisolated static func displayName(for directory: String) -> String {
-        let lastComponent = URL(fileURLWithPath: directory).lastPathComponent
+        let normalized = directory.replacingOccurrences(of: "\\", with: "/")
+        let lastComponent = (normalized as NSString).lastPathComponent
         let trimmed = lastComponent.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? directory : trimmed
     }

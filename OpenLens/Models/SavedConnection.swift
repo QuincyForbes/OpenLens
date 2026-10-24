@@ -579,12 +579,7 @@ final class SavedConnectionsStore {
     }
 
     nonisolated private static func normalizeProjectDirectory(_ directory: String?) -> String? {
-        guard let trimmed = directory?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-
-        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+        WorkspaceSelectionBuilder.normalizedDirectory(directory)
     }
 
     private static func updatedRecentProjectDirectories(existing: [String], selected: String?) -> [String] {

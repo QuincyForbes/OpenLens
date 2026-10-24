@@ -142,10 +142,11 @@ final class ConnectionManager: ConnectionProviding {
             }
         }
 
-        let restoredProjectDirectory = savedConnectionsStore?
-            .matchingConnection(serverURL: urlString, username: username)?
-            .selectedProjectDirectory?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let restoredProjectDirectory = WorkspaceSelectionBuilder.normalizedDirectory(
+            savedConnectionsStore?
+                .matchingConnection(serverURL: urlString, username: username)?
+                .selectedProjectDirectory
+        )
 
         Logger.connection.debug("Connecting to \(urlString, privacy: .public) with restored project directory \(restoredProjectDirectory ?? "nil", privacy: .public)")
 
@@ -344,7 +345,7 @@ final class ConnectionManager: ConnectionProviding {
     func rebindProjectContext(directory: String, isCurrent: () -> Bool = { true }) async throws {
         guard let client else { throw OpenCodeError.notConnected }
         let generation = projectContextGeneration
-        guard directory.hasPrefix("/"),
+        guard WorkspaceSelectionBuilder.isAbsoluteServerDirectory(directory),
               let normalized = WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
             throw OpenCodeError.invalidPayload("The session's new location is not an absolute directory.")
         }

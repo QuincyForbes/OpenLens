@@ -566,11 +566,7 @@ final class SessionsService {
     }
 
     private func normalizedPath(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank else {
-            return nil
-        }
-
-        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+        WorkspaceSelectionBuilder.normalizedDirectory(value)
     }
 
     private func pathsOverlap(_ lhs: String, _ rhs: String) -> Bool {
