@@ -1745,12 +1745,13 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         setupSSEHandlers()
         let shouldLoadProviders = providers.isEmpty
+        let shouldLoadV2Providers = shouldLoadProviders && usesV2SessionAPI
         if shouldLoadProviders, !usesV2SessionAPI {
             await loadProviders()
         }
         guard !Task.isCancelled, currentSession?.id == session.id else { return }
         restoredWorkspaceRevision = connection?.projectContextRevision
-        async let providersTask: Void = (shouldLoadProviders && usesV2SessionAPI) ? loadProviders() : ()
+        async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
         async let messagesTask = loadMessages()
         async let permissionTask = recoverPendingPermission()
         async let questionTask = recoverPendingQuestions()
