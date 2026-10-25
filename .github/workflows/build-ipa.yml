@@ -32,7 +32,7 @@ jobs:
       - name: Run hosted simulator tests
         run: |
           SIMULATOR=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if "iPhone" in x["name"]))')
-          ./scripts/test-ios.sh --simulator "$SIMULATOR" --test-timeout 600 --build-timeout 900
+          ./scripts/test-ios.sh --simulator "$SIMULATOR" --simulator-timeout 300 --test-timeout 600 --build-timeout 900
 
       - name: Upload test results
         if: always()
