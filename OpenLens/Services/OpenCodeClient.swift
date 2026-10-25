@@ -403,10 +403,12 @@ actor OpenCodeClient {
         guard let first = entries.first, let last = entries.last, first.id != last.id else {
             return false
         }
-        if let firstCreated = first.time?.created, let lastCreated = last.time?.created, firstCreated != lastCreated {
+        let timestamps = entries.compactMap { $0.time?.created ?? $0.contextEntry?.created }
+        if let firstCreated = timestamps.first, let lastCreated = timestamps.last, firstCreated != lastCreated {
             return firstCreated > lastCreated
         }
-        return first.id > last.id
+        // IDs can be caller-provided UUIDs; lexical order is not chronology.
+        return false
     }
 
     func listTranscript(sessionID: String, limit: Int? = nil) async throws -> [OCTranscriptEntry] {

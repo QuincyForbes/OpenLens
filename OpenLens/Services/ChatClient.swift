@@ -153,6 +153,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Install one canonical snapshot atomically with respect to presentation.
     /// Live assistant reconciliation still runs through the existing message setter.
     func replaceTranscript(_ transcript: SessionTranscript) {
+        activeContextTranscriptRevision &+= 1
         olderTranscriptCursor = transcript.olderCursor
         if let sessionID = currentSession?.id, !isOfflinePreviewMode {
             cacheSessionTranscript(transcript, for: sessionID)
@@ -166,7 +167,6 @@ final class ChatClient: SSEEventHandlerDelegate {
         if messagesUnchanged && contextsUnchanged && transcriptEntryOrder == transcript.entryOrder {
             return
         }
-        activeContextTranscriptRevision &+= 1
         contextEntries = transcript.contextEntries
         transcriptEntryOrder = transcript.entryOrder
         messages = transcript.messages
@@ -4843,7 +4843,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     @discardableResult
     func respondToPermission(requestID: String, reply: OCPermissionReply) async -> Bool {
         guard sessionLocationState == .ready else {
-            errorMessage = "Failed to respond to permission: The session is still rebinding its location. Try again in a moment."
+            errorMessage = "Failed to rebind session location: Wait for recovery before answering this permission."
             return false
         }
         guard let questionService else {
