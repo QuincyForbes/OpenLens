@@ -59,8 +59,10 @@ final class InboxService {
         if let task = snapshotTask, snapshotTaskClient === client, snapshotTaskWorkspace == workspace {
             let result = try await task.value
             try Task.checkCancellation()
-            guard connection.client === client, connection.projectContextRevision == workspace,
-                  snapshotRevision == revision else { throw CancellationError() }
+            guard connection.client === client else { throw CancellationError() }
+            if connection.projectContextRevision != workspace || snapshotRevision != revision {
+                return try await loadInbox()
+            }
             return result
         }
         let id = UUID()
@@ -74,8 +76,11 @@ final class InboxService {
         }
         let result = try await task.value
         try Task.checkCancellation()
-        guard connection.client === client, connection.projectContextRevision == workspace,
-              snapshotRevision == revision else { throw CancellationError() }
+        guard connection.client === client else { throw CancellationError() }
+        if connection.projectContextRevision != workspace || snapshotRevision != revision {
+            if snapshotTaskID == id { snapshotTask = nil; snapshotTaskID = nil }
+            return try await loadInbox()
+        }
         return result
     }
 
@@ -135,7 +140,9 @@ final class InboxService {
             forms: forms,
             warning: errors.isEmpty ? nil : errors.joined(separator: "\n")
         )
-        guard connection.projectContextRevision == workspace, snapshotRevision == revision else { throw CancellationError() }
+        if connection.projectContextRevision != workspace || snapshotRevision != revision {
+            return snapshot // Caller retries against the current scope; never cache this read.
+        }
         cachedWorkspaceRevision = workspace
         cachedSnapshot = snapshot
         cachedSnapshotDate = Date()
