@@ -138,7 +138,7 @@ def run_command(command, log_path, timeout, monitor_startup=False):
     if not result.succeeded:
         text = log_path.read_text(errors="replace")
         errors = [line for line in text.splitlines() if "error:" in line.lower() or "✘" in line]
-        details = "\n".join(errors[:8]) if errors else text[-4000:]
+        details = "\n".join(errors[:80]) if errors else text[-4000:]
         report(f"Failed: {log_path}. Output:\n{details}")
     return result
 

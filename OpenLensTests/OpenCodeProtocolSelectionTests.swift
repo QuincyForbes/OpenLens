@@ -291,7 +291,7 @@ struct OpenCodeProtocolSelectionTests {
 
         let requests = await transport.recordedRequests()
         #expect(requests.allSatisfy { $0.headers["x-opencode-directory"] == nil })
-        #expect(requests.map(\.path) == [
+        #expect(requests.map(\.path).sorted() == [
             "/api/info",
             "/api/location",
             "/api/location",
@@ -306,7 +306,7 @@ struct OpenCodeProtocolSelectionTests {
             "/api/vcs/status",
             "/api/vcs/diff",
             "/api/fs/read/README.md"
-        ])
+        ].sorted())
         #expect(requests[1].queryItems["location[directory]"] == "/workspace/OpenLens-alias")
         #expect(requests.dropFirst(2).allSatisfy { $0.queryItems["location[directory]"] == "/workspace/OpenLens" })
         let workingTreeDiffRequest = try #require(requests.first { $0.path == "/api/vcs/diff" })

@@ -61,7 +61,7 @@ final class InboxService {
             try Task.checkCancellation()
             guard connection.client === client else { throw CancellationError() }
             if connection.projectContextRevision != workspace || snapshotRevision != revision {
-                return try await loadInbox()
+                return try await loadInbox(maxAge: 5)
             }
             return result
         }
@@ -79,7 +79,7 @@ final class InboxService {
         guard connection.client === client else { throw CancellationError() }
         if connection.projectContextRevision != workspace || snapshotRevision != revision {
             if snapshotTaskID == id { snapshotTask = nil; snapshotTaskID = nil }
-            return try await loadInbox()
+            return try await loadInbox(maxAge: 5)
         }
         return result
     }
