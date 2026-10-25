@@ -310,7 +310,20 @@ final class ChatClient: SSEEventHandlerDelegate {
     var pendingPermission: OCPermissionRequest? {
         didSet { syncLiveActivityPendingUserResponse() }
     }
-    var showPermissionAlert: Bool = false
+    var showPermissionAlert: Bool = false {
+        didSet {
+            if !showPermissionAlert, let request = pendingPermission {
+                deferredPermissionIDs.insert(request.id)
+            }
+        }
+    }
+    @ObservationIgnored private var deferredPermissionIDs: Set<String> = []
+    @ObservationIgnored private var deferredFormIDs: Set<String> = []
+    @ObservationIgnored private weak var cacheClient: OpenCodeClient?
+
+    func shouldPresentPermission(_ id: String) -> Bool {
+        !deferredPermissionIDs.contains(id)
+    }
 
     /// Pending question request from the server (interactive choices).
     var pendingQuestion: OCQuestionRequest? {
@@ -322,7 +335,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     var pendingForm: OCFormRequest? {
         didSet { syncLiveActivityPendingUserResponse() }
     }
-    var showFormSheet: Bool = false
+    var showFormSheet: Bool = false {
+        didSet {
+            if !showFormSheet, let request = pendingForm {
+                deferredFormIDs.insert(request.id)
+            }
+        }
+    }
     var isResolvingForm: Bool = false
     var isRecordingStream: Bool = false
 
@@ -1413,7 +1432,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         guard pendingQuestion == nil else { return false }
 
         if pendingForm?.id == form.id {
-            if !showFormSheet, !isResolvingForm {
+            if !showFormSheet, !isResolvingForm, !deferredFormIDs.contains(form.id) {
                 showFormSheet = true
             }
             return true
@@ -1421,7 +1440,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         guard pendingForm == nil else { return false }
         pendingForm = form
-        showFormSheet = true
+        showFormSheet = !deferredFormIDs.contains(form.id)
         startInteractiveRequestTimeout()
         return true
     }
@@ -1731,6 +1750,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// so Frame 0 already has `session` (and any cached transcript) installed instead
     /// of flashing the previous session's messages on the first frame.
     func prepareForOpeningSession(_ session: OCSession) {
+        resetCachesForConnectionIfNeeded()
         guard !isDemoMode, !isRecordedReplayMode, currentSession?.id != session.id else { return }
         // A half-typed prompt belongs to the session it was typed in. Park it
         // and bring back whatever was drafted for the session being opened.
@@ -1752,10 +1772,26 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// True when the destination view must run the authoritative load: either
     /// the session is not the current one, or it was only prepared on frame 0.
     func needsSessionLoad(_ session: OCSession) -> Bool {
-        currentSession?.id != session.id || preparedSessionID == session.id
+        cacheClient !== connection?.client || currentSession?.id != session.id || preparedSessionID == session.id
+    }
+
+    private func resetCachesForConnectionIfNeeded() {
+        guard cacheClient !== connection?.client else { return }
+        cachedSessionTranscripts.removeAll()
+        cachedSessionTranscriptOrder.removeAll()
+        cachedTurnDiffSummariesByMessageID.removeAll()
+        composerDraftsBySessionID.removeAll()
+        deferredPermissionIDs.removeAll()
+        deferredFormIDs.removeAll()
+        resetSessionState()
+        currentSession = nil
+        inputText = ""
+        providers = []
+        cacheClient = connection?.client
     }
 
     func loadSession(_ session: OCSession) async {
+        resetCachesForConnectionIfNeeded()
         if isDemoMode {
             resetSessionState()
             currentSession = session
@@ -2108,13 +2144,14 @@ final class ChatClient: SSEEventHandlerDelegate {
                   !existing.isStreaming,
                   existing.role == fresh.role,
                   existing.content == fresh.content,
-                  existing.parts.count == fresh.parts.count,
+                  Self.sameParts(existing.parts, fresh.parts),
                   existing.finish == fresh.finish,
                   existing.cost == fresh.cost,
                   existing.modelID == fresh.modelID,
                   existing.providerID == fresh.providerID else {
                 return fresh
             }
+            existing.tokens = fresh.tokens
             return existing
         }
 
@@ -2145,6 +2182,14 @@ final class ChatClient: SSEEventHandlerDelegate {
             entryOrder: Array(prefixOrder) + incoming.entryOrder,
             olderCursor: olderTranscriptCursor ?? incoming.olderCursor
         )
+    }
+
+    nonisolated static func sameParts(_ lhs: [OCPart], _ rhs: [OCPart]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let left = try? encoder.encode(lhs), let right = try? encoder.encode(rhs) else { return false }
+        return left == right
     }
 
     nonisolated static func messagesBeforeRevert(
@@ -4847,7 +4892,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
             if let permission {
                 pendingPermission = permission
-                showPermissionAlert = true
+                showPermissionAlert = shouldPresentPermission(permission.id)
             } else if sessionID == nil || pendingPermission?.sessionID == sessionID {
                 pendingPermission = nil
                 showPermissionAlert = false
@@ -4900,7 +4945,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             if let form {
                 guard pendingQuestion == nil else { return true }
                 if pendingForm?.id == form.id {
-                    if !showFormSheet, !isResolvingForm {
+                    if !showFormSheet, !isResolvingForm, !deferredFormIDs.contains(form.id) {
                         showFormSheet = true
                     }
                     return true
@@ -5026,7 +5071,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 // Never answer on the person's behalf. The agent stays blocked
                 // until they decide; re-surface the sheet once as a reminder.
                 Logger.chat.info("Interactive request still pending after \(Self.interactiveRequestTimeoutSeconds)s; re-presenting")
-                if self.pendingForm != nil, !self.showFormSheet, !self.isResolvingForm {
+                if let form = self.pendingForm, !self.deferredFormIDs.contains(form.id), !self.showFormSheet, !self.isResolvingForm {
                     self.showFormSheet = true
                 } else if self.pendingQuestion != nil, !self.showQuestionSheet {
                     self.showQuestionSheet = true

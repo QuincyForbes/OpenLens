@@ -28,6 +28,7 @@ struct ChatView: View {
     @AppStorage(FeatureFlags.debugFeaturesKey) private var debugFeaturesEnabled: Bool = FeatureFlags.debugFeaturesDefault
 
     @State private var showModelPicker = false
+    @State private var jumpToLatestRequest: UInt = 0
     @State private var showContextStatus = false
     @State private var showSessionInsights = false
     @State private var showRenameSessionAlert = false
@@ -78,7 +79,8 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             ChatMessagesListView(
-                chatClient: chatClient
+                chatClient: chatClient,
+                jumpToLatestRequest: jumpToLatestRequest
             )
             .environment(\.chatSkillIDs, availableSkills.map(\.id))
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
@@ -189,7 +191,7 @@ struct ChatView: View {
                     Task { await chatClient.refreshCurrentSessionFromServer() }
                 } : nil,
                 onScrollToBottom: !chatClient.displayedMessages.isEmpty ? {
-                    chatClient.scrollAnchor &+= 1
+                    jumpToLatestRequest &+= 1
                 } : nil
             )
         }
@@ -2695,6 +2697,7 @@ private struct ChatContextStatusSheet: View {
 
 private struct ChatMessagesListView: View {
     @Bindable var chatClient: ChatClient
+    let jumpToLatestRequest: UInt
 
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @AppStorage("showThinking") private var showThinking: Bool = true
@@ -2713,7 +2716,8 @@ private struct ChatMessagesListView: View {
     private let settledBottomTolerance: CGFloat = 8
     private let scrollToBottomVisibilityThreshold: CGFloat = 56
 
-    init(chatClient: ChatClient) {
+    init(chatClient: ChatClient, jumpToLatestRequest: UInt = 0) {
+        self.jumpToLatestRequest = jumpToLatestRequest
         self._chatClient = Bindable(wrappedValue: chatClient)
         let showsThinking = UserDefaults.standard.object(forKey: "showThinking") as? Bool ?? true
         self._timelineItems = State(initialValue: chatClient.timelineItems(showsThinking: showsThinking))
@@ -2818,6 +2822,11 @@ private struct ChatMessagesListView: View {
                     )
                 }
                 .onChange(of: chatClient.scrollAnchor) {
+                    requestForcedScrollToBottom(using: proxy)
+                }
+                .onChange(of: jumpToLatestRequest) {
+                    followLatest = true
+                    paginationRestoreAnchorID = nil
                     requestForcedScrollToBottom(using: proxy)
                 }
                 .refreshable {

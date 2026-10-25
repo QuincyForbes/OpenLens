@@ -33,6 +33,12 @@ final class InboxService {
     private var cachedSnapshot: InboxSnapshot?
     private var cachedSnapshotDate: Date?
     private weak var cachedSnapshotClient: OpenCodeClient?
+    private var cachedWorkspaceRevision: UInt?
+    private var snapshotRevision: UInt = 0
+    private var snapshotTask: Task<InboxSnapshot, Error>?
+    private var snapshotTaskID: UUID?
+    private weak var snapshotTaskClient: OpenCodeClient?
+    private var snapshotTaskWorkspace: UInt?
     private var formsClient: OpenCodeClient?
     private var globalFormsByDirectory: [String: [OCFormRequest]] = [:]
     private var formsLoadTask: Task<InboxLoadResult<[OCFormRequest]>, Never>?
@@ -46,6 +52,36 @@ final class InboxService {
     }
 
     func loadInbox(maxAge: TimeInterval = 0) async throws -> InboxSnapshot {
+        guard !ScreenshotFixtures.isEnabled else { return ScreenshotFixtures.inboxSnapshot }
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let workspace = connection.projectContextRevision
+        let revision = snapshotRevision
+        if let task = snapshotTask, snapshotTaskClient === client, snapshotTaskWorkspace == workspace {
+            let result = try await task.value
+            try Task.checkCancellation()
+            guard connection.client === client, connection.projectContextRevision == workspace,
+                  snapshotRevision == revision else { throw CancellationError() }
+            return result
+        }
+        let id = UUID()
+        let task = Task { try await self.loadFreshInbox(maxAge: maxAge) }
+        snapshotTask = task
+        snapshotTaskID = id
+        snapshotTaskClient = client
+        snapshotTaskWorkspace = workspace
+        defer {
+            if snapshotTaskID == id { snapshotTask = nil; snapshotTaskID = nil }
+        }
+        let result = try await task.value
+        try Task.checkCancellation()
+        guard connection.client === client, connection.projectContextRevision == workspace,
+              snapshotRevision == revision else { throw CancellationError() }
+        return result
+    }
+
+    private func loadFreshInbox(maxAge: TimeInterval) async throws -> InboxSnapshot {
+        let workspace = connection.projectContextRevision
+        let revision = snapshotRevision
         if ScreenshotFixtures.isEnabled {
             return ScreenshotFixtures.inboxSnapshot
         }
@@ -53,6 +89,7 @@ final class InboxService {
         if maxAge > 0,
            let cachedSnapshot, let cachedSnapshotDate,
            cachedSnapshotClient === connection.client, connection.client != nil,
+           cachedWorkspaceRevision == workspace,
            Date().timeIntervalSince(cachedSnapshotDate) < maxAge {
             return cachedSnapshot
         }
@@ -98,6 +135,8 @@ final class InboxService {
             forms: forms,
             warning: errors.isEmpty ? nil : errors.joined(separator: "\n")
         )
+        guard connection.projectContextRevision == workspace, snapshotRevision == revision else { throw CancellationError() }
+        cachedWorkspaceRevision = workspace
         cachedSnapshot = snapshot
         cachedSnapshotDate = Date()
         cachedSnapshotClient = client
@@ -105,6 +144,9 @@ final class InboxService {
     }
 
     private func invalidateCachedSnapshot() {
+        snapshotRevision &+= 1
+        snapshotTask = nil
+        snapshotTaskID = nil
         cachedSnapshot = nil
         cachedSnapshotDate = nil
     }

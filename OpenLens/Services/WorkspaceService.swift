@@ -94,6 +94,14 @@ final class WorkspaceService {
     }
 
     private let connection: ConnectionManager
+    private weak var catalogClient: OpenCodeClient?
+
+    private func resetCatalogCache(using client: OpenCodeClient) {
+        guard catalogClient !== client else { return }
+        cachedSlashActionsByDirectory.removeAll()
+        cachedSkillsByDirectory.removeAll()
+        catalogClient = client
+    }
     private var cachedSlashActionsByDirectory: [String: [WorkspaceSlashActionItem]] = [:]
     private var cachedSkillsByDirectory: [String: [WorkspaceSkillItem]] = [:]
 
@@ -383,6 +391,7 @@ final class WorkspaceService {
 
         guard let client = connection.client else { return [] }
         let cacheKey = (await client.currentContextDirectory()) ?? "__default__"
+        resetCatalogCache(using: client)
         if let cached = cachedSlashActionsByDirectory[cacheKey], !cached.isEmpty {
             return cached
         }
@@ -417,6 +426,7 @@ final class WorkspaceService {
                 }
                 return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
+        guard connection.client === client, catalogClient === client else { return [] }
         if !sorted.isEmpty {
             cachedSlashActionsByDirectory[cacheKey] = sorted
         }
@@ -429,6 +439,7 @@ final class WorkspaceService {
         }
 
         guard let client = connection.client else { return [] }
+        resetCatalogCache(using: client)
 
         let contextDirectory = await client.currentContextDirectory() ?? "nil"
         if let cached = cachedSkillsByDirectory[contextDirectory], !cached.isEmpty {
@@ -444,6 +455,7 @@ final class WorkspaceService {
                     )
                 }
                 .sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
+            guard connection.client === client, catalogClient === client else { return [] }
             if !loaded.isEmpty {
                 cachedSkillsByDirectory[contextDirectory] = loaded
             }

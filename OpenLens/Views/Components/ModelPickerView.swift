@@ -104,9 +104,6 @@ struct ModelPickerView: View {
         }
         .tint(isRetroChat ? RetroChatStyle.ink : Color.appAccent)
         .presentationBackground(isRetroChat ? RetroChatStyle.screenBottom : Color.appBackground)
-        .onChange(of: searchQuery, initial: true) { _, query in
-            cachedFilter = (query, computeFilter(for: query))
-        }
     }
 
     @ViewBuilder
@@ -580,9 +577,6 @@ struct ModelPickerView: View {
     }
 
     private var filterResult: FilterResult {
-        if let cached = cachedFilter, cached.query == searchQuery {
-            return cached.result
-        }
         return computeFilter(for: searchQuery)
     }
 
@@ -604,7 +598,6 @@ struct ModelPickerView: View {
         return result
     }
 
-    @State private var cachedFilter: (query: String, result: FilterResult)?
 
     private var filteredModels: [ChatClient.SelectableModel] {
         let ids = filterResult.matchingIDs

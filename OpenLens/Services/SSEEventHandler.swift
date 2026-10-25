@@ -669,7 +669,7 @@ final class SSEEventHandler {
         }
 
         delegate.pendingPermission = permission
-        delegate.showPermissionAlert = true
+        delegate.showPermissionAlert = (delegate as? ChatClient)?.shouldPresentPermission(permission.id) ?? true
 
         haptics.playWarning()
     }
