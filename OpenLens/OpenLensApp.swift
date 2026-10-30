@@ -184,6 +184,7 @@ struct OpenLensApp: App {
     private let workspaceService: WorkspaceService
     private let sessionInsightsService: SessionInsightsService
     private let gitHubStarsService: GitHubStarsService
+    private let meridianUsageService: MeridianUsageService
     private let savedConnectionsStore: SavedConnectionsStore
     private let recordedReplayStore: RecordedReplayStore
     private let chatEasterEgg: ChatEasterEggController
@@ -333,6 +334,7 @@ struct OpenLensApp: App {
         let workspace = WorkspaceService(connection: connection)
         let sessionInsights = SessionInsightsService()
         let gitHubStars = GitHubStarsService()
+        let meridianUsage = MeridianUsageService(connection: connection)
         let recordedReplayStore = RecordedReplayStore()
         let chatEasterEgg = ChatEasterEggController()
         let pendingAppActions = PendingAppActions()
@@ -350,6 +352,7 @@ struct OpenLensApp: App {
         self.workspaceService = workspace
         self.sessionInsightsService = sessionInsights
         self.gitHubStarsService = gitHubStars
+        self.meridianUsageService = meridianUsage
         self.recordedReplayStore = recordedReplayStore
         self.chatEasterEgg = chatEasterEgg
         self.pendingAppActions = pendingAppActions
@@ -498,6 +501,7 @@ struct OpenLensApp: App {
             .environment(\.workspaceService, workspaceService)
             .environment(\.sessionInsightsService, sessionInsightsService)
             .environment(\.gitHubStarsService, gitHubStarsService)
+            .environment(\.meridianUsageService, meridianUsageService)
             .environment(\.recordedReplayStore, recordedReplayStore)
             .environment(\.chatEasterEgg, chatEasterEgg)
             .environment(\.requestReviewPrompt, {

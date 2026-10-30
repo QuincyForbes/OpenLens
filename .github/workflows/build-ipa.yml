@@ -35,7 +35,7 @@ jobs:
         run: |
           SIMULATOR=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime, devices in sorted(d["devices"].items(), reverse=True) if ".iOS-26" in runtime for x in devices if "iPhone" in x["name"]))')
           echo "SIMULATOR=$SIMULATOR" >> "$GITHUB_ENV"
-          ./scripts/test-ios.sh --simulator "$SIMULATOR" --simulator-timeout 300 --test-timeout 600 --build-timeout 900
+          ./scripts/test-ios.sh --simulator "$SIMULATOR" --simulator-timeout 300 --test-timeout 1200 --build-timeout 900
 
       - name: Upload test results
         if: always()

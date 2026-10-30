@@ -384,6 +384,11 @@ struct WorkspaceRootView: View {
             } label: {
                 Label("Session Insights", systemImage: "chart.bar.xaxis")
             }
+            NavigationLink {
+                MeridianUsageView()
+            } label: {
+                Label("Meridian Quotas & Usage", systemImage: "gauge.with.dots.needle.67percent")
+            }
         } header: {
             Text("Insights")
         } footer: {

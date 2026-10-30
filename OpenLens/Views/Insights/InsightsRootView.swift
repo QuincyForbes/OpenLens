@@ -63,6 +63,7 @@ struct InsightsRootView: View {
                 SectionLabel(text: "INSIGHTS")
 
                 overviewCard(snapshot)
+                MeridianInsightsCard()
                 tokenCard(snapshot)
                 modelsCard(snapshot)
                 expensiveResponsesCard(snapshot)

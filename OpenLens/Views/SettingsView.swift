@@ -33,6 +33,19 @@ struct SettingsView: View {
                     if let directory = connection.selectedProjectDirectory {
                         detailRow("Workspace", value: directory)
                     }
+                    NavigationLink {
+                        MeridianUsageView()
+                    } label: {
+                        Label("Meridian Quotas & Usage", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+            } else {
+                Section("Meridian") {
+                    NavigationLink {
+                        MeridianUsageView()
+                    } label: {
+                        Label("Meridian Quotas & Usage", systemImage: "gauge.with.dots.needle.67percent")
+                    }
                 }
             }
 

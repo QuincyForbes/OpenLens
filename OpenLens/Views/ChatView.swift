@@ -21,7 +21,7 @@ struct ChatView: View {
     @GestureState private var isInputBarPressed = false
 
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(AppRouter.self) private var router
+    @Environment(AppRouter.self) private var router: AppRouter?
     @Environment(\.connection) private var connection
     @Environment(\.sessionsService) private var sessionsService
     @Environment(\.workspaceService) private var workspaceService
@@ -34,6 +34,7 @@ struct ChatView: View {
     @State private var jumpToLatestRequest: UInt = 0
     @State private var showContextStatus = false
     @State private var showSessionInsights = false
+    @State private var showMeridianUsage = false
     @State private var showRenameSessionAlert = false
     @State private var renameSessionDraft = ""
     @State private var showTodoList = false
@@ -183,6 +184,9 @@ struct ChatView: View {
                 onShowInsights: chatClient.currentSession != nil ? {
                     showSessionInsights = true
                 } : nil,
+                onShowMeridianUsage: {
+                    showMeridianUsage = true
+                },
                 onShowContext: (chatClient.showsActiveContext || chatClient.contextUsageSummary != nil) ? {
                     showContextStatus = true
                 } : nil,
@@ -196,7 +200,7 @@ struct ChatView: View {
                 onScrollToBottom: !chatClient.displayedMessages.isEmpty ? {
                     jumpToLatestRequest &+= 1
                 } : nil,
-                onSwitchSession: !chatClient.isOfflinePreviewMode ? {
+                onSwitchSession: (!chatClient.isOfflinePreviewMode && router != nil) ? {
                     showSessionSwitcher = true
                 } : nil
             )
@@ -272,7 +276,7 @@ struct ChatView: View {
             guard let session = sessionToOpen else { return }
             sessionToOpen = nil
             chatClient.prepareForOpeningSession(session)
-            router.selectChatSession(session)
+            router?.selectChatSession(session)
         }) {
             SessionSwitcherSheet(
                 selectedSessionID: chatClient.currentSession?.id,
@@ -281,7 +285,7 @@ struct ChatView: View {
                     showSessionSwitcher = false
                 },
                 onDelete: { session in
-                    router.clearChatSession(ifMatching: session.id)
+                    router?.clearChatSession(ifMatching: session.id)
                     chatClient.unloadSession(ifMatching: session.id)
                 },
                 newSessionModel: { await chatClient.newSessionModelPreference() }
@@ -300,6 +304,21 @@ struct ChatView: View {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button(AppText.done) {
                                 showSessionInsights = false
+                            }
+                        }
+                    }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(Color.appBackground)
+        }
+        .sheet(isPresented: $showMeridianUsage) {
+            NavigationStack {
+                MeridianUsageView()
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button(AppText.done) {
+                                showMeridianUsage = false
                             }
                         }
                     }

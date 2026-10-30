@@ -79,6 +79,13 @@ private struct GitHubStarsServiceKey: EnvironmentKey {
     static let defaultValue: GitHubStarsService = GitHubStarsService()
 }
 
+private struct MeridianUsageServiceKey: EnvironmentKey {
+    static let defaultValue: MeridianUsageService = {
+        let conn = ConnectionManager()
+        return MeridianUsageService(connection: conn)
+    }()
+}
+
 private struct RecordedReplayStoreKey: EnvironmentKey {
     static let defaultValue: RecordedReplayStore = RecordedReplayStore()
 }
@@ -152,6 +159,11 @@ extension EnvironmentValues {
     var gitHubStarsService: GitHubStarsService {
         get { self[GitHubStarsServiceKey.self] }
         set { self[GitHubStarsServiceKey.self] = newValue }
+    }
+
+    var meridianUsageService: MeridianUsageService {
+        get { self[MeridianUsageServiceKey.self] }
+        set { self[MeridianUsageServiceKey.self] = newValue }
     }
 
     var recordedReplayStore: RecordedReplayStore {

@@ -11,6 +11,7 @@ struct ChatHeaderToolbar: ToolbarContent {
     let visualMode: ChatVisualMode
     let onToggleRecording: (() -> Void)?
     var onShowInsights: (() -> Void)? = nil
+    var onShowMeridianUsage: (() -> Void)? = nil
     var onShowContext: (() -> Void)? = nil
     var onRenameSession: (() -> Void)? = nil
     var onSyncSession: (() -> Void)? = nil
@@ -150,6 +151,11 @@ struct ChatHeaderToolbar: ToolbarContent {
                     if let onShowInsights {
                         Button(action: onShowInsights) {
                             Label("Session Insights", systemImage: "chart.bar.xaxis")
+                        }
+                    }
+                    if let onShowMeridianUsage {
+                        Button(action: onShowMeridianUsage) {
+                            Label("Meridian Usage", systemImage: "gauge.with.dots.needle.67percent")
                         }
                     }
                     if let onShowContext {
