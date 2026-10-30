@@ -412,6 +412,22 @@ struct MessageBubbleView: View {
                 )
                 .padding(.leading, 2)
             }
+
+            if step.isError, let onReuseInComposer {
+                Button {
+                    let preview = step.outputPreview ?? step.partialOutputPreview ?? ""
+                    let snippet = preview.isEmpty ? "" : "\n```\n\(preview.prefix(400))\n```"
+                    onReuseInComposer("Please investigate and fix the `\(step.toolName)` error:\(snippet)")
+                } label: {
+                    Label("Ask agent to fix", systemImage: "wrench.and.screwdriver")
+                        .font(.caption2.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .tint(.orange)
+                .padding(.leading, 2)
+                .padding(.top, 2)
+            }
         }
         .padding(.leading, 2)
     }

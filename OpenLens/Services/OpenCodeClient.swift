@@ -392,11 +392,17 @@ actor OpenCodeClient {
                     queryItems: []
                 )
                 entries.append(contentsOf: secondPage.values)
+                if entries.count >= 2, Self.isDescendingV2MessageOrder(entries) {
+                    entries.reverse()
+                }
                 return (OCTranscriptEntry.projectV2(entries, sessionID: sessionID), secondPage.nextCursor)
             }
             return (OCTranscriptEntry.projectV2(entries, sessionID: sessionID), firstPage.nextCursor)
         }
-        let entries = try await listTranscript(sessionID: sessionID, limit: limit)
+        // V1 does not support cursor pagination or descending tail fetches;
+        // fetch the full session transcript so older and running chats do not
+        // truncate away their newest messages.
+        let entries = try await listTranscript(sessionID: sessionID, limit: nil)
         return (entries, nil)
     }
 
@@ -404,12 +410,26 @@ actor OpenCodeClient {
         guard let first = entries.first, let last = entries.last, first.id != last.id else {
             return false
         }
-        let timestamps = entries.compactMap { $0.time?.created ?? $0.contextEntry?.created }
+        let timestamps = entries.compactMap { $0.time?.created ?? $0.contextEntry?.created }.filter { $0 > 0 }
         if let firstCreated = timestamps.first, let lastCreated = timestamps.last, firstCreated != lastCreated {
             return firstCreated > lastCreated
         }
-        // IDs can be caller-provided UUIDs; lexical order is not chronology.
+        if isServerTimeOrderedID(first.id), isServerTimeOrderedID(last.id) {
+            return first.id > last.id
+        }
         return false
+    }
+
+    private nonisolated static func isServerTimeOrderedID(_ id: String) -> Bool {
+        guard !id.contains("-"),
+              let underscore = id.firstIndex(of: "_") else {
+            return false
+        }
+        let suffix = id[id.index(after: underscore)...]
+        guard let firstChar = suffix.first, firstChar.isNumber, suffix.count >= 8 else {
+            return false
+        }
+        return true
     }
 
     func listTranscript(sessionID: String, limit: Int? = nil) async throws -> [OCTranscriptEntry] {

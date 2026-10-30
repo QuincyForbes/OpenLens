@@ -138,7 +138,7 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-//                .background(isRetroChat ? RetroChatStyle.paperWarm : .clear)
+                .background(isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface)
                 .overlay(alignment: .top) {
                     (isRetroChat ? RetroChatStyle.ink : Color.appSeparator)
                         .frame(height: isRetroChat ? 2 : 0.5)
@@ -2771,9 +2771,28 @@ private struct ChatMessagesListView: View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
                 ScrollView {
-                    Color.clear.frame(height: isRetroChat ? 150 : 72)
+                    Color.clear.frame(height: isRetroChat ? 150 : 12)
 
                     LazyVStack(alignment: .leading, spacing: isRetroChat ? 13 : 16) {
+                        if !chatClient.isStreamSynchronized,
+                           timelineItems.isEmpty,
+                           chatClient.queuedPrompts.isEmpty {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                Text("Loading conversation…")
+                                    .font(.subheadline)
+                                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 48)
+                        } else if chatClient.isStreamSynchronized,
+                                  timelineItems.isEmpty,
+                                  chatClient.queuedPrompts.isEmpty,
+                                  !chatClient.isLoading,
+                                  chatClient.canCompose {
+                            emptyChatQuickStartCard
+                        }
+
                         if chatClient.hasEarlierMessages {
                             Button {
                                 loadEarlierMessages(using: proxy)
@@ -2789,6 +2808,17 @@ private struct ChatMessagesListView: View {
 
                         ForEach(timelineItems) { item in
                             timelineRow(item)
+                        }
+
+                        if chatClient.isLoading, chatClient.pendingAssistantMessage == nil {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(chatClient.currentActivity?.currentLabel ?? "Agent is working…")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                            }
+                            .padding(.vertical, 6)
                         }
 
                         let queuePositions = QueuedPrompt.queuePositions(chatClient.queuedPrompts)
@@ -2926,6 +2956,55 @@ private struct ChatMessagesListView: View {
 #endif
     }
 
+    private var emptyChatQuickStartCard: some View {
+        let suggestions = [
+            "Summarize this repository and recent changes",
+            "Check git status and any failing tests",
+            "Review open diffs and suggest improvements"
+        ]
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Quick start")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                .textCase(.uppercase)
+
+            ForEach(suggestions, id: \.self) { prompt in
+                Button {
+                    chatClient.inputText = prompt
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.appAccent)
+                        Text(prompt)
+                            .font(.subheadline)
+                            .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
+                            .multilineTextAlignment(.leading)
+                        Spacer()
+                        Image(systemName: "arrow.up.left")
+                            .font(.caption)
+                            .foregroundStyle(Color.appSecondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.appSeparator, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 16)
+    }
+
+    private func isUnfinishedRunningAssistantTail(_ message: ChatMessage) -> Bool {
+        chatClient.isLoading
+            && chatClient.displayedMessages.last?.id == message.id
+            && (message.finish == nil || message.finish?.isEmpty == true)
+    }
+
     @ViewBuilder
     private func timelineRow(_ item: ChatTimelineItem) -> some View {
         switch item.content {
@@ -2945,7 +3024,10 @@ private struct ChatMessagesListView: View {
                         Task { await chatClient.undo(message) }
                     } : nil
                 )
-                if message.role == .assistant, !message.isStreaming, !message.content.isEmpty {
+                if message.role == .assistant,
+                   !message.isStreaming,
+                   !isUnfinishedRunningAssistantTail(message),
+                   !message.content.isEmpty {
                     MessageActionsBar(
                         message: message,
                         isRetroChat: isRetroChat,
@@ -2968,6 +3050,7 @@ private struct ChatMessagesListView: View {
                 // One always-visible action row under the finished reply, so
                 // copy and share never depend on a long-press landing right.
                 if !message.isStreaming,
+                   !isUnfinishedRunningAssistantTail(message),
                    message.assistantSegments.last?.id == segment.id,
                    !message.content.isEmpty {
                     MessageActionsBar(

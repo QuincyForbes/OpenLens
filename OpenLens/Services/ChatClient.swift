@@ -1484,7 +1484,13 @@ final class ChatClient: SSEEventHandlerDelegate {
         errorMessage = nil
         isLoading = true
         currentActivity = AgentActivity()
-        currentActivity?.currentLabel = "Thinking..."
+        if let lastAssistant = messages.last(where: { $0.role == .assistant }),
+           (lastAssistant.finish == nil || lastAssistant.finish?.isEmpty == true),
+           let latestTool = lastAssistant.persistedToolSteps.last {
+            currentActivity?.currentLabel = "Running \(latestTool.toolName)…"
+        } else {
+            currentActivity?.currentLabel = "Thinking..."
+        }
         responseStartDate = Date()
         haptics.prepareForResponse()
     }

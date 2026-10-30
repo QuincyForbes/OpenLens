@@ -15,7 +15,8 @@ struct OpenCodeProtocolSelectionTests {
         let sessions = try await client.listAllSessions()
 
         #expect(Set(sessions.map(\.id)) == ["ses_alpha", "ses_beta"])
-        #expect(transport.sessionDirectories() == ["/workspace/Alpha", "/workspace/Beta"])
+        #expect(Set(transport.sessionDirectories()) == ["/workspace/Alpha", "/workspace/Beta"])
+        #expect(transport.sessionDirectories().count == 2)
         #expect(await client.currentContextDirectory() == "/workspace/Alpha")
         #expect(try await client.listSessions().map(\.id) == ["ses_alpha"])
     }

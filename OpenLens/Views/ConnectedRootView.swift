@@ -146,9 +146,16 @@ struct ConnectedRootView: View {
         guard chatClient.isLoading else { return }
 
         while !Task.isCancelled, chatClient.isLoading {
+            let needsExternalTranscriptSync = chatClient.pendingAssistantMessage == nil
+                || connection.sseClient?.state != .connected
             async let statusRefresh = chatClient.refreshCurrentSessionStatus()
             async let permissionRefresh = chatClient.recoverPendingPermission()
-            _ = await (statusRefresh, permissionRefresh)
+            async let questionRefresh = chatClient.recoverPendingQuestions()
+            async let formRefresh = chatClient.recoverPendingForms()
+            _ = await (statusRefresh, permissionRefresh, questionRefresh, formRefresh)
+            if needsExternalTranscriptSync, !Task.isCancelled {
+                _ = await chatClient.loadMessages(syncModelSelection: false)
+            }
             let interval: UInt64 = connection.sseClient?.state == .connected ? 3_000_000_000 : 1_000_000_000
             try? await Task.sleep(nanoseconds: interval)
         }

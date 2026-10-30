@@ -1175,6 +1175,7 @@ private struct NewSessionSheet: View {
     @Environment(\.connection) private var connection
     @Environment(\.savedConnections) private var savedConnections
     @Environment(\.sessionsService) private var sessionsService
+    @Environment(\.messagesService) private var messagesService
     @Environment(\.workspaceService) private var workspaceService
 
     @State private var title = ""
@@ -1186,6 +1187,8 @@ private struct NewSessionSheet: View {
     @State private var createErrorMessage: String?
     @State private var isCreating = false
     @State private var folderBrowserRequest: FolderBrowserRequest?
+    @State private var showGitHubCloneSheet = false
+    @State private var pendingCloneSelections: [String: ClonedRepositorySelection] = [:]
 
     private var selectedWorkspace: WorkspaceSelectionOption? {
         workspaceOptions.first { $0.id == selectedWorkspaceID }
@@ -1260,7 +1263,22 @@ private struct NewSessionSheet: View {
                     .presentationDragIndicator(.visible)
                     .presentationBackground(Color.appBackground)
             }
+            .sheet(isPresented: $showGitHubCloneSheet) {
+                GitHubCloneSheet(
+                    defaultParentDirectory: defaultCloneParentDirectory,
+                    onSelectRepository: selectClonedRepository
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(Color.appBackground)
+            }
         }
+    }
+
+    private var defaultCloneParentDirectory: String {
+        let candidates = workspaceOptions.compactMap(\.directory)
+            + [connection.selectedProjectDirectory].compactMap { $0 }
+        return GitHubRepositoryService.defaultParentDirectory(from: candidates)
     }
 
     private var workspaceSourceNote: some View {
@@ -1362,6 +1380,20 @@ private struct NewSessionSheet: View {
             .foregroundStyle(Color.appAccent)
             .disabled(isCreating || isLoadingWorkspaces)
             .accessibilityIdentifier("newSession.browseFolders")
+
+            Button {
+                showGitHubCloneSheet = true
+            } label: {
+                Label("Clone from GitHub", systemImage: "arrow.down.doc.fill")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.appAccent)
+            .disabled(isCreating || isLoadingWorkspaces)
+            .accessibilityIdentifier("newSession.cloneGitHub")
         }
     }
 
@@ -1528,6 +1560,30 @@ private struct NewSessionSheet: View {
         workspaceState = .loaded
     }
 
+    private func selectClonedRepository(_ selection: ClonedRepositorySelection) {
+        let optionID = "clone:\(selection.repository.fullName.lowercased())"
+        let option = WorkspaceSelectionOption(
+            id: optionID,
+            directory: selection.parentDirectory,
+            projectID: nil,
+            title: selection.repository.name,
+            subtitle: "\(selection.repository.fullName) → \(selection.targetDirectory)",
+            availability: .available,
+            isCurrent: false,
+            isRecent: false
+        )
+        pendingCloneSelections[optionID] = selection
+        workspaceOptions.removeAll { $0.id == option.id }
+        workspaceOptions.insert(option, at: 0)
+        selectedWorkspaceID = option.id
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            title = "Clone \(selection.repository.name)"
+        }
+        unavailablePreferredDirectory = nil
+        createErrorMessage = nil
+        workspaceState = .loaded
+    }
+
     private func loadWorkspaceOptions() async {
         workspaceState = .loading
         createErrorMessage = nil
@@ -1575,12 +1631,21 @@ private struct NewSessionSheet: View {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
+            let modelRef = await newSessionModel()
             let session = try await sessionsService.createSession(
                 title: trimmedTitle.isEmpty ? nil : trimmedTitle,
                 workspaceDirectory: selectedWorkspace.directory,
                 clearsWorkspaceContext: selectedWorkspace.clearsWorkspaceContext,
-                model: await newSessionModel()
+                model: modelRef
             )
+            if let cloneSelection = pendingCloneSelections[selectedWorkspace.id] {
+                _ = try? await messagesService.sendPromptAsync(
+                    sessionID: session.id,
+                    text: cloneSelection.initialPrompt,
+                    model: modelRef.map { OCPromptInput.OCModelRef(providerID: $0.providerID, modelID: $0.modelID) },
+                    variant: modelRef?.variant
+                )
+            }
             onCreated(session)
             dismiss()
         } catch {
