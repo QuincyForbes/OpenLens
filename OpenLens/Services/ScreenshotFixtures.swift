@@ -449,7 +449,25 @@ enum ScreenshotFixtures {
 
     static let defaultSessionID = "session-screenshot-1"
 
-    static let sessions: [OCSession] = showsExecutionOutcomes ? [
+    static var showsSessionOrganization: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_SESSION_ORGANIZATION")
+    }
+
+    private static var organizationSessions: [OCSession] {
+        [
+            OCSession(id: defaultSessionID, projectID: projectID, directory: projectPath,
+                      title: "Choose the next release changes", time: .init(created: nowMilliseconds - dayMilliseconds, updated: nowMilliseconds - 60_000)),
+            OCSession(id: "session-screenshot-2", projectID: projectID, directory: "/workspace/OpenLens-feature",
+                      title: "Fix session switching in a worktree", time: .init(created: nowMilliseconds - dayMilliseconds, updated: nowMilliseconds - 120_000,
+                                                                          idle: nowMilliseconds - 120_000), outcome: "failed"),
+            OCSession(id: "session-screenshot-3", projectID: projectID, directory: projectPath + "/Sources",
+                      title: "Review the repository grouping", time: .init(created: nowMilliseconds - dayMilliseconds, updated: nowMilliseconds - hourMilliseconds)),
+            OCSession(id: "session-screenshot-4", projectID: "separate-repository", directory: "/archive/OpenLens",
+                      title: "Document the previous release", time: .init(created: nowMilliseconds - dayMilliseconds, updated: nowMilliseconds - 2 * hourMilliseconds)),
+        ]
+    }
+
+    static let sessions: [OCSession] = showsSessionOrganization ? organizationSessions : showsExecutionOutcomes ? [
         outcomeSession(id: defaultSessionID, title: "Verify the release build", outcome: executionState.rawValue, minutesAgo: 8),
         outcomeSession(id: "session-screenshot-2", title: "Improve session recovery", outcome: "succeeded", minutesAgo: 20),
         outcomeSession(id: "session-screenshot-3", title: "Run integration tests", outcome: "failed", minutesAgo: 30),

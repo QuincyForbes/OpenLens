@@ -175,7 +175,8 @@ actor OpenCodeClient {
                 return collected.sorted { $0.0 < $1.0 }
             }
             for (_, sessions) in directoryResults {
-                for session in sessions where sessionsByID[session.id] == nil {
+                for session in sessions {
+                    if let existing = sessionsByID[session.id], existing.updatedAt >= session.updatedAt { continue }
                     sessionsByID[session.id] = session
                 }
             }

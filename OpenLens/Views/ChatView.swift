@@ -21,6 +21,7 @@ struct ChatView: View {
     @GestureState private var isInputBarPressed = false
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(AppRouter.self) private var router
     @Environment(\.connection) private var connection
     @Environment(\.sessionsService) private var sessionsService
     @Environment(\.workspaceService) private var workspaceService
@@ -28,6 +29,8 @@ struct ChatView: View {
     @AppStorage(FeatureFlags.debugFeaturesKey) private var debugFeaturesEnabled: Bool = FeatureFlags.debugFeaturesDefault
 
     @State private var showModelPicker = false
+    @State private var showSessionSwitcher = false
+    @State private var sessionToOpen: OCSession?
     @State private var jumpToLatestRequest: UInt = 0
     @State private var showContextStatus = false
     @State private var showSessionInsights = false
@@ -192,6 +195,9 @@ struct ChatView: View {
                 } : nil,
                 onScrollToBottom: !chatClient.displayedMessages.isEmpty ? {
                     jumpToLatestRequest &+= 1
+                } : nil,
+                onSwitchSession: !chatClient.isOfflinePreviewMode ? {
+                    showSessionSwitcher = true
                 } : nil
             )
         }
@@ -262,6 +268,25 @@ struct ChatView: View {
 
         // MARK: - Sheets
 
+        .sheet(isPresented: $showSessionSwitcher, onDismiss: {
+            guard let session = sessionToOpen else { return }
+            sessionToOpen = nil
+            chatClient.prepareForOpeningSession(session)
+            router.selectChatSession(session)
+        }) {
+            SessionSwitcherSheet(
+                selectedSessionID: chatClient.currentSession?.id,
+                onSelect: { session in
+                    sessionToOpen = session
+                    showSessionSwitcher = false
+                },
+                onDelete: { session in
+                    router.clearChatSession(ifMatching: session.id)
+                    chatClient.unloadSession(ifMatching: session.id)
+                },
+                newSessionModel: { await chatClient.newSessionModelPreference() }
+            )
+        }
         .sheet(isPresented: $chatClient.showActivityCard) {
             activityCardSheet
         }

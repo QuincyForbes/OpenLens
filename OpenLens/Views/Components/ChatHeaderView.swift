@@ -15,6 +15,7 @@ struct ChatHeaderToolbar: ToolbarContent {
     var onRenameSession: (() -> Void)? = nil
     var onSyncSession: (() -> Void)? = nil
     var onScrollToBottom: (() -> Void)? = nil
+    var onSwitchSession: (() -> Void)? = nil
 
     private var statusColor: Color {
         if visualMode.isRetro {
@@ -65,12 +66,22 @@ struct ChatHeaderToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             VStack(alignment: .center, spacing: 0) {
-                Text(sessionTitle ?? "OpenCode")
-                    .font(isRetroChat ? RetroChatStyle.headerFont : .system(size: 16, weight: .semibold))
-                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : .primary)
-                    .lineLimit(1)
-                    .padding(.vertical, 4)
-                    .padding(.horizontal)
+                if let onSwitchSession {
+                    Button(action: onSwitchSession) {
+                        HStack(spacing: 5) {
+                            sessionTitleLabel
+                            Image(systemName: "chevron.down")
+                                .font(.caption2.weight(.bold))
+                        }
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Switch session, \(sessionTitle ?? "OpenCode")")
+                    .accessibilityIdentifier("chat.switchSession")
+                } else {
+                    sessionTitleLabel
+                }
 
                 HStack(spacing: 4) {
                     Circle()
@@ -131,6 +142,11 @@ struct ChatHeaderToolbar: ToolbarContent {
         } else if onShowInsights != nil || onShowContext != nil || onRenameSession != nil || onSyncSession != nil {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    if let onSwitchSession {
+                        Button(action: onSwitchSession) {
+                            Label("Switch Session", systemImage: "bubble.left.and.bubble.right")
+                        }
+                    }
                     if let onShowInsights {
                         Button(action: onShowInsights) {
                             Label("Session Insights", systemImage: "chart.bar.xaxis")
@@ -165,5 +181,14 @@ struct ChatHeaderToolbar: ToolbarContent {
                 .accessibilityLabel("Session actions")
             }
         }
+    }
+
+    private var sessionTitleLabel: some View {
+        Text(sessionTitle ?? "OpenCode")
+            .font(isRetroChat ? RetroChatStyle.headerFont : .headline)
+            .foregroundStyle(isRetroChat ? RetroChatStyle.ink : .primary)
+            .lineLimit(1)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 4)
     }
 }

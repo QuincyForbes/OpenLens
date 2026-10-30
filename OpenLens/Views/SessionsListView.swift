@@ -43,6 +43,9 @@ struct SessionsListView: View {
 
     @State private var viewState: ViewState
     @State private var sessions: [OCSession]
+    @State private var repositoryIndex = SessionRepositoryIndex()
+    @State private var lastCatalogRefresh: Date?
+    @State private var refreshWarning: String?
     @State private var sessionStatuses: [String: OCSessionStatus]
     @State private var openedSessionIDs: Set<String> = []
     @State private var failedOutcomeSessionIDs: Set<String> = []
@@ -57,10 +60,11 @@ struct SessionsListView: View {
     @State private var searchQuery = ""
     @State private var sessionFilter: SessionFilter = .all
     @State private var selectedRepositoryID: String?
-    @AppStorage("sessions.layout") private var layout: SessionListOrganization.Layout = .recent
+    @AppStorage("sessions.layout") private var layout: SessionListOrganization.Layout = .focus
     @AppStorage("sessions.sortOrder") private var sortOrder: SessionListOrganization.SortOrder = .working
     /// Sessions with a permission, question or form waiting on the person.
     @State private var attentionSessionIDs: Set<String> = []
+    @State private var attentionLabels: [String: String] = [:]
     @State private var isOnScreen = true
     @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
@@ -94,7 +98,8 @@ struct SessionsListView: View {
         switch initialState {
         case .loaded(let sessions):
             self._viewState = State(initialValue: .loaded)
-            self._sessions = State(initialValue: sessions)
+            self._sessions = State(initialValue: SessionListOrganization.uniqueSessions(sessions))
+            self._repositoryIndex = State(initialValue: SessionRepositoryIndex(sessions: sessions))
         case .error(let message):
             self._viewState = State(initialValue: .error(message))
             self._sessions = State(initialValue: [])
@@ -170,7 +175,7 @@ struct SessionsListView: View {
             }
             if !trimmedQuery.isEmpty {
                 let matchesTitle = session.title.localizedCaseInsensitiveContains(trimmedQuery)
-                let matchesProject = SessionListOrganization.repositoryTitle(for: session)
+                let matchesProject = repositoryIndex.repository(for: session).title
                     .localizedCaseInsensitiveContains(trimmedQuery)
                 let matchesID = session.id.localizedCaseInsensitiveContains(trimmedQuery)
                 let matchesPath = session.directory?.localizedCaseInsensitiveContains(trimmedQuery) == true
@@ -181,15 +186,21 @@ struct SessionsListView: View {
     }
 
     private var groupedSessions: [SessionProjectGroup] {
-        SessionListOrganization.groups(from: filteredSessions, statuses: sessionStatuses, sortOrder: sortOrder)
+        SessionListOrganization.groups(from: filteredSessions, statuses: sessionStatuses, sortOrder: sortOrder, repositoryIndex: repositoryIndex)
     }
 
     private var timelineSections: [SessionTimelineSection] {
-        SessionListOrganization.timeline(from: filteredSessions, statuses: sessionStatuses)
+        if layout == .focus {
+            return SessionListOrganization.focus(
+                from: filteredSessions, statuses: sessionStatuses,
+                attentionIDs: attentionSessionIDs, pinnedIDs: sessionsService.pinnedSessionIDs
+            )
+        }
+        return SessionListOrganization.timeline(from: filteredSessions, statuses: sessionStatuses)
     }
 
     private var repositories: [SessionProjectGroup] {
-        SessionListOrganization.groups(from: sessions, statuses: [:], sortOrder: .repository)
+        SessionListOrganization.groups(from: sessions, statuses: [:], sortOrder: .repository, repositoryIndex: repositoryIndex)
     }
 
     /// Repository names shared by several folders, so the filter menu shows their full paths instead.
@@ -209,6 +220,7 @@ struct SessionsListView: View {
     private var alwaysVisibleSessionIDs: Set<String> {
         Set(sessionStatuses.filter { SessionListOrganization.isWorking($0.value) }.map(\.key))
             .union(attentionSessionIDs)
+            .union(sessionsService.pinnedSessionIDs)
     }
 
     // MARK: - Body
@@ -261,17 +273,22 @@ struct SessionsListView: View {
         .onChange(of: sessionsService.confirmedViewedMarkers, initial: true) { _, _ in
             sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
         }
-        .onChange(of: sessions.map { projectGroupID(for: $0) }) { _, repositoryIDs in
-            if let selectedRepositoryID, !repositoryIDs.contains(selectedRepositoryID) {
-                self.selectedRepositoryID = nil
-            }
+        .onChange(of: sessions, initial: true) { _, _ in
+            rebuildRepositoryIndex()
+        }
+        .onChange(of: sessionsService.repositoryProjects.map { "\($0.id):\($0.worktree ?? "")" }) { _, _ in
+            rebuildRepositoryIndex()
         }
         .task(id: pollTaskKey) {
             guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
             let shouldRefreshAllInactive = !hasRefreshedInitialInactiveOutcomes
             hasRefreshedInitialInactiveOutcomes = true
-            await loadSessionStatuses(refreshInactive: shouldRefreshAllInactive)
-            await refreshAttentionSessions()
+            if shouldRefreshAllInactive {
+                await loadSessionStatuses(refreshInactive: true)
+                await refreshAttentionSessions()
+            } else {
+                await loadSessions()
+            }
             guard connection.serverCapabilities?.protocolVersion == .v2
                     || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
             var lastAttentionRefresh = Date()
@@ -298,7 +315,7 @@ struct SessionsListView: View {
     private var presentationContent: some View {
         if isSidebar {
             VStack(spacing: 0) {
-                SessionsSidebarHeader(onCreate: presentNewSessionSheet)
+                SessionsSidebarHeader(onCreate: presentNewSessionSheet, onRefresh: retryLoadingSessions, isRefreshing: isLoading)
                 sessionStateContent
             }
         } else {
@@ -313,6 +330,16 @@ struct SessionsListView: View {
                 .navigationTitle(AppText.sessions)
                 .searchable(text: $searchQuery, prompt: "Search sessions or projects")
                 .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(action: retryLoadingSessions) {
+                            if isLoading { ProgressView() }
+                            else { Image(systemName: "arrow.clockwise") }
+                        }
+                        .disabled(isLoading)
+                        .accessibilityLabel("Refresh sessions")
+                        .accessibilityHint("Fetches sessions and updates their activity order")
+                        .accessibilityIdentifier("sessions.refresh")
+                    }
                     if let host = connection.serverHostDisplay {
                         ToolbarItem(placement: .principal) {
                             ConnectedHostCapsule(host: host, isReconnecting: connection.isReconnecting)
@@ -359,13 +386,13 @@ struct SessionsListView: View {
     private var sessionList: some View {
         let repositories = self.repositories
         // Rows only name their repository when the timeline mixes several of them.
-        let showsRepositoryOnRows = layout == .recent && selectedRepositoryID == nil && repositories.count > 1
+        let showsRepositoryOnRows = layout != .repository && selectedRepositoryID == nil && repositories.count > 1
         return ScrollView {
             LazyVStack(spacing: isSidebar ? 12 : 18) {
                 listControls(repositories: repositories)
 
                 switch layout {
-                case .recent:
+                case .focus, .recent:
                     let sections = timelineSections
                     if sections.isEmpty {
                         noMatchingSessionsView
@@ -408,6 +435,11 @@ struct SessionsListView: View {
 
     private func listControls(repositories: [SessionProjectGroup]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
+            if isSidebar {
+                TextField("Search sessions or repositories", text: $searchQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("sessions.search")
+            }
             Picker(AppText.sessionsLayout, selection: $layout) {
                 ForEach(SessionListOrganization.Layout.allCases) { option in
                     Text(option.rawValue).tag(option)
@@ -418,6 +450,21 @@ struct SessionsListView: View {
 
             organizationBar(repositories: repositories)
             sessionFilterBar
+
+            if let message = errorMessage ?? refreshWarning {
+                HStack(alignment: .top) {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                    Spacer(minLength: 4)
+                    Button("Retry", action: retryLoadingSessions)
+                        .disabled(isLoading)
+                }
+                .foregroundStyle(Color.appWarning)
+            } else if let lastCatalogRefresh {
+                Text("Updated \(lastCatalogRefresh.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(Color.appSecondary)
+            }
         }
     }
 
@@ -537,34 +584,23 @@ struct SessionsListView: View {
         let workingCount = group.sessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }.count
 
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .center, spacing: 6) {
                         Image(systemName: "folder")
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundStyle(Color.appPrimary)
 
                         Text(group.title)
-                            .font(.system(size: isSidebar ? 15 : 18, weight: .semibold, design: .rounded))
+                            .font(.headline)
                             .foregroundStyle(Color.appPrimary)
                             .lineLimit(1)
 
-                        Text("\u{00B7}")
-                            .font(.system(size: 12, design: .rounded))
-                            .foregroundStyle(Color.appSecondary)
+                        Spacer(minLength: 4)
 
                         Text(AppText.groupedProjectCount(group.sessions.count))
-                            .font(.system(size: 12, design: .rounded))
+                            .font(.caption)
                             .foregroundStyle(Color.appSecondary)
-
-                        if workingCount > 0 {
-                            Text(AppText.sessionsWorkingCount(workingCount))
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Color.appAccent)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Color.appAccent.opacity(0.12), in: Capsule())
-                        }
                     }
                     if let subtitle = group.subtitle {
                         Text(subtitle)
@@ -573,24 +609,28 @@ struct SessionsListView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                }
-
-                Spacer()
-
-                if hiddenSessionCount > 0, !isSearching {
-                    Button {
-                        toggleProjectExpansion(group.id)
-                    } label: {
-                        Text(isExpanded ? AppText.showFewerSessions : AppText.showMoreSessions(hiddenSessionCount))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    if workingCount > 0 {
+                        Label(AppText.sessionsWorkingCount(workingCount), systemImage: "circle.dotted")
+                            .font(.caption)
                             .foregroundStyle(Color.appAccent)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, sectionHeaderInset)
 
             sessionCard(displayedSessions, showsRepository: false)
+            if hiddenSessionCount > 0, !isSearching {
+                Button {
+                    toggleProjectExpansion(group.id)
+                } label: {
+                    Label(isExpanded ? AppText.showFewerSessions : AppText.showMoreSessions(hiddenSessionCount),
+                          systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.appAccent)
+            }
         }
     }
 
@@ -624,7 +664,7 @@ struct SessionsListView: View {
 
     /// Rows of one section. Pushed lists get a bordered surface with separators; the sidebar stays flat.
     private func sessionCard(_ sessions: [OCSession], showsRepository: Bool) -> some View {
-        VStack(spacing: 0) {
+        LazyVStack(spacing: 0) {
             ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
                 sessionButton(session, showsRepository: showsRepository)
 
@@ -659,6 +699,11 @@ struct SessionsListView: View {
         .buttonStyle(.plain)
         .contextMenu {
             Button {
+                sessionsService.togglePin(session.id)
+            } label: {
+                Label(sessionsService.pinnedSessionIDs.contains(session.id) ? "Unpin" : "Pin for follow-up", systemImage: "pin")
+            }
+            Button {
                 renameTitleText = session.title
                 sessionToRename = session
                 showRenameAlert = true
@@ -690,7 +735,7 @@ struct SessionsListView: View {
     private func sessionRow(_ session: OCSession, showsRepository: Bool) -> some View {
         let statusType = sessionStatuses[session.id]?.type
         let isBusy = statusType == .busy || statusType == .retry
-        let isSelected = isSidebar && selectedSessionID == session.id
+        let isSelected = selectedSessionID == session.id
         let showsListExecutionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
             || ScreenshotFixtures.showsExecutionOutcomes
 
@@ -698,8 +743,24 @@ struct SessionsListView: View {
             VStack(alignment: .leading, spacing: 4) {
                 SessionWorkingTitle(
                     title: session.title.isEmpty ? AppText.titleUntitled : session.title,
-                    isWorking: isBusy
+                    isWorking: isBusy,
+                    lineLimit: 2
                 )
+
+                if let attention = attentionLabels[session.id] {
+                    Text(attention)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.appWarning)
+                }
+
+                if layout == .repository, let directory = session.directory,
+                   SessionRepositoryIndex.pathKey(directory) != SessionRepositoryIndex.pathKey(repositoryIndex.repository(for: session).directory) {
+                    Text(directory)
+                        .font(.caption)
+                        .foregroundStyle(Color.appSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
 
                 if !isBusy, showsListExecutionOutcomes,
                    let outcome = session.executionOutcomeVisibleOnSessionList() {
@@ -722,6 +783,13 @@ struct SessionsListView: View {
             }
 
             Spacer(minLength: 8)
+
+            if sessionsService.pinnedSessionIDs.contains(session.id) {
+                Image(systemName: "pin.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.appAccent)
+                    .accessibilityLabel("Pinned for follow-up")
+            }
 
             if attentionSessionIDs.contains(session.id) {
                 Image(systemName: "exclamationmark.bubble.fill")
@@ -759,7 +827,7 @@ struct SessionsListView: View {
     }
 
     private func repositoryChip(for session: OCSession) -> some View {
-        let title = SessionListOrganization.repositoryTitle(for: session)
+        let title = repositoryIndex.repository(for: session).title
         return HStack(spacing: 4) {
             Image(systemName: "folder")
                 .font(.system(size: 9, weight: .bold))
@@ -821,9 +889,11 @@ struct SessionsListView: View {
 
     private func loadSessions() async {
         guard !Task.isCancelled, !isLoading else { return }
+        let client = connection.client
         outcomeRefreshGeneration &+= 1
         let generation = outcomeRefreshGeneration
         viewState = .loading
+        refreshWarning = nil
         defer {
             if generation == outcomeRefreshGeneration, case .loading = viewState {
                 viewState = .loaded
@@ -831,13 +901,16 @@ struct SessionsListView: View {
         }
         do {
             let result = try await sessionsService.listAllSessions()
-            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration, connection.client === client else { return }
             let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs)
             let snapshot = await sessionsService.refreshSessionOutcomes(
-                in: result, previousStatuses: sessionStatuses, openedSessionIDs: requestedIDs, refreshInactive: true
+                in: result, previousStatuses: sessionStatuses, openedSessionIDs: requestedIDs
             )
-            guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration, connection.client === client else { return }
             applyExecutionSnapshot(snapshot, requestedIDs: requestedIDs)
+            await refreshAttentionSessions(force: true)
+            guard !Task.isCancelled, generation == outcomeRefreshGeneration, connection.client === client else { return }
+            lastCatalogRefresh = .now
             viewState = .loaded
         } catch is CancellationError {
             return
@@ -864,8 +937,17 @@ struct SessionsListView: View {
         }
     }
 
-    private func refreshAttentionSessions() async {
-        guard !Task.isCancelled, let snapshot = try? await inboxService.loadInbox(maxAge: 5), !Task.isCancelled else { return }
+    private func refreshAttentionSessions(force: Bool = false) async {
+        guard !Task.isCancelled else { return }
+        let generation = outcomeRefreshGeneration
+        let client = connection.client
+        guard let snapshot = try? await inboxService.loadInbox(maxAge: force ? 0 : 5), !Task.isCancelled else {
+            if force, !Task.isCancelled, generation == outcomeRefreshGeneration, connection.client === client {
+                refreshWarning = "Sessions updated, but pending requests could not be refreshed."
+            }
+            return
+        }
+        guard generation == outcomeRefreshGeneration, connection.client === client else { return }
         var ids = Set<String>()
         ids.formUnion(snapshot.permissions.compactMap(\.sessionID))
         ids.formUnion(snapshot.questions.map(\.sessionID))
@@ -873,12 +955,25 @@ struct SessionsListView: View {
         if ids != attentionSessionIDs {
             attentionSessionIDs = ids
         }
+        var labels: [String: String] = [:]
+        for permission in snapshot.permissions {
+            if let id = permission.sessionID { labels[id] = "Permission needed" }
+        }
+        for question in snapshot.questions { labels[question.sessionID] = "Answer needed" }
+        for form in snapshot.sessionForms {
+            labels[form.sessionID] = "Form waiting for your response"
+        }
+        attentionLabels = labels
+        if let warning = snapshot.warning { refreshWarning = warning }
     }
 
     private func applyExecutionSnapshot(_ snapshot: SessionExecutionSnapshot, requestedIDs: Set<String>) {
-        sessions = sessionsService.applyingConfirmedViewedMarkers(to: snapshot.sessions)
+        sessions = SessionListOrganization.uniqueSessions(sessionsService.applyingConfirmedViewedMarkers(to: snapshot.sessions))
         sessionStatuses = snapshot.statuses
         failedOutcomeSessionIDs = snapshot.failedOutcomeSessionIDs
+        if snapshot.statusRefreshFailed {
+            refreshWarning = "Activity status could not be refreshed. Showing the last known status."
+        }
         openedSessionIDs.subtract(requestedIDs)
         pruneExpandedProjects(using: snapshot.sessions)
     }
@@ -957,17 +1052,29 @@ struct SessionsListView: View {
     }
 
     private func pruneExpandedProjects(using sessions: [OCSession]) {
-        let validGroupIDs = Set(sessions.map(projectGroupID(for:)))
+        let index = SessionRepositoryIndex(sessions: sessions, projects: sessionsService.repositoryProjects)
+        let validGroupIDs = Set(sessions.map { index.repository(for: $0).id })
         expandedProjectIDs = expandedProjectIDs.intersection(validGroupIDs)
     }
 
     private func projectGroupID(for session: OCSession) -> String {
-        SessionListOrganization.repositoryID(for: session)
+        repositoryIndex.repository(for: session).id
+    }
+
+    private func rebuildRepositoryIndex() {
+        repositoryIndex = SessionRepositoryIndex(sessions: sessions, projects: sessionsService.repositoryProjects)
+        let validIDs = Set(sessions.map { repositoryIndex.repository(for: $0).id })
+        if let selectedRepositoryID, !validIDs.contains(selectedRepositoryID) {
+            self.selectedRepositoryID = nil
+        }
+        expandedProjectIDs.formIntersection(validIDs)
     }
 }
 
 private struct SessionsSidebarHeader: View {
     let onCreate: () -> Void
+    let onRefresh: () -> Void
+    let isRefreshing: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -977,11 +1084,19 @@ private struct SessionsSidebarHeader: View {
 
             Spacer()
 
+            Button(action: onRefresh) {
+                if isRefreshing { ProgressView() }
+                else { Image(systemName: "arrow.clockwise") }
+            }
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(isRefreshing)
+            .accessibilityLabel("Refresh sessions")
+
             Button(action: onCreate) {
                 Image(systemName: "plus")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.appPrimary)
-                    .frame(width: 30, height: 30)
+                    .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

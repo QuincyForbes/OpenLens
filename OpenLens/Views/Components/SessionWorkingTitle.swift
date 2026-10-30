@@ -4,6 +4,7 @@ import SwiftUI
 struct SessionWorkingTitle: View {
     let title: String
     let isWorking: Bool
+    var lineLimit: Int = 1
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -61,7 +62,7 @@ struct SessionWorkingTitle: View {
     private var titleText: some View {
         Text(title)
             .font(titleFont)
-            .lineLimit(1)
+            .lineLimit(lineLimit)
     }
 }
 

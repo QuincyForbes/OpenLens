@@ -151,7 +151,7 @@ struct SessionListOrganizationTests {
         date.timeIntervalSince1970 * 1000
     }
 
-    @Test func timelinePinsWorkingChatsAheadOfEveryDateBucket() {
+    @Test func recentTimelineUsesChronologyEvenWhenOlderChatsAreWorking() {
         let calendar = utcCalendar
         let startOfToday = calendar.startOfDay(for: referenceNow)
         let sessions = [
@@ -166,10 +166,9 @@ struct SessionListOrganizationTests {
             calendar: calendar
         )
 
-        #expect(sections.map(\.title) == [AppText.sessionsWorkingNow, AppText.sessionsToday])
-        #expect(sections[0].isWorking)
-        #expect(sections[0].sessions.map(\.id) == ["retry", "stale-busy"])
-        #expect(sections[1].sessions.map(\.id) == ["today"])
+        #expect(sections.map(\.title) == [AppText.sessionsToday, AppText.sessionsPreviousWeek, AppText.sessionsOlder])
+        #expect(sections.allSatisfy { !$0.isWorking })
+        #expect(sections.flatMap(\.sessions).map(\.id) == ["today", "retry", "stale-busy"])
     }
 
     @Test func timelineBucketsIdleChatsByCalendarDayRelativeToNow() {

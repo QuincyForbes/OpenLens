@@ -9,6 +9,7 @@ struct SessionExecutionSnapshot: Sendable {
     let sessions: [OCSession]
     let statuses: [String: OCSessionStatus]
     let failedOutcomeSessionIDs: Set<String>
+    var statusRefreshFailed: Bool = false
 
     init(sessions: [OCSession], statuses: [String: OCSessionStatus], failedOutcomeSessionIDs: Set<String> = []) {
         self.sessions = sessions
@@ -26,6 +27,30 @@ final class SessionsService {
     private let connection: ConnectionManager
     private var viewedMarkers: [String: Double] = [:]
     private var viewedClientID: ObjectIdentifier?
+    private weak var projectsClient: OpenCodeClient?
+    private var catalogProjects: [OCProject] = []
+    private var catalogGeneration: UInt = 0
+    private var pinsByServer: [String: [String]] = UserDefaults.standard.dictionary(forKey: "sessions.pinsByServer") as? [String: [String]] ?? [:]
+
+    var repositoryProjects: [OCProject] {
+        let catalog = connection.client != nil && projectsClient === connection.client ? catalogProjects : []
+        return catalog + (connection.currentProject.map { [$0] } ?? [])
+    }
+
+    private var pinScope: String? { connection.serverURL?.absoluteString }
+
+    var pinnedSessionIDs: Set<String> {
+        guard let pinScope else { return [] }
+        return Set(pinsByServer[pinScope] ?? [])
+    }
+
+    func togglePin(_ sessionID: String) {
+        guard let pinScope else { return }
+        var ids = pinnedSessionIDs
+        if !ids.insert(sessionID).inserted { ids.remove(sessionID) }
+        pinsByServer[pinScope] = ids.sorted()
+        UserDefaults.standard.set(pinsByServer, forKey: "sessions.pinsByServer")
+    }
 
     var confirmedViewedMarkers: [String: Double] {
         guard let client = connection.client, viewedClientID == ObjectIdentifier(client) else { return [:] }
@@ -113,8 +138,18 @@ final class SessionsService {
             throw OpenCodeError.notConnected
         }
 
+        catalogGeneration &+= 1
+        let generation = catalogGeneration
+        async let projectRead = try? client.listProjects()
         let sessions = try await client.listAllSessions()
-        return visibleSessions(from: resolvingProjectDirectories(in: sessions))
+        let projects = await projectRead
+        try Task.checkCancellation()
+        guard connection.client === client else { throw CancellationError() }
+        if generation == catalogGeneration, let projects {
+            catalogProjects = projects
+            projectsClient = client
+        }
+        return visibleSessions(from: Self.applyingProjectDirectories(sessions, projects: projects ?? repositoryProjects))
     }
 
     func getSession(id: String) async throws -> OCSession {
@@ -182,6 +217,7 @@ final class SessionsService {
         }
 
         let _ = try await client.deleteSession(id: session.id)
+        if connection.client === client, pinnedSessionIDs.contains(session.id) { togglePin(session.id) }
     }
 
     // MARK: - Update Title
@@ -257,12 +293,13 @@ final class SessionsService {
     }
 
     private func visibleSessions(from sessions: [OCSession]) -> [OCSession] {
+        let sessions = SessionListOrganization.uniqueSessions(sessions)
         let rootSessions = sessions.filter { session in
             session.parentID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
         }
 
         let source = rootSessions.isEmpty ? sessions : rootSessions
-        return source.sorted { $0.updatedAt > $1.updatedAt }
+        return source.sorted { $0.updatedAt == $1.updatedAt ? $0.id < $1.id : $0.updatedAt > $1.updatedAt }
     }
 
     static func applyingProjectDirectories(
@@ -271,7 +308,8 @@ final class SessionsService {
     ) -> [OCSession] {
         var directoriesByProjectID: [String: String] = [:]
         for project in projects {
-            guard let directory = project.worktree?.nilIfBlank,
+            guard SessionRepositoryIndex.projectID(project.id) != nil,
+                  let directory = project.worktree?.nilIfBlank,
                   directoriesByProjectID[project.id] == nil else {
                 continue
             }
@@ -305,7 +343,7 @@ final class SessionsService {
     private func resolvingProjectDirectories(in sessions: [OCSession]) -> [OCSession] {
         Self.applyingProjectDirectories(
             sessions,
-            projects: connection.currentProject.map { [$0] } ?? []
+            projects: repositoryProjects
         )
     }
 
@@ -383,7 +421,9 @@ final class SessionsService {
     ) async -> SessionExecutionSnapshot {
         guard let statuses = try? await getSessionStatuses() else {
             let retryIDs = refreshInactive ? Set(sessions.map(\.id)) : openedSessionIDs
-            return SessionExecutionSnapshot(sessions: sessions, statuses: previousStatuses, failedOutcomeSessionIDs: retryIDs)
+            var snapshot = SessionExecutionSnapshot(sessions: sessions, statuses: previousStatuses, failedOutcomeSessionIDs: retryIDs)
+            snapshot.statusRefreshFailed = true
+            return snapshot
         }
         guard !Task.isCancelled else {
             return SessionExecutionSnapshot(sessions: sessions, statuses: previousStatuses)
