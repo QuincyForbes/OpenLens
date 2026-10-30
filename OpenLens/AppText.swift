@@ -280,6 +280,15 @@ enum AppText {
     static let serverCheckYesSubtitle = "Choose how to connect"
     static let sessions = "Sessions"
     static let sessionsLoadErrorTitle = "Couldn't Load Sessions"
+    static let sessionsAllRepositories = "All repositories"
+    static let sessionsLayout = "Layout"
+    static let sessionsOlder = "Older"
+    static let sessionsPreviousMonth = "Previous 30 days"
+    static let sessionsPreviousWeek = "Previous 7 days"
+    static let sessionsSortChats = "Sort chats"
+    static let sessionsToday = "Today"
+    static let sessionsWorkingNow = "Working now"
+    static let sessionsYesterday = "Yesterday"
     static let selectSessionSubtitle = "Choose a session from the sidebar to open its conversation."
     static let selectSessionTitle = "Select a Session"
     static let settings = "Settings"
@@ -484,6 +493,10 @@ enum AppText {
 
     static func groupedProjectCount(_ count: Int) -> String {
         "\(count) chat\(count == 1 ? "" : "s")"
+    }
+
+    static func sessionsWorkingCount(_ count: Int) -> String {
+        "\(count) working"
     }
 
     static func showMoreSessions(_ remainingCount: Int) -> String {

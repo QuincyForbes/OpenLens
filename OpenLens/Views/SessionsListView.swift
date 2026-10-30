@@ -22,22 +22,8 @@ struct SessionsListView: View {
         let id = UUID()
     }
 
-    private struct SessionProjectGroup: Identifiable {
-        let id: String
-        let title: String
-        let subtitle: String?
-        let sessions: [OCSession]
-
-        var visibleSessions: [OCSession] {
-            Array(sessions.prefix(Self.collapsedSessionLimit))
-        }
-
-        var hiddenSessionCount: Int {
-            max(sessions.count - Self.collapsedSessionLimit, 0)
-        }
-
-        static let collapsedSessionLimit = 4
-    }
+    private typealias SessionProjectGroup = SessionListOrganization.RepositoryGroup
+    private typealias SessionTimelineSection = SessionListOrganization.TimelineSection
 
     private static let sessionExpansionAnimation: Animation = .spring(response: 0.28, dampingFraction: 0.9)
 
@@ -70,6 +56,9 @@ struct SessionsListView: View {
     @State private var showRenameAlert = false
     @State private var searchQuery = ""
     @State private var sessionFilter: SessionFilter = .all
+    @State private var selectedRepositoryID: String?
+    @AppStorage("sessions.layout") private var layout: SessionListOrganization.Layout = .recent
+    @AppStorage("sessions.sortOrder") private var sortOrder: SessionListOrganization.SortOrder = .working
     /// Sessions with a permission, question or form waiting on the person.
     @State private var attentionSessionIDs: Set<String> = []
     @State private var isOnScreen = true
@@ -131,19 +120,25 @@ struct SessionsListView: View {
     }
 
     private var isSearching: Bool {
-        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sessionFilter != .all
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || sessionFilter != .all || selectedRepositoryID != nil
+    }
+
+    private var repositorySessions: [OCSession] {
+        guard let selectedRepositoryID else { return sessions }
+        return sessions.filter { projectGroupID(for: $0) == selectedRepositoryID }
     }
 
     private var runningSessionCount: Int {
-        sessions.filter { sessionStatuses[$0.id]?.type == .busy || sessionStatuses[$0.id]?.type == .retry }.count
+        repositorySessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }.count
     }
 
     private var attentionSessionCount: Int {
-        sessions.filter { attentionSessionIDs.contains($0.id) }.count
+        repositorySessions.filter { attentionSessionIDs.contains($0.id) }.count
     }
 
     private var unreadSessionCount: Int {
-        sessions.filter { session in
+        repositorySessions.filter { session in
             let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
             return !isBusy && session.hasUnreadResult
         }.count
@@ -158,50 +153,62 @@ struct SessionsListView: View {
         PollTaskKey(scenePhase: scenePhase, isPollingActive: isSidebar || isOnScreen)
     }
 
-    private var groupedSessions: [SessionProjectGroup] {
-        var groupedByID: [String: [OCSession]] = [:]
-        var groupOrder: [String] = []
-        var titles: [String: String] = [:]
-        var subtitles: [String: String?] = [:]
+    /// Chats that pass the repository, status and search filters, in catalog order.
+    private var filteredSessions: [OCSession] {
         let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        for session in sessions {
+        return repositorySessions.filter { session in
             let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
             switch sessionFilter {
             case .all:
                 break
             case .running:
-                guard isBusy else { continue }
+                guard isBusy else { return false }
             case .unread:
-                guard !isBusy && session.hasUnreadResult else { continue }
+                guard !isBusy && session.hasUnreadResult else { return false }
             case .attention:
-                guard attentionSessionIDs.contains(session.id) else { continue }
+                guard attentionSessionIDs.contains(session.id) else { return false }
             }
-            let groupTitle = projectTitle(for: session)
             if !trimmedQuery.isEmpty {
                 let matchesTitle = session.title.localizedCaseInsensitiveContains(trimmedQuery)
-                let matchesProject = groupTitle.localizedCaseInsensitiveContains(trimmedQuery)
+                let matchesProject = SessionListOrganization.repositoryTitle(for: session)
+                    .localizedCaseInsensitiveContains(trimmedQuery)
                 let matchesID = session.id.localizedCaseInsensitiveContains(trimmedQuery)
-                guard matchesTitle || matchesProject || matchesID else { continue }
+                let matchesPath = session.directory?.localizedCaseInsensitiveContains(trimmedQuery) == true
+                guard matchesTitle || matchesProject || matchesID || matchesPath else { return false }
             }
-            let groupID = projectGroupID(for: session)
-            if groupedByID[groupID] == nil {
-                groupOrder.append(groupID)
-            }
-            groupedByID[groupID, default: []].append(session)
-            titles[groupID] = groupTitle
-            subtitles[groupID] = projectSubtitle(for: session)
+            return true
         }
+    }
 
-        return groupOrder.compactMap { groupID in
-            guard let groupedSessions = groupedByID[groupID] else { return nil }
-            return SessionProjectGroup(
-                id: groupID,
-                title: titles[groupID] ?? AppText.projectFallback,
-                subtitle: subtitles[groupID] ?? nil,
-                sessions: groupedSessions
-            )
+    private var groupedSessions: [SessionProjectGroup] {
+        SessionListOrganization.groups(from: filteredSessions, statuses: sessionStatuses, sortOrder: sortOrder)
+    }
+
+    private var timelineSections: [SessionTimelineSection] {
+        SessionListOrganization.timeline(from: filteredSessions, statuses: sessionStatuses)
+    }
+
+    private var repositories: [SessionProjectGroup] {
+        SessionListOrganization.groups(from: sessions, statuses: [:], sortOrder: .repository)
+    }
+
+    /// Repository names shared by several folders, so the filter menu shows their full paths instead.
+    private func ambiguousRepositoryTitles(in repositories: [SessionProjectGroup]) -> Set<String> {
+        var seen = Set<String>()
+        var ambiguous = Set<String>()
+        for repository in repositories where !seen.insert(repository.title).inserted {
+            ambiguous.insert(repository.title)
         }
+        return ambiguous
+    }
+
+    private var sectionHeaderInset: CGFloat {
+        isSidebar ? 10 : 4
+    }
+
+    private var alwaysVisibleSessionIDs: Set<String> {
+        Set(sessionStatuses.filter { SessionListOrganization.isWorking($0.value) }.map(\.key))
+            .union(attentionSessionIDs)
     }
 
     // MARK: - Body
@@ -253,6 +260,11 @@ struct SessionsListView: View {
         }
         .onChange(of: sessionsService.confirmedViewedMarkers, initial: true) { _, _ in
             sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
+        }
+        .onChange(of: sessions.map { projectGroupID(for: $0) }) { _, repositoryIDs in
+            if let selectedRepositoryID, !repositoryIDs.contains(selectedRepositoryID) {
+                self.selectedRepositoryID = nil
+            }
         }
         .task(id: pollTaskKey) {
             guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
@@ -345,18 +357,34 @@ struct SessionsListView: View {
     // MARK: - Session List
 
     private var sessionList: some View {
-        ScrollView {
+        let repositories = self.repositories
+        // Rows only name their repository when the timeline mixes several of them.
+        let showsRepositoryOnRows = layout == .recent && selectedRepositoryID == nil && repositories.count > 1
+        return ScrollView {
             LazyVStack(spacing: isSidebar ? 12 : 18) {
-                if runningSessionCount > 0 || unreadSessionCount > 0 || attentionSessionCount > 0 || sessionFilter != .all {
-                    sessionFilterBar
-                }
+                listControls(repositories: repositories)
 
-                ForEach(groupedSessions) { group in
-                    projectSection(group)
+                switch layout {
+                case .recent:
+                    let sections = timelineSections
+                    if sections.isEmpty {
+                        noMatchingSessionsView
+                    }
+                    ForEach(sections) { section in
+                        timelineSection(section, showsRepository: showsRepositoryOnRows)
+                    }
+                case .repository:
+                    let groups = groupedSessions
+                    if groups.isEmpty {
+                        noMatchingSessionsView
+                    }
+                    ForEach(groups) { group in
+                        projectSection(group)
+                    }
                 }
             }
-            .padding(.horizontal, isSidebar ? 12 : 24)
-            .padding(.top, isSidebar ? 10 : 16)
+            .padding(.horizontal, isSidebar ? 12 : 20)
+            .padding(.top, isSidebar ? 10 : 12)
             .padding(.bottom, 16)
         }
         .refreshable {
@@ -364,62 +392,154 @@ struct SessionsListView: View {
         }
     }
 
-    private var sessionFilterBar: some View {
-        HStack(spacing: 8) {
-            ForEach(SessionFilter.allCases) { filter in
-                let isSelected = sessionFilter == filter
-                let count: Int? = switch filter {
-                case .all: nil
-                case .running: runningSessionCount > 0 ? runningSessionCount : nil
-                case .unread: unreadSessionCount > 0 ? unreadSessionCount : nil
-                case .attention: attentionSessionCount > 0 ? attentionSessionCount : nil
-                }
-                // Hide the attention pill until something actually needs a reply.
-                if filter == .attention, attentionSessionCount == 0, sessionFilter != .attention {
-                    EmptyView()
-                } else {
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) {
-                        sessionFilter = filter
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Text(filter.rawValue)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        if let count {
-                            Text("\(count)")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(
-                                    isSelected ? Color.white.opacity(0.22) : Color.appAccent.opacity(0.16),
-                                    in: Capsule()
-                                )
-                        }
-                    }
-                    .foregroundStyle(isSelected ? Color.appOnAccent : Color.appSecondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        isSelected ? Color.appAccent : Color.appTertiary,
-                        in: Capsule()
-                    )
-                }
-                .buttonStyle(.plain)
+    private var noMatchingSessionsView: some View {
+        ContentUnavailableView {
+            Label("No matching chats", systemImage: "bubble.left.and.text.bubble.right")
+        } description: {
+            Text("Try another repository, status, or search.")
+        } actions: {
+            Button("Clear filters") {
+                selectedRepositoryID = nil
+                sessionFilter = .all
+                searchQuery = ""
+            }
+        }
+    }
+
+    private func listControls(repositories: [SessionProjectGroup]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker(AppText.sessionsLayout, selection: $layout) {
+                ForEach(SessionListOrganization.Layout.allCases) { option in
+                    Text(option.rawValue).tag(option)
                 }
             }
-            Spacer()
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("sessions.layout")
+
+            organizationBar(repositories: repositories)
+            sessionFilterBar
+        }
+    }
+
+    private func organizationBar(repositories: [SessionProjectGroup]) -> some View {
+        let ambiguousTitles = ambiguousRepositoryTitles(in: repositories)
+        let selectedRepository = repositories.first { $0.id == selectedRepositoryID }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Menu {
+                    Picker("Repository", selection: $selectedRepositoryID) {
+                        Text(AppText.sessionsAllRepositories).tag(String?.none)
+                        ForEach(repositories) { repository in
+                            let showsPath = ambiguousTitles.contains(repository.title)
+                            Text(showsPath ? (repository.subtitle ?? repository.title) : repository.title)
+                                .tag(Optional(repository.id))
+                        }
+                    }
+                } label: {
+                    controlChip(
+                        title: selectedRepository?.title ?? AppText.sessionsAllRepositories,
+                        systemImage: "folder",
+                        isActive: selectedRepository != nil
+                    )
+                }
+                .accessibilityIdentifier("sessions.repositoryFilter")
+
+                if layout == .repository {
+                    Menu {
+                        Picker(AppText.sessionsSortChats, selection: $sortOrder) {
+                            ForEach(SessionListOrganization.SortOrder.allCases) { order in
+                                Text(order.rawValue).tag(order)
+                            }
+                        }
+                    } label: {
+                        controlChip(title: sortOrder.rawValue, systemImage: "arrow.up.arrow.down", isActive: false)
+                    }
+                    .accessibilityLabel("\(AppText.sessionsSortChats): \(sortOrder.rawValue)")
+                    .accessibilityIdentifier("sessions.sortOrder")
+                }
+            }
+        }
+    }
+
+    private func controlChip(title: String, systemImage: String, isActive: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .font(.caption.weight(.semibold))
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .lineLimit(1)
+            Image(systemName: "chevron.down")
+                .font(.caption2.weight(.bold))
+        }
+        .foregroundStyle(isActive ? Color.appOnAccent : Color.appPrimary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(isActive ? Color.appAccent : Color.appTertiary, in: Capsule())
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+    }
+
+    private var sessionFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(SessionFilter.allCases) { filter in
+                    let isSelected = sessionFilter == filter
+                    let count: Int? = switch filter {
+                    case .all: nil
+                    case .running: runningSessionCount > 0 ? runningSessionCount : nil
+                    case .unread: unreadSessionCount > 0 ? unreadSessionCount : nil
+                    case .attention: attentionSessionCount > 0 ? attentionSessionCount : nil
+                    }
+                    // Hide the attention pill until something actually needs a reply.
+                    if filter != .attention || attentionSessionCount > 0 || sessionFilter == .attention {
+                        Button {
+                            withAnimation(.snappy(duration: 0.2)) {
+                                sessionFilter = filter
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text(filter.rawValue)
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                if let count {
+                                    Text("\(count)")
+                                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(
+                                            isSelected ? Color.white.opacity(0.22) : Color.appAccent.opacity(0.16),
+                                            in: Capsule()
+                                        )
+                                }
+                            }
+                            .foregroundStyle(isSelected ? Color.appOnAccent : Color.appSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                isSelected ? Color.appAccent : Color.appTertiary,
+                                in: Capsule()
+                            )
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+                    }
+                }
+            }
         }
     }
 
     private func projectSection(_ group: SessionProjectGroup) -> some View {
         let isExpanded = isSearching || expandedProjectIDs.contains(group.id)
-        let displayedSessions = isExpanded ? group.sessions : group.visibleSessions
+        let collapsedSessions = group.visibleSessions(keeping: alwaysVisibleSessionIDs)
+        let hiddenSessionCount = group.sessions.count - collapsedSessions.count
+        let displayedSessions = isExpanded ? group.sessions : collapsedSessions
+        let workingCount = group.sessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }.count
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading) {
-                    HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .center, spacing: 6) {
                         Image(systemName: "folder")
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundStyle(Color.appPrimary)
@@ -436,90 +556,172 @@ struct SessionsListView: View {
                         Text(AppText.groupedProjectCount(group.sessions.count))
                             .font(.system(size: 12, design: .rounded))
                             .foregroundStyle(Color.appSecondary)
+
+                        if workingCount > 0 {
+                            Text(AppText.sessionsWorkingCount(workingCount))
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Color.appAccent)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.appAccent.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    if let subtitle = group.subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(Color.appSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
 
                 Spacer()
 
-                if group.hiddenSessionCount > 0 {
+                if hiddenSessionCount > 0, !isSearching {
                     Button {
                         toggleProjectExpansion(group.id)
                     } label: {
-                        Text(isExpanded ? AppText.showFewerSessions : AppText.showMoreSessions(group.hiddenSessionCount))
+                        Text(isExpanded ? AppText.showFewerSessions : AppText.showMoreSessions(hiddenSessionCount))
                             .font(.system(size: 12, weight: .semibold, design: .rounded))
                             .foregroundStyle(Color.appAccent)
                     }
                     .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, sectionHeaderInset)
 
-            VStack(spacing: 0) {
-                ForEach(Array(displayedSessions.enumerated()), id: \.element.id) { index, session in
-                    Button {
-                        openedSessionIDs.insert(session.id)
-                        onSelect(session)
-                    } label: {
-                        sessionRow(session)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button {
-                            renameTitleText = session.title
-                            sessionToRename = session
-                            showRenameAlert = true
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        Button {
-                            UIPasteboard.general.string = session.id
-                        } label: {
-                            Label("Copy Session ID", systemImage: "doc.on.doc")
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            sessionToDelete = session
-                            showDeleteConfirmation = true
-                        } label: {
-                            Label(AppText.delete, systemImage: "trash")
-                        }
-                    }
-                    .transition(.asymmetric(
-                        insertion: .opacity
-                            .combined(with: .move(edge: .top))
-                            .combined(with: .scale(scale: 0.98, anchor: .top)),
-                        removal: .opacity
-                            .combined(with: .scale(scale: 0.98, anchor: .top))
-                    ))
-                }
-            }
-            .padding(.leading, 22)
+            sessionCard(displayedSessions, showsRepository: false)
         }
     }
 
-    private func sessionRow(_ session: OCSession) -> some View {
-        let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
+    private func timelineSection(_ section: SessionTimelineSection, showsRepository: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if section.isWorking {
+                    Image(systemName: "circle.dotted")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                }
+
+                Text(section.title)
+                    .font(.system(size: isSidebar ? 13 : 15, weight: .semibold, design: .rounded))
+
+                Text("\u{00B7}")
+                    .font(.system(size: 12, design: .rounded))
+                    .foregroundStyle(Color.appSecondary)
+
+                Text(AppText.groupedProjectCount(section.sessions.count))
+                    .font(.system(size: 12, design: .rounded))
+                    .foregroundStyle(Color.appSecondary)
+            }
+            .foregroundStyle(section.isWorking ? Color.appAccent : Color.appPrimary)
+            .padding(.horizontal, sectionHeaderInset)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            sessionCard(section.sessions, showsRepository: showsRepository)
+        }
+    }
+
+    /// Rows of one section. Pushed lists get a bordered surface with separators; the sidebar stays flat.
+    private func sessionCard(_ sessions: [OCSession], showsRepository: Bool) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
+                sessionButton(session, showsRepository: showsRepository)
+
+                if !isSidebar, index < sessions.count - 1 {
+                    Rectangle()
+                        .fill(Color.appSeparator)
+                        .frame(height: 1)
+                        .padding(.leading, 14)
+                        .transition(.opacity)
+                }
+            }
+        }
+        .background(
+            isSidebar ? Color.clear : Color.appSurface,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay {
+            if !isSidebar {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.appSeparator, lineWidth: 1)
+            }
+        }
+    }
+
+    private func sessionButton(_ session: OCSession, showsRepository: Bool) -> some View {
+        Button {
+            openedSessionIDs.insert(session.id)
+            onSelect(session)
+        } label: {
+            sessionRow(session, showsRepository: showsRepository)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                renameTitleText = session.title
+                sessionToRename = session
+                showRenameAlert = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            Button {
+                UIPasteboard.general.string = session.id
+            } label: {
+                Label("Copy Session ID", systemImage: "doc.on.doc")
+            }
+            Divider()
+            Button(role: .destructive) {
+                sessionToDelete = session
+                showDeleteConfirmation = true
+            } label: {
+                Label(AppText.delete, systemImage: "trash")
+            }
+        }
+        .transition(.asymmetric(
+            insertion: .opacity
+                .combined(with: .move(edge: .top))
+                .combined(with: .scale(scale: 0.98, anchor: .top)),
+            removal: .opacity
+                .combined(with: .scale(scale: 0.98, anchor: .top))
+        ))
+    }
+
+    private func sessionRow(_ session: OCSession, showsRepository: Bool) -> some View {
+        let statusType = sessionStatuses[session.id]?.type
+        let isBusy = statusType == .busy || statusType == .retry
         let isSelected = isSidebar && selectedSessionID == session.id
         let showsListExecutionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
             || ScreenshotFixtures.showsExecutionOutcomes
 
         return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 SessionWorkingTitle(
                     title: session.title.isEmpty ? AppText.titleUntitled : session.title,
                     isWorking: isBusy
                 )
 
                 if !isBusy, showsListExecutionOutcomes,
-                          let outcome = session.executionOutcomeVisibleOnSessionList() {
+                   let outcome = session.executionOutcomeVisibleOnSessionList() {
                     ExecutionStatusView(state: outcome, idleTime: session.time.idle)
-                } else if !isBusy, !showsListExecutionOutcomes {
+                }
+
+                HStack(spacing: 6) {
+                    if showsRepository {
+                        repositoryChip(for: session)
+                    }
+                    if isBusy {
+                        Label(statusType == .retry ? "Retrying" : "Working", systemImage: "circle.dotted")
+                            .foregroundStyle(Color.appAccent)
+                    }
                     Text(formattedDate(session.updatedAt))
-                        .font(.system(size: 14, design: .rounded))
                         .foregroundStyle(Color.appSecondary)
                 }
+                .font(.caption)
+                .lineLimit(1)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             if attentionSessionIDs.contains(session.id) {
                 Image(systemName: "exclamationmark.bubble.fill")
@@ -547,13 +749,30 @@ struct SessionsListView: View {
             }
         }
         .padding(.vertical, 12)
-        .padding(.horizontal, isSidebar ? 10 : 0)
+        .padding(.horizontal, isSidebar ? 10 : 14)
         .background(
             isSelected ? Color.appTertiary : Color.clear,
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .contentShape(Rectangle())
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private func repositoryChip(for session: OCSession) -> some View {
+        let title = SessionListOrganization.repositoryTitle(for: session)
+        return HStack(spacing: 4) {
+            Image(systemName: "folder")
+                .font(.system(size: 9, weight: .bold))
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .font(.system(size: 11, weight: .semibold, design: .rounded))
+        .foregroundStyle(Color.appSecondary)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Color.appTertiary, in: Capsule())
+        .accessibilityLabel("\(AppText.project), \(title)")
     }
 
     // MARK: - Empty State
@@ -743,41 +962,7 @@ struct SessionsListView: View {
     }
 
     private func projectGroupID(for session: OCSession) -> String {
-        if let directory = normalizedDirectory(for: session), !directory.isEmpty {
-            return "directory:\(directory)"
-        }
-
-        if let projectID = session.projectID?.trimmingCharacters(in: .whitespacesAndNewlines), !projectID.isEmpty {
-            return "projectID:\(projectID)"
-        }
-
-        return "unknown"
-    }
-
-    private func projectTitle(for session: OCSession) -> String {
-        if let directory = normalizedDirectory(for: session) {
-            let lastComponent = URL(fileURLWithPath: directory).lastPathComponent
-            if !lastComponent.isEmpty {
-                return lastComponent
-            }
-        }
-
-        if let projectID = session.projectID?.trimmingCharacters(in: .whitespacesAndNewlines), !projectID.isEmpty {
-            return projectID
-        }
-
-        return AppText.projectFallback
-    }
-
-    private func projectSubtitle(for session: OCSession) -> String? {
-        guard let directory = normalizedDirectory(for: session) else { return nil }
-        return directory
-    }
-
-    private func normalizedDirectory(for session: OCSession) -> String? {
-        let trimmedDirectory = session.directory?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let trimmedDirectory, !trimmedDirectory.isEmpty else { return nil }
-        return trimmedDirectory
+        SessionListOrganization.repositoryID(for: session)
     }
 }
 
