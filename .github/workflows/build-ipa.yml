@@ -7,6 +7,9 @@ on:
       - main
       - perf/pairing-and-chat-latency
 
+permissions:
+  contents: write
+
 jobs:
   build-ipa:
     # The arm64 macOS pool has been failing to allocate runners. This image
@@ -93,3 +96,27 @@ jobs:
           name: OpenLens-ipa
           path: OpenLens.ipa
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PLIST="build/DerivedData/Build/Products/Release-iphoneos/OpenLens.app/Info.plist"
+          MARKETING_VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$PLIST")
+          BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$PLIST")
+          TAG="v${MARKETING_VERSION}.${BUILD_NUMBER}-perf"
+          SUBJECT=$(git log -1 --pretty=%s)
+          TITLE="OpenLens v${MARKETING_VERSION} (${BUILD_NUMBER}) — ${SUBJECT}"
+          NOTES="Automated release from commit ${GITHUB_SHA} (Actions run ${GITHUB_RUN_ID}). Full hosted iOS simulator test suite and Release build passed. Unsigned IPA: requires signing for installation."
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" OpenLens.ipa --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes "$NOTES" --latest
+          else
+            gh release create "$TAG" OpenLens.ipa \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --latest
+          fi
