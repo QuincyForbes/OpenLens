@@ -1642,7 +1642,7 @@ private struct NewSessionSheet: View {
                 _ = try? await messagesService.sendPromptAsync(
                     sessionID: session.id,
                     text: cloneSelection.initialPrompt,
-                    model: modelRef.map { OCPromptInput.OCModelRef(providerID: $0.providerID, modelID: $0.modelID) },
+                    model: modelRef.map { OCPromptInput.OCModelRef(providerID: $0.providerID, modelID: $0.id) },
                     variant: modelRef?.variant
                 )
             }
