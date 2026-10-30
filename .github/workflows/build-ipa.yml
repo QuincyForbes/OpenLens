@@ -45,7 +45,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: simulator-test-results
-          path: build/test-runs/
+          path: build/test-runs/**/*.log
 
       - name: Capture session layouts
         run: |

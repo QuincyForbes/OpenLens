@@ -80,14 +80,16 @@ struct ChatRetentionTests {
         #expect(chat.inputText.isEmpty)
     }
 
-    @Test func switchingSessionsPreservesDraftAttachmentsForSameDirectoryAndDropsServerFilesWhenMoved() {
+    @Test func switchingSessionsPreservesDraftAttachmentsForSameDirectoryAndDropsServerFilesWhenMoved() throws {
         let chat = makeChat()
         let first = OCSession(id: "first", directory: "/workspace/Alpha", title: "First", time: .init(created: 0, updated: 0))
         let second = OCSession(id: "second", directory: "/workspace/Beta", title: "Second", time: .init(created: 0, updated: 0))
 
         chat.prepareForOpeningSession(first)
-        chat.attachComposerServerFile(relativePath: "Sources/App.swift")
-        chat.attachComposerTextFile(data: Data("Note".utf8), name: "note.txt")
+        let serverRef = try ServerFileReference(path: "/workspace/Alpha/Sources/App.swift", sessionDirectory: "/workspace/Alpha", lines: nil)
+        let textFile = try PromptTextFileAttachment(data: Data("Note".utf8), name: "note.txt")
+        chat.addComposerAttachment(.serverFile(serverRef))
+        chat.addComposerAttachment(.textFile(textFile))
         #expect(chat.composerAttachments.count == 2)
 
         chat.prepareForOpeningSession(second)
@@ -105,16 +107,16 @@ struct ChatRetentionTests {
     }
 
     @Test func tapToSelectLineRangeAndDiffQuotingHelpersFormatCleanly() {
-        let firstTap = RepositoryFileRangeView.updatedLineRange(startLine: "", endLine: "", tappedLine: 18)
+        let firstTap = RepositoryFilePicker.updatedLineRange(startLine: "", endLine: "", tappedLine: 18)
         #expect(firstTap.start == "18" && firstTap.end.isEmpty)
 
-        let secondTapReversed = RepositoryFileRangeView.updatedLineRange(startLine: firstTap.start, endLine: firstTap.end, tappedLine: 10)
+        let secondTapReversed = RepositoryFilePicker.updatedLineRange(startLine: firstTap.start, endLine: firstTap.end, tappedLine: 10)
         #expect(secondTapReversed.start == "10" && secondTapReversed.end == "18")
 
-        let resetTap = RepositoryFileRangeView.updatedLineRange(startLine: secondTapReversed.start, endLine: secondTapReversed.end, tappedLine: 25)
+        let resetTap = RepositoryFilePicker.updatedLineRange(startLine: secondTapReversed.start, endLine: secondTapReversed.end, tappedLine: 25)
         #expect(resetTap.start == "25" && resetTap.end.isEmpty)
 
-        let clearSingle = RepositoryFileRangeView.updatedLineRange(startLine: resetTap.start, endLine: resetTap.end, tappedLine: 25)
+        let clearSingle = RepositoryFilePicker.updatedLineRange(startLine: resetTap.start, endLine: resetTap.end, tappedLine: 25)
         #expect(clearSingle.start.isEmpty && clearSingle.end.isEmpty)
 
         let hunk = UnifiedDiffHunk(

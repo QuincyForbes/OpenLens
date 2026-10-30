@@ -377,13 +377,13 @@ final class MeridianUsageService {
 
     // MARK: - Wire Models
 
-    private struct QuotaResponse: Decodable {
+    nonisolated private struct QuotaResponse: Decodable, Sendable {
         let profiles: [QuotaProfile]
         let activeProfile: String?
         let activeProfiles: [String: String]?
     }
 
-    private struct QuotaProfile: Decodable {
+    nonisolated private struct QuotaProfile: Decodable, Sendable {
         let id: String
         let isActive: Bool?
         let type: String?
@@ -395,18 +395,18 @@ final class MeridianUsageService {
         let failure: QuotaFailure?
     }
 
-    private struct QuotaFailure: Decodable {
+    nonisolated private struct QuotaFailure: Decodable, Sendable {
         let reason: String?
     }
 
-    private struct ProfilesListResponse: Decodable {
+    nonisolated private struct ProfilesListResponse: Decodable, Sendable {
         let profiles: [ProfileMetadata]
         let activeProfile: String?
         let activeProfiles: [String: String]?
         let routing: String?
     }
 
-    private struct ProfileMetadata: Decodable {
+    nonisolated private struct ProfileMetadata: Decodable, Sendable {
         let id: String
         let type: String?
         let provider: String?
@@ -417,21 +417,21 @@ final class MeridianUsageService {
         let planName: String?
     }
 
-    private struct HealthResponse: Decodable {
+    nonisolated private struct HealthResponse: Decodable, Sendable {
         let version: String?
     }
 
-    private struct TelemetryResponse: Decodable {
-        struct ModelEntry: Decodable {
+    nonisolated private struct TelemetryResponse: Decodable, Sendable {
+        nonisolated struct ModelEntry: Decodable, Sendable {
             let count: Int?
         }
-        struct TokenUsage: Decodable {
+        nonisolated struct TokenUsage: Decodable, Sendable {
             let avgCacheHitRate: Double?
         }
-        struct CostModelEntry: Decodable {
+        nonisolated struct CostModelEntry: Decodable, Sendable {
             let estimatedUsd: Double?
         }
-        struct CostEstimate: Decodable {
+        nonisolated struct CostEstimate: Decodable, Sendable {
             let totalUsd: Double?
             let byModel: [String: CostModelEntry]?
         }

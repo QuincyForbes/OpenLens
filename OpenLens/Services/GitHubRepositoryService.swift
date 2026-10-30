@@ -381,12 +381,12 @@ final class GitHubRepositoryService {
         )
     ]
 
-    private struct WireSearchResponse: Decodable {
+    nonisolated private struct WireSearchResponse: Decodable, Sendable {
         let items: [WireRepository]
     }
 
-    private struct WireRepository: Decodable {
-        struct Owner: Decodable {
+    nonisolated private struct WireRepository: Decodable, Sendable {
+        nonisolated struct Owner: Decodable, Sendable {
             let login: String
         }
 

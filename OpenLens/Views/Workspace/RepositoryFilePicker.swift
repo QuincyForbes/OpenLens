@@ -8,6 +8,28 @@ struct RepositoryFilePicker: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    nonisolated static func updatedLineRange(
+        startLine: String,
+        endLine: String,
+        tappedLine: Int
+    ) -> (start: String, end: String) {
+        let start = Int(startLine.trimmingCharacters(in: .whitespaces))
+        let end = Int(endLine.trimmingCharacters(in: .whitespaces))
+        guard let start else {
+            return ("\(tappedLine)", "")
+        }
+        if end != nil {
+            return ("\(tappedLine)", "")
+        }
+        if tappedLine == start {
+            return ("", "")
+        }
+        if tappedLine > start {
+            return ("\(start)", "\(tappedLine)")
+        }
+        return ("\(tappedLine)", "\(start)")
+    }
+
     var body: some View {
         NavigationStack {
             RepositoryFolderList(directory: directory, relativePath: "", onAttach: attach)
@@ -111,7 +133,7 @@ private struct RepositoryFolderList: View {
 
 /// Previews a repository file with line numbers and lets the user choose
 /// an optional start and end line before attaching a reference to it.
-struct RepositoryFileRangeView: View {
+private struct RepositoryFileRangeView: View {
     private enum LoadState {
         case loading
         case loaded([String])
@@ -129,28 +151,6 @@ struct RepositoryFileRangeView: View {
     @State private var lineSearchQuery = ""
 
     private static let maximumPreviewLines = 2_000
-
-    nonisolated static func updatedLineRange(
-        startLine: String,
-        endLine: String,
-        tappedLine: Int
-    ) -> (start: String, end: String) {
-        let start = Int(startLine.trimmingCharacters(in: .whitespaces))
-        let end = Int(endLine.trimmingCharacters(in: .whitespaces))
-        guard let start else {
-            return ("\(tappedLine)", "")
-        }
-        if end != nil {
-            return ("\(tappedLine)", "")
-        }
-        if tappedLine == start {
-            return ("", "")
-        }
-        if tappedLine > start {
-            return ("\(start)", "\(tappedLine)")
-        }
-        return ("\(tappedLine)", "\(start)")
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -230,7 +230,7 @@ struct RepositoryFileRangeView: View {
                         let lineNumber = index + 1
                         let matchesSearch = !trimmedSearch.isEmpty && line.localizedCaseInsensitiveContains(trimmedSearch)
                         Button {
-                            let updated = Self.updatedLineRange(
+                            let updated = RepositoryFilePicker.updatedLineRange(
                                 startLine: startLine,
                                 endLine: endLine,
                                 tappedLine: lineNumber

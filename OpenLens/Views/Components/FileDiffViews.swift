@@ -403,6 +403,16 @@ struct UnifiedDiffView: View {
     /// `nil` until the diff for `file` has been built.
     @State private var hunks: [UnifiedDiffHunk]?
 
+    init(
+        file: ReviewFileChange,
+        wrapLines: Bool = false,
+        onQuoteInChat: ((String) -> Void)? = nil
+    ) {
+        self.file = file
+        self.wrapLines = wrapLines
+        self.onQuoteInChat = onQuoteInChat
+    }
+
     var body: some View {
         Group {
             if let hunks {
