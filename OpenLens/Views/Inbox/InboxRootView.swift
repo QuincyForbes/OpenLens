@@ -19,9 +19,13 @@ struct InboxRootView: View {
     @Bindable var chatClient: ChatClient
 
     @Environment(\.inboxService) private var inboxService
+    @Environment(\.sessionsService) private var sessionsService
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppRouter.self) private var router: AppRouter?
 
     @State private var viewState: ViewState = .idle
     @State private var snapshot = InboxSnapshot(permissions: [], questions: [], forms: [])
+    @State private var sessionsByID: [String: OCSession] = [:]
     @State private var activeQuestion: OCQuestionRequest?
     @State private var activeForm: OCFormRequest?
     @State private var isResolvingForm = false
@@ -60,6 +64,9 @@ struct InboxRootView: View {
                     Task {
                         await rejectQuestion(question)
                     }
+                },
+                onDefer: {
+                    activeQuestion = nil
                 }
             )
         }
@@ -76,7 +83,10 @@ struct InboxRootView: View {
                         await cancelForm(form)
                     }
                 },
-                isSubmitting: isResolvingForm
+                isSubmitting: isResolvingForm,
+                onDefer: {
+                    activeForm = nil
+                }
             )
             .interactiveDismissDisabled(isResolvingForm)
         }
@@ -177,6 +187,8 @@ struct InboxRootView: View {
                                     if let tool = permission.toolDisplayName?.nilIfBlank {
                                         metadataChip(text: tool, monospaced: true)
                                     }
+
+                                    sessionContextRow(for: permission.sessionID)
                                 }
                             }
 
@@ -235,6 +247,8 @@ struct InboxRootView: View {
                                         text: "\(question.questions.count) prompt\(question.questions.count == 1 ? "" : "s")",
                                         monospaced: false
                                     )
+
+                                    sessionContextRow(for: question.sessionID)
                                 }
                             }
 
@@ -294,6 +308,8 @@ struct InboxRootView: View {
                                                 .foregroundStyle(Color.appSecondary)
                                                 .lineLimit(2)
                                         }
+                                    } else {
+                                        sessionContextRow(for: form.sessionID)
                                     }
                                 }
                             }
@@ -398,6 +414,37 @@ struct InboxRootView: View {
         return nil
     }
 
+    @ViewBuilder
+    private func sessionContextRow(for sessionID: String?) -> some View {
+        if let sessionID, !sessionID.isEmpty, sessionID != "global" {
+            let session = sessionsByID[sessionID]
+            let title = session?.title.nilIfBlank ?? sessionID
+            let repo = session.map(SessionListOrganization.repositoryTitle(for:))
+            HStack(spacing: 8) {
+                Label(
+                    repo.map { "\(title) · \($0)" } ?? title,
+                    systemImage: "bubble.left.and.bubble.right"
+                )
+                .font(.caption)
+                .foregroundStyle(Color.appSecondary)
+                .lineLimit(1)
+
+                if let session, router != nil {
+                    Spacer(minLength: 4)
+                    Button("Open Chat") {
+                        chatClient.prepareForOpeningSession(session)
+                        router?.selectChatSession(session)
+                        dismiss()
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appAccent)
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
     private func loadInbox(force: Bool = false) async {
         if !force, case .loaded = viewState {
             return
@@ -405,7 +452,11 @@ struct InboxRootView: View {
 
         viewState = .loading
         do {
+            async let loadedSessions = try? sessionsService.listAllSessions()
             snapshot = try await inboxService.loadInbox()
+            if let sessions = await loadedSessions {
+                sessionsByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+            }
             viewState = .loaded
         } catch {
             viewState = .error(error.localizedDescription)

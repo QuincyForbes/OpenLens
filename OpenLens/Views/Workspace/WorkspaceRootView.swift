@@ -134,7 +134,15 @@ struct WorkspaceRootView: View {
             )
         }
         .sheet(item: $selectedDiffFile) { file in
-            WorkspaceFileDiffSheet(summaryFile: file)
+            WorkspaceFileDiffSheet(
+                summaryFile: file,
+                files: snapshot.workingTree,
+                onSelectFile: { selectedDiffFile = $0 },
+                onQuoteInChat: { quote in
+                    selectedDiffFile = nil
+                    insertIntoChat(quote)
+                }
+            )
         }
         .sheet(isPresented: $isInboxPresented) {
             NavigationStack {
@@ -960,19 +968,35 @@ struct WorkspaceRootView: View {
 
 private struct WorkspaceFileDiffSheet: View {
     let summaryFile: ReviewFileChange
+    var files: [ReviewFileChange] = []
+    var onSelectFile: ((ReviewFileChange) -> Void)? = nil
+    var onQuoteInChat: ((String) -> Void)? = nil
 
     @Environment(\.workspaceService) private var workspaceService
 
     @State private var file: ReviewFileChange
     @State private var isLoading = false
 
-    init(summaryFile: ReviewFileChange) {
+    init(
+        summaryFile: ReviewFileChange,
+        files: [ReviewFileChange] = [],
+        onSelectFile: ((ReviewFileChange) -> Void)? = nil,
+        onQuoteInChat: ((String) -> Void)? = nil
+    ) {
         self.summaryFile = summaryFile
+        self.files = files
+        self.onSelectFile = onSelectFile
+        self.onQuoteInChat = onQuoteInChat
         _file = State(initialValue: summaryFile)
     }
 
     var body: some View {
-        FileDiffDetailView(file: file)
+        FileDiffDetailView(
+            file: file,
+            files: files,
+            onSelectFile: onSelectFile,
+            onQuoteInChat: onQuoteInChat
+        )
             .overlay(alignment: .top) {
                 if isLoading {
                     HStack(spacing: 10) {

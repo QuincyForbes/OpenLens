@@ -131,7 +131,13 @@ private struct TurnFileDiffSheet: View {
                     ProgressView("Loading diff…")
                 }
             case .loaded(let file):
-                FileDiffDetailView(file: file)
+                FileDiffDetailView(
+                    file: file,
+                    onQuoteInChat: { quote in
+                        chatClient.appendQuotedDiff(quote)
+                        dismiss()
+                    }
+                )
             case .failed(let message):
                 statusSheet {
                     VStack(spacing: 14) {

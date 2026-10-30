@@ -45,6 +45,16 @@ private struct RepositoryFolderList: View {
 
     @Environment(\.workspaceService) private var workspaceService
     @State private var loadState: LoadState = .loading
+    @State private var searchQuery = ""
+
+    private func filteredEntries(_ entries: [RepositoryEntry]) -> [RepositoryEntry] {
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return entries }
+        return entries.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed)
+                || $0.path.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
 
     var body: some View {
         content
@@ -52,6 +62,7 @@ private struct RepositoryFolderList: View {
             .background(Color.appBackground)
             .navigationTitle(relativePath.isEmpty ? AppText.repositoryFiles : (relativePath as NSString).lastPathComponent)
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchQuery, prompt: "Filter files")
             .task { await load() }
     }
 
@@ -70,10 +81,13 @@ private struct RepositoryFolderList: View {
                 Button(AppText.tryAgain) { Task { await load() } }
             }
         case let .loaded(entries):
+            let visible = filteredEntries(entries)
             if entries.isEmpty {
                 ContentUnavailableView(AppText.repositoryFolderEmpty, systemImage: "folder")
+            } else if visible.isEmpty {
+                ContentUnavailableView.search(text: searchQuery)
             } else {
-                List(entries) { entry in
+                List(visible) { entry in
                     NavigationLink(value: entry) {
                         Label(entry.name, systemImage: entry.isDirectory ? "folder" : "doc.text")
                             .foregroundStyle(Color.appPrimary)
@@ -97,7 +111,7 @@ private struct RepositoryFolderList: View {
 
 /// Previews a repository file with line numbers and lets the user choose
 /// an optional start and end line before attaching a reference to it.
-private struct RepositoryFileRangeView: View {
+struct RepositoryFileRangeView: View {
     private enum LoadState {
         case loading
         case loaded([String])
@@ -112,8 +126,31 @@ private struct RepositoryFileRangeView: View {
     @State private var loadState: LoadState = .loading
     @State private var startLine = ""
     @State private var endLine = ""
+    @State private var lineSearchQuery = ""
 
     private static let maximumPreviewLines = 2_000
+
+    nonisolated static func updatedLineRange(
+        startLine: String,
+        endLine: String,
+        tappedLine: Int
+    ) -> (start: String, end: String) {
+        let start = Int(startLine.trimmingCharacters(in: .whitespaces))
+        let end = Int(endLine.trimmingCharacters(in: .whitespaces))
+        guard let start else {
+            return ("\(tappedLine)", "")
+        }
+        if end != nil {
+            return ("\(tappedLine)", "")
+        }
+        if tappedLine == start {
+            return ("", "")
+        }
+        if tappedLine > start {
+            return ("\(start)", "\(tappedLine)")
+        }
+        return ("\(tappedLine)", "\(start)")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -140,11 +177,22 @@ private struct RepositoryFileRangeView: View {
 
     private var rangeFields: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(entry.path)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(Color.appSecondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
+            HStack {
+                Text(entry.path)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(Color.appSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Spacer()
+                if !startLine.isEmpty || !endLine.isEmpty {
+                    Button("Clear range") {
+                        startLine = ""
+                        endLine = ""
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appAccent)
+                }
+            }
             HStack(spacing: 12) {
                 TextField(AppText.startLine, text: $startLine)
                     .keyboardType(.numberPad)
@@ -153,7 +201,12 @@ private struct RepositoryFileRangeView: View {
                     .keyboardType(.numberPad)
                     .textFieldStyle(.roundedBorder)
             }
-            Text(selection.message)
+            TextField("Find text in file…", text: $lineSearchQuery)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+            Text("\(selection.message) Tap any two lines below to select a range.")
                 .font(.caption)
                 .foregroundStyle(selection.isInvalid ? Color.red : Color.appSecondary)
         }
@@ -170,19 +223,41 @@ private struct RepositoryFileRangeView: View {
         case let .error(message):
             ContentUnavailableView(AppText.repositoryFileUnavailable, systemImage: "doc", description: Text(message))
         case let .loaded(lines):
+            let trimmedSearch = lineSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(lines.prefix(Self.maximumPreviewLines).enumerated()), id: \.offset) { index, line in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text("\(index + 1)")
-                                .foregroundStyle(Color.appSecondary)
-                                .frame(minWidth: 36, alignment: .trailing)
-                            Text(line.isEmpty ? " " : line)
-                                .foregroundStyle(Color.appPrimary)
-                                .fixedSize()
+                        let lineNumber = index + 1
+                        let matchesSearch = !trimmedSearch.isEmpty && line.localizedCaseInsensitiveContains(trimmedSearch)
+                        Button {
+                            let updated = Self.updatedLineRange(
+                                startLine: startLine,
+                                endLine: endLine,
+                                tappedLine: lineNumber
+                            )
+                            startLine = updated.start
+                            endLine = updated.end
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text("\(lineNumber)")
+                                    .foregroundStyle(isSelected(lineNumber) ? Color.appAccent : Color.appSecondary)
+                                    .fontWeight(isSelected(lineNumber) ? .bold : .regular)
+                                    .frame(minWidth: 36, alignment: .trailing)
+                                Text(line.isEmpty ? " " : line)
+                                    .foregroundStyle(Color.appPrimary)
+                                    .fixedSize()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                isSelected(lineNumber)
+                                    ? Color.appAccent.opacity(0.16)
+                                    : (matchesSearch ? Color.yellow.opacity(0.18) : .clear)
+                            )
+                            .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 12)
-                        .background(isSelected(index + 1) ? Color.appAccent.opacity(0.14) : .clear)
+                        .buttonStyle(.plain)
                     }
                 }
                 .font(.system(size: 12, design: .monospaced))

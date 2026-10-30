@@ -451,6 +451,36 @@ struct SessionsListView: View {
             organizationBar(repositories: repositories)
             sessionFilterBar
 
+            if let nextWaiting = repositorySessions.first(where: { attentionSessionIDs.contains($0.id) }) {
+                Button {
+                    openedSessionIDs.insert(nextWaiting.id)
+                    onSelect(nextWaiting)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.bubble.fill")
+                            .foregroundStyle(Color.appWarning)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(attentionLabels[nextWaiting.id] ?? "Waiting for your response")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.appPrimary)
+                            Text(nextWaiting.title.isEmpty ? AppText.titleUntitled : nextWaiting.title)
+                                .font(.caption2)
+                                .foregroundStyle(Color.appSecondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Text("Open")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.appWarning)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.appWarning.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("sessions.openNextWaiting")
+            }
+
             if let message = errorMessage ?? refreshWarning {
                 HStack(alignment: .top) {
                     Label(message, systemImage: "exclamationmark.triangle")

@@ -51,13 +51,39 @@ struct FileDiffDetailView: View {
     }
 
     let file: ReviewFileChange
+    var files: [ReviewFileChange] = []
+    var onSelectFile: ((ReviewFileChange) -> Void)? = nil
+    var onQuoteInChat: ((String) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("diffWrapLines") private var wrapLines = false
     @State private var displayMode: DisplayMode
 
-    init(file: ReviewFileChange) {
+    init(
+        file: ReviewFileChange,
+        files: [ReviewFileChange] = [],
+        onSelectFile: ((ReviewFileChange) -> Void)? = nil,
+        onQuoteInChat: ((String) -> Void)? = nil
+    ) {
         self.file = file
+        self.files = files
+        self.onSelectFile = onSelectFile
+        self.onQuoteInChat = onQuoteInChat
         _displayMode = State(initialValue: Self.preferredDisplayMode(for: file))
+    }
+
+    private var currentFileIndex: Int? {
+        files.firstIndex(where: { $0.id == file.id || $0.path == file.path })
+    }
+
+    private var previousFile: ReviewFileChange? {
+        guard let index = currentFileIndex, index > 0 else { return nil }
+        return files[index - 1]
+    }
+
+    private var nextFile: ReviewFileChange? {
+        guard let index = currentFileIndex, index + 1 < files.count else { return nil }
+        return files[index + 1]
     }
 
     var body: some View {
@@ -84,8 +110,21 @@ struct FileDiffDetailView: View {
             .navigationTitle(fileTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItemGroup(placement: .topBarLeading) {
                     Menu {
+                        if let onQuoteInChat {
+                            Button {
+                                onQuoteInChat("In `\(file.path)`:")
+                            } label: {
+                                Label("Quote File in Chat", systemImage: "quote.bubble")
+                            }
+                        }
+                        Button {
+                            wrapLines.toggle()
+                        } label: {
+                            Label(wrapLines ? "Disable Line Wrap" : "Wrap Long Lines", systemImage: "text.word.spacing")
+                        }
+                        Divider()
                         Button {
                             UIPasteboard.general.string = file.path
                         } label: {
@@ -109,6 +148,31 @@ struct FileDiffDetailView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityLabel("Diff actions")
+
+                    Button {
+                        wrapLines.toggle()
+                    } label: {
+                        Image(systemName: wrapLines ? "arrow.left.and.right.text.vertical" : "text.word.spacing")
+                    }
+                    .accessibilityLabel(wrapLines ? "Disable line wrap" : "Wrap long lines")
+
+                    if files.count > 1, let onSelectFile {
+                        Button {
+                            if let previousFile { onSelectFile(previousFile) }
+                        } label: {
+                            Image(systemName: "chevron.up")
+                        }
+                        .disabled(previousFile == nil)
+                        .accessibilityLabel("Previous file")
+
+                        Button {
+                            if let nextFile { onSelectFile(nextFile) }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .disabled(nextFile == nil)
+                        .accessibilityLabel("Next file")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
@@ -140,6 +204,12 @@ struct FileDiffDetailView: View {
                 HStack(spacing: 10) {
                     metricPill(title: "Added", value: "\(file.additions)", tint: .green)
                     metricPill(title: "Removed", value: "\(file.deletions)", tint: .red)
+                    if let index = currentFileIndex, files.count > 1 {
+                        Spacer()
+                        Text("\(index + 1) of \(files.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.appSecondary)
+                    }
                 }
             }
         }
@@ -149,7 +219,7 @@ struct FileDiffDetailView: View {
     private var content: some View {
         switch displayMode {
         case .changed:
-            UnifiedDiffView(file: file)
+            UnifiedDiffView(file: file, wrapLines: wrapLines, onQuoteInChat: onQuoteInChat)
         case .before:
             codeCard(title: "Before", text: file.beforeText ?? "No previous content.", tint: Color.red.opacity(0.08))
         case .after:
@@ -221,7 +291,7 @@ struct FileDiffDetailView: View {
 
                 SurfaceDivider()
 
-                CodeListingView(text: text, tint: tint)
+                CodeListingView(text: text, tint: tint, wrapLines: wrapLines)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 14)
             }
@@ -258,6 +328,7 @@ private extension View {
 private struct CodeListingView: View {
     let text: String
     let tint: Color
+    var wrapLines: Bool = false
 
     var body: some View {
         // Split in `body` rather than `init`: SwiftUI skips `body` when the
@@ -265,7 +336,7 @@ private struct CodeListingView: View {
         let lines = Self.makeLines(from: text)
         let codeWidth = CodeFont.width(forColumns: lines.map(\.utf16.count).max() ?? 0)
 
-        ScrollView(.horizontal, showsIndicators: false) {
+        if wrapLines {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(lines.indices, id: \.self) { index in
                     let line = lines[index]
@@ -279,7 +350,8 @@ private struct CodeListingView: View {
                             .font(.system(size: CodeFont.size, design: .monospaced))
                             .foregroundStyle(Color.appPrimary)
                             .textSelection(.enabled)
-                            .unwrappedCodeLine(minWidth: codeWidth)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -287,6 +359,32 @@ private struct CodeListingView: View {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(tint)
                     )
+                }
+            }
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(lines.indices, id: \.self) { index in
+                        let line = lines[index]
+                        HStack(alignment: .top, spacing: 12) {
+                            Text("\(index + 1)")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Color.appSecondary)
+                                .frame(width: 36, alignment: .trailing)
+
+                            Text(line.isEmpty ? " " : line)
+                                .font(.system(size: CodeFont.size, design: .monospaced))
+                                .foregroundStyle(Color.appPrimary)
+                                .textSelection(.enabled)
+                                .unwrappedCodeLine(minWidth: codeWidth)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(tint)
+                        )
+                    }
                 }
             }
         }
@@ -300,6 +398,8 @@ private struct CodeListingView: View {
 
 struct UnifiedDiffView: View {
     let file: ReviewFileChange
+    var wrapLines: Bool = false
+    var onQuoteInChat: ((String) -> Void)? = nil
     /// `nil` until the diff for `file` has been built.
     @State private var hunks: [UnifiedDiffHunk]?
 
@@ -337,24 +437,59 @@ struct UnifiedDiffView: View {
                 ForEach(hunks) { hunk in
                     SurfaceCard(padding: 0) {
                         VStack(alignment: .leading, spacing: 0) {
-                            Text(hunk.header)
-                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(Color.appSecondary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 12)
+                            HStack(spacing: 8) {
+                                Text(hunk.header)
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(Color.appSecondary)
+                                    .lineLimit(1)
+
+                                Spacer()
+
+                                if let onQuoteInChat {
+                                    Button {
+                                        onQuoteInChat(hunk.formattedChatQuote(filePath: file.path))
+                                    } label: {
+                                        Label("Quote", systemImage: "quote.bubble")
+                                            .font(.caption2.weight(.semibold))
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                } else {
+                                    Button {
+                                        UIPasteboard.general.string = hunk.formattedChatQuote(filePath: file.path)
+                                    } label: {
+                                        Label("Copy", systemImage: "doc.on.doc")
+                                            .font(.caption2.weight(.semibold))
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
 
                             SurfaceDivider()
 
                             let codeWidth = CodeFont.width(forColumns: hunk.maxLineLength)
 
-                            ScrollView(.horizontal, showsIndicators: false) {
+                            if wrapLines {
                                 LazyVStack(alignment: .leading, spacing: 2) {
                                     ForEach(hunk.lines) { line in
-                                        UnifiedDiffLineRow(line: line, codeWidth: codeWidth)
+                                        UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: true)
                                     }
                                 }
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 10)
+                            } else {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    LazyVStack(alignment: .leading, spacing: 2) {
+                                        ForEach(hunk.lines) { line in
+                                            UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: false)
+                                        }
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 10)
+                                }
                             }
                         }
                     }
@@ -367,6 +502,7 @@ struct UnifiedDiffView: View {
 private struct UnifiedDiffLineRow: View {
     let line: UnifiedDiffLine
     let codeWidth: CGFloat
+    var wrapLines: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -385,11 +521,20 @@ private struct UnifiedDiffLineRow: View {
                 .foregroundStyle(Color.appSecondary)
                 .frame(width: 38, alignment: .trailing)
 
-            Text(line.text.isEmpty ? " " : line.text)
-                .font(.system(size: CodeFont.size, design: .monospaced))
-                .foregroundStyle(Color.appPrimary)
-                .textSelection(.enabled)
-                .unwrappedCodeLine(minWidth: codeWidth)
+            if wrapLines {
+                Text(line.text.isEmpty ? " " : line.text)
+                    .font(.system(size: CodeFont.size, design: .monospaced))
+                    .foregroundStyle(Color.appPrimary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(line.text.isEmpty ? " " : line.text)
+                    .font(.system(size: CodeFont.size, design: .monospaced))
+                    .foregroundStyle(Color.appPrimary)
+                    .textSelection(.enabled)
+                    .unwrappedCodeLine(minWidth: codeWidth)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -434,6 +579,13 @@ nonisolated struct UnifiedDiffHunk: Identifiable {
         self.header = header
         self.lines = lines
         self.maxLineLength = lines.map(\.text.utf16.count).max() ?? 0
+    }
+
+    func formattedChatQuote(filePath: String, maxLines: Int = 24) -> String {
+        let snippet = lines.prefix(maxLines)
+            .map { "\($0.prefix)\($0.text)" }
+            .joined(separator: "\n")
+        return "In `\(filePath)` (\(header)):\n```diff\n\(snippet)\n```"
     }
 }
 

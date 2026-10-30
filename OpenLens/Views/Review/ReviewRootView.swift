@@ -44,6 +44,7 @@ struct ReviewRootView: View {
 
     @Bindable var chatClient: ChatClient
 
+    @Environment(AppRouter.self) private var router: AppRouter?
     @Environment(\.inboxService) private var inboxService
     @Environment(\.reviewService) private var reviewService
     @Environment(\.sessionsService) private var sessionsService
@@ -93,7 +94,19 @@ struct ReviewRootView: View {
             await refreshInboxBadgeCount()
         }
         .sheet(item: $selectedFile) { file in
-            FileDiffDetailView(file: file)
+            FileDiffDetailView(
+                file: file,
+                files: selectedScopeState.files,
+                onSelectFile: { selectedFile = $0 },
+                onQuoteInChat: { quote in
+                    chatClient.appendQuotedDiff(quote)
+                    selectedFile = nil
+                    if let reviewSession = selectedReviewSession ?? chatClient.currentSession {
+                        chatClient.prepareForOpeningSession(reviewSession)
+                        router?.selectChatSession(reviewSession)
+                    }
+                }
+            )
         }
         .sheet(isPresented: $isInboxPresented, onDismiss: {
             Task {

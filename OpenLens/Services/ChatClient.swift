@@ -1077,8 +1077,18 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// reconciled against the session and transcript endpoints. Coalesce gap
     /// notifications while that authoritative refresh is in flight.
     @ObservationIgnored private var streamSynchronizationTask: Task<Void, Never>?
+    private struct SessionComposerDraft: Equatable {
+        var text: String
+        var attachments: [PromptAttachment]
+        var directory: String?
+
+        var isEmpty: Bool {
+            text.isEmpty && attachments.isEmpty
+        }
+    }
+
     @ObservationIgnored private var preparedSessionID: String?
-    @ObservationIgnored private var composerDraftsBySessionID: [String: String] = [:]
+    @ObservationIgnored private var composerDraftsBySessionID: [String: SessionComposerDraft] = [:]
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
@@ -1741,13 +1751,31 @@ final class ChatClient: SSEEventHandlerDelegate {
         // A half-typed prompt belongs to the session it was typed in. Park it
         // and bring back whatever was drafted for the session being opened.
         if let previousID = currentSession?.id {
-            composerDraftsBySessionID[previousID] = inputText.isEmpty ? nil : inputText
+            let draft = SessionComposerDraft(
+                text: inputText,
+                attachments: composerAttachments,
+                directory: WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory)
+            )
+            composerDraftsBySessionID[previousID] = draft.isEmpty ? nil : draft
         }
         composerAttachments = []
         resetSessionState()
         isStreamSynchronized = false
         currentSession = session
-        inputText = composerDraftsBySessionID.removeValue(forKey: session.id) ?? ""
+        if let restored = composerDraftsBySessionID.removeValue(forKey: session.id) {
+            inputText = restored.text
+            let nextDirectory = WorkspaceSelectionBuilder.normalizedDirectory(session.directory)
+            if restored.directory == nil || nextDirectory == nil || restored.directory == nextDirectory {
+                composerAttachments = restored.attachments
+            } else {
+                composerAttachments = restored.attachments.filter {
+                    if case .serverFile = $0 { return false }
+                    return true
+                }
+            }
+        } else {
+            inputText = ""
+        }
         preparedSessionID = session.id
     }
 
@@ -3748,6 +3776,15 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Attaches a reference to a file in the session's folder on the server,
     /// optionally limited to a line range. `relativePath` is relative to the
     /// session folder; the server reads the file when the prompt is admitted.
+    func appendQuotedDiff(_ quote: String) {
+        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            inputText = quote + "\n"
+        } else {
+            inputText += "\n\n" + quote + "\n"
+        }
+    }
+
     func attachComposerServerFile(relativePath: String, lines: ServerFileReference.LineRange? = nil) {
         guard canAttachFiles else { return }
         do {

@@ -17,6 +17,7 @@ struct ModelPickerView: View {
     var onClearQuickModel: (ModelQuickAction) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.meridianUsageService) private var meridianService
     @State private var searchQuery = ""
     @State private var activeConfigurationAction: ModelQuickAction?
     @State private var pendingConfigurationModel: ChatClient.SelectableModel?
@@ -104,6 +105,11 @@ struct ModelPickerView: View {
         }
         .tint(isRetroChat ? RetroChatStyle.ink : Color.appAccent)
         .presentationBackground(isRetroChat ? RetroChatStyle.screenBottom : Color.appBackground)
+        .task {
+            if meridianService.snapshot == nil {
+                await meridianService.refresh()
+            }
+        }
     }
 
     @ViewBuilder
@@ -211,6 +217,59 @@ struct ModelPickerView: View {
 
     private var standardModelList: some View {
         List {
+            if activeConfigurationAction == nil,
+               searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let snapshot = meridianService.snapshot,
+               !snapshot.profiles.isEmpty {
+                Section("Meridian Account Quotas") {
+                    ForEach(snapshot.profiles.filter(\.isActive)) { profile in
+                        HStack(alignment: .center, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(profile.providerBadge)
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(Color.appAccent)
+                                    Text(profile.displayName)
+                                        .font(.footnote.weight(.medium))
+                                        .foregroundStyle(Color.appPrimary)
+                                        .lineLimit(1)
+                                }
+                                HStack(spacing: 8) {
+                                    ForEach(profile.windows) { window in
+                                        Text("\(window.label): \(window.remainingPercent)%")
+                                            .font(.caption2.monospacedDigit().weight(.medium))
+                                            .foregroundStyle(window.remainingPercent <= 5 ? .red : (window.remainingPercent <= 20 ? .orange : Color.appSecondary))
+                                    }
+                                }
+                            }
+                            Spacer()
+                            let alternatives = snapshot.profiles.filter { $0.providerBadge == profile.providerBadge && $0.id != profile.id }
+                            if !alternatives.isEmpty {
+                                Menu("Switch") {
+                                    ForEach(alternatives) { candidate in
+                                        Button {
+                                            Task { await meridianService.activateProfile(candidate.id) }
+                                        } label: {
+                                            let summary = candidate.windows.map { "\($0.label): \($0.remainingPercent)%" }.joined(separator: " · ")
+                                            Text("\(candidate.displayName) (\(summary))")
+                                        }
+                                    }
+                                }
+                                .font(.caption.weight(.semibold))
+                            }
+                        }
+                        .listRowBackground(Color.appSurface)
+                    }
+                    NavigationLink {
+                        MeridianUsageView()
+                    } label: {
+                        Label("All Meridian Accounts & Telemetry", systemImage: "gauge.with.dots.needle.67percent")
+                            .font(.footnote)
+                    }
+                    .listRowBackground(Color.appSurface)
+                }
+            }
+
             if activeConfigurationAction == nil {
                 Section {
                     quickActionCards
