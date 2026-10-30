@@ -8,7 +8,6 @@ enum AppText {
     static let allowOnce = "Allow once"
     static let approve = "Approve"
     static let appearance = "Appearance"
-    static let appearanceSubtitle = "Choose the app look"
     static let autoReconnect = "Auto-reconnect"
     static let autoReconnectErrorBody = "The server may be offline or unreachable.\nCheck that OpenCode is running and your network or remote tunnel is available."
     static let autoReconnectErrorTitle = "Could not reach the saved server"
@@ -16,7 +15,6 @@ enum AppText {
     static let back = "Back"
     static let unreadResult = "Unread"
     static let unreadResultAccessibility = "Unread result"
-    static let basicAuth = "Basic Auth"
     static let branch = "Branch"
     static let browseCaptures = "Browse Captures"
     static let browseCapturesSubtitle = "Replay saved assistant turns without a live server"
@@ -26,7 +24,6 @@ enum AppText {
     static let connected = "Connected"
     static let connecting = "Connecting..."
     static let connectingSubtitle = "Establishing connection to the server"
-    static let connectionSection = "Connection"
     static let connectionSetupTitle = "Connect to your computer"
     static let connectionSetupSubtitle = "Run this in your computer’s terminal:"
     static let connectionSetupTips = "Connection tips"
@@ -41,16 +38,13 @@ enum AppText {
     static let connectionManualTipsV1Title = "OpenCode v1"
     static let connectionManualTipsV1Detail = "Start the server with: opencode web --hostname 0.0.0.0 --port 4096 \nUse network access IP"
     static let connectionSetupPairingTitle = "QR code or pairing link"
-    static let connectionSetupV1Prompt = "Still on OpenCode v1?"
     static let connectionSetupV1 = "Connect manually"
     static let connectionSetupV1AccessibilityLabel = "Connect manually with OpenCode v1"
     static let connectionSetupV1Hint = "Connect using your server address and optional password."
     static let connectionManualTitle = "Connect to your server"
-    static let connectionManualSubtitle = "Enter your OpenCode server address, or paste a pairing link from opencode pair."
     static let connectionPairingHint = "Pairing links expire after five minutes. You can also paste the link on the manual connection screen."
     static let connectionPairingScan = "Scan QR code"
     static let connectionScanTitle = "Scan the QR code to pair"
-    static let connectionScanBody = "Point your camera at the OpenCode pairing QR code on your computer. OpenLens will save the connection for next time."
     static let connectionScanAgain = "Scan Again"
     static let connectionEditDetails = "Edit Details"
     static let connectionPairing = "Pairing..."
@@ -157,14 +151,10 @@ enum AppText {
     static let toolReturnedFile = "Tool file"
     static let partialOutputBeforeError = "Output before the error:"
     static let forget = "Forget"
-    static let forgetConnection = "Forget Connection"
-    static let forgetConnectionMessage = "Remove this server's credentials from Keychain? You'll need to re-enter them to connect again."
-    static let forgetThisConnection = "Forget This Connection"
     static let help = "Help"
     static let loadingModels = "Loading models..."
     static let localNetworkAccessRequiredBody = "Allow Local Network access for OpenLens in Settings, then return here and try again."
     static let localNetworkAccessRequiredTitle = "Local Network Access Needed"
-    static let manualConnection = "Manual Connection"
     static let manualConnectErrorBody = "Check the server address and make sure the server is running."
     static let manualConnectErrorTitle = "Could not connect to server"
     static let messagePlaceholder = "Ask anything or use /command"
@@ -182,7 +172,6 @@ enum AppText {
     static let multipleSelection = "Select multiple options"
     static let nearby = "Nearby"
     static let newSession = "New Session"
-    static let newSessionMessage = "Create a new chat session."
     static let newSessionPlaceholder = "Title (optional)"
     static let newSessionWorkspaceSourceNote = "Choose a known workspace or browse folders on the connected computer to find another project."
     static let newSessionWorkspaceUnavailable = "Your last workspace is not available on this server right now."
@@ -194,9 +183,7 @@ enum AppText {
     static let noSubfolders = "No Subfolders"
     static let noSubfoldersMessage = "You can use this folder or go up to find another project."
     static let folderLoadError = "Couldn’t Open Folder"
-    static let noProviders = "No providers available"
     static let none = "None"
-    static let openCodeServer = "OpenCode Server"
     static let openCodeV2SupportTitle = "OpenCode v2 Support"
     static let openCodeV2SupportSubtitle = "OpenLens works with OpenCode v2 and v1, and detects your server’s version automatically."
     static let openCodeV2SupportServerV2Title = "Connected to OpenCode v2"
@@ -212,8 +199,6 @@ enum AppText {
     static let permissionFallback = "The agent is requesting permission to proceed."
     static let permissionRequired = "Permission Required"
     static let project = "Project"
-    static let providerModel = "Provider & Model"
-    static let providerSubtitle = "Current AI provider configuration"
     static let projectFallback = "Unknown Project"
     static let prsAndStuff = "PR's and stuff"
     static let quickActions = "Quick Actions"
@@ -243,8 +228,6 @@ enum AppText {
     static let cancelQueuedPrompt = "Cancel pending prompt"
     static let promoteQueuedPrompt = "Steer at next step"
     static let updatingQueuedPrompt = "Updating pending prompt"
-    static let qrInstruction = "Point camera at QR code"
-    static let qrInstructionSubtitle = "Scan an OpenCode pairing QR code"
     static let qrInvalid = "Invalid QR code — scan an OpenCode pairing QR code"
     static let questionTranscriptAnswer = "Answer"
     static let questionTranscriptAnswered = "Answered"
@@ -268,16 +251,7 @@ enum AppText {
     static let reasoning = "Reasoning"
     static let reconnecting = "Reconnecting..."
     static let reconnectingSubtitle = "Reconnecting to your saved server"
-    static let refreshProviders = "Refresh Providers"
-    static let scanPrompt = "Scan for nearby servers"
-    static let searchingServers = "Searching for servers..."
     static let server = "Server"
-    static let serverCheckBody = "To connect OpenLens to your computer, you need to have OpenCode running with the server enabled."
-    static let serverCheckNo = "No, help me set it up"
-    static let serverCheckNoSubtitle = "Step-by-step installation guide"
-    static let serverCheckTitle = "Is OpenCode running?"
-    static let serverCheckYes = "Yes, it's running"
-    static let serverCheckYesSubtitle = "Choose how to connect"
     static let sessions = "Sessions"
     static let sessionsLoadErrorTitle = "Couldn't Load Sessions"
     static let sessionsAllRepositories = "All repositories"
@@ -295,10 +269,7 @@ enum AppText {
     static let settingsDebugFeatures = "Show Debug Features"
     static let settingsDebugFeaturesSubtitle = "Keep debug-only tools visible in development builds. Turn this off to match the release app."
     static let settingsLiveActivityDebugTitle = "Test Live Activity"
-    static let settingsLiveActivityDebugSubtitle = "Run a local sequence of agent steps on the Lock Screen and Dynamic Island"
     static let settingsLiveActivityDismissTitle = "Dismiss Live Activity"
-    static let settingsForgetDialogTitle = "Forget Connection"
-    static let settingsSupportBody = "OpenLens is open source. If the app helps you, visiting the GitHub repo and leaving a star is a simple way to support development."
     static let settingsSupportGitHubCTA = "View and Star on GitHub"
     static let settingsStarGoalTitle = "GitHub Star Goal"
     static func settingsStarGoalBody(goal: Int) -> String {
@@ -309,37 +280,21 @@ enum AppText {
     }
     static let settingsSupportReviewCTA = "Review on the App Store"
     static let settingsSupportRepository = "martynpekala/OpenLens"
-    static let settingsSupportTitle = "Support OpenLens"
     static let settingsAboutSupport = "About & Support"
     static let settingsAccentColor = "Accent Color"
     static let settingsAccentColorReset = "Reset to Default"
-    static let settingsAgents = "Agents"
-    static let settingsApp = "App"
     static let settingsAppPreferences = "App Preferences"
-    static let settingsCommands = "Commands"
-    static let settingsConfig = "Config"
-    static let settingsDefaultsSubtitle = "Compact server defaults"
-    static let settingsDiagnostics = "Diagnostics"
-    static let settingsDiagnosticsSubtitle = "Server, workspace, and capability details"
-    static let settingsDirectory = "Directory"
-    static let settingsEvents = "Events"
-    static let settingsHealth = "Health"
     static let settingsHaptics = "Haptics"
     static let settingsHapticsSubtitle = "Subtle feedback for agent events"
     static let settingsLiveActivities = "Live Activities"
     static let settingsLiveActivitiesSubtitle = "Show agent progress on the Lock Screen"
-    static let settingsServerEventsStreaming = "Streaming"
-    static let settingsServerEventsUnavailable = "Unavailable"
-    static let settingsWorktree = "Worktree"
     static let showFewerSessions = "Show Less"
     static let showMoreSessions = "Show More"
     static let showContextStatus = "Shows context status"
     static let showThinking = "Show Thinking"
     static let showThinkingSubtitle = "Display model reasoning in chat"
-    static let startServer = "Start the server"
     static let statusConnected = "Connected"
     static let statusConnecting = "Connecting..."
-    static let statusDisconnected = "Disconnected"
     static let statusError = "Error"
     static let statusOffline = "Offline"
     static let statusReconnecting = "Reconnecting..."
@@ -371,77 +326,6 @@ enum AppText {
     static let workspaceServerDefaultSubtitle = "No workspace was reported by the server."
     static let workspaceSuggested = "Suggested"
     static let workspaceUnavailable = "Unavailable"
-    static let wizardConnectBody = "Choose the quickest way to connect your iPhone to the OpenCode server."
-    static let wizardConnectBonjour = "Auto-detect on network"
-    static let wizardConnectBonjourSubtitle = "Requires --mdns flag on server"
-    static let wizardConnectManual = "Enter address manually"
-    static let wizardConnectManualSubtitle = "Type the IP address shown in terminal"
-    static let wizardConnectQR = "Scan QR Code"
-    static let wizardConnectQRSubtitle = "Fastest — no typing needed"
-    static let wizardConnectQRTipTitle = "Pair with a QR Code"
-    static let wizardConnectTitle = "How to connect?"
-    static let wizardInstallBody = "On your computer, open a terminal and run:"
-    static let wizardInstallHint = "Your iPhone and computer must be on the same Wi-Fi network. The --hostname 0.0.0.0 flag exposes the server on all network interfaces."
-    static let wizardInstallReady = "Server is running, continue"
-    static let wizardInstallRunBody = "Navigate to your project folder and start OpenCode with the server exposed on your network:"
-    static let wizardInstallRunTitle = "Start the server"
-    static let wizardInstallTitle = "Install OpenCode"
-
-    static let onboardingPageQRTitle = "Quick Connect with QR"
-    static let onboardingPageQRBody = """
-    The fastest way to connect is scanning the pairing QR code from OpenCode.
-
-    **1.** Start OpenCode on your computer:
-    `opencode serve --port 4096 --hostname 0.0.0.0`
-
-    **2.** In another terminal, run:
-    `opencode pair`
-
-    **3.** Scan the QR code with OpenLens. The connection is saved for next time.
-    """
-    static let onboardingPageQRHint = """
-    Pairing links expire after five minutes. If you can't use the camera, paste the link on the manual connection screen instead.
-    """
-    static let onboardingPage1Title = "Start manually"
-    static let onboardingPage1Body = """
-    If you want to start OpenCode manually instead of pairing with a QR code, run:
-    **opencode serve --port 4096 --hostname 0.0.0.0**
-
-    This exposes the server on your local network so OpenLens can reach it from your iPhone. Keep your iPhone and Mac on the same Wi-Fi.
-    """
-    static let onboardingPage1Hint = """
-    Set `OPENCODE_SERVER_PASSWORD` before starting the server to require a password.
-    Don't have OpenCode? `curl -fsSL https://opencode.ai/install | bash`
-    """
-    static let onboardingPage2Title = "Connect"
-    static let onboardingPage2Body = """
-    Make sure your iPhone and Mac are on the **same Wi-Fi network**.
-    **Fastest: QR Code**
-    Run `opencode pair` on your computer and scan the QR code it shows.
-    **Manual** — enter the IP address, e.g. `192.168.1.50:4096`.
-    """
-    static let onboardingPage2Hint = """
-    You can also paste a pairing link from `opencode pair` on the manual connection screen.
-    If the server needs a password, enter the username and password you started it with.
-    """
-    static let onboardingPage3Title = "One session, many places"
-    static let onboardingPage3Body = """
-    OpenCode works like a server — you can have the **TUI in a terminal**, a browser, and OpenLens open at the same time, all connected to the same session.
-    Changes and messages sync in real time.
-    """
-    static let onboardingPage3Hint = "Run `opencode attach http://<host>:4096` in a terminal to open the TUI on the same server your phone uses."
-    static let onboardingPage4Title = "Attach to a server"
-    static let onboardingPage4Body = """
-    If the server is already running (e.g. via `opencode serve` or `opencode web`), you can attach a terminal to it without restarting:
-    **opencode attach http://192.168.1.50:4096**
-
-    The TUI will connect to the existing instance — sessions and history are preserved.
-    """
-    static let onboardingPage4Hint = "Useful when the server is running remotely or in the background. You can also attach with a specific session: `opencode attach http://host:4096 --session <id>`"
-    static let onboardingNext = "Next"
-    static let onboardingStart = "Let's go"
-
-    static let wizardConnectQRTipBody = "With the server running, run this command on your computer and scan the QR code it shows:"
 
     static func captureEventCount(_ count: Int) -> String {
         "\(count) event\(count == 1 ? "" : "s")"
@@ -508,8 +392,4 @@ enum AppText {
     static let executionWaitingForm = "Waiting for response"
     static let executionSucceeded = "Succeeded"
     static let executionInterrupted = "Interrupted"
-
-    static func onboardingStep(_ current: Int, _ total: Int) -> String {
-        "Step \(current) of \(total)"
-    }
 }

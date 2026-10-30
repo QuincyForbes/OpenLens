@@ -1,40 +1,6 @@
 import SwiftUI
 import UIKit
 
-struct FileChangeRow: View {
-    let file: ReviewFileChange
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            FileChangeStatusBadge(status: file.status)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(file.path)
-                    .font(.system(size: 14, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Color.appPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                HStack(spacing: 12) {
-                    Text("+\(file.additions)")
-                        .foregroundStyle(.green)
-                    Text("-\(file.deletions)")
-                        .foregroundStyle(.red)
-                    if file.hasReadableDiff {
-                        Text("Open diff")
-                            .foregroundStyle(Color.appSecondary)
-                    }
-                }
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-            }
-
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.appSecondary)
-                .padding(.top, 4)
-        }
-    }
-}
-
 struct FileChangeStatusBadge: View {
     let status: String
 

@@ -142,9 +142,8 @@ final class ChatClient: SSEEventHandlerDelegate {
     private(set) var displayedEntryOrder: [String] = []
     private var olderTranscriptCursor: String?
     private var isLoadingEarlierHistory = false
-    @ObservationIgnored private var cachedSessionTranscripts: [String: SessionTranscript] = [:]
-    @ObservationIgnored private var cachedSessionTranscriptOrder: [String] = []
-    private static let maximumCachedSessionTranscripts = 16
+    // Only the active session owns a transcript. Reopening another session
+    // fetches its recent page from the server instead of retaining old chats.
     @ObservationIgnored private var cachedTurnDiffSummariesByMessageID: [String: [TurnFileChangeSummary]] = [:]
     private var activeContextSessionGeneration: UInt = 0
     private var activeContextTranscriptRevision: UInt = 0
@@ -155,9 +154,6 @@ final class ChatClient: SSEEventHandlerDelegate {
     func replaceTranscript(_ transcript: SessionTranscript) {
         activeContextTranscriptRevision &+= 1
         olderTranscriptCursor = transcript.olderCursor
-        if let sessionID = currentSession?.id, !isOfflinePreviewMode {
-            cacheSessionTranscript(transcript, for: sessionID)
-        }
         let messagesUnchanged = messages.count == transcript.messages.count
             && zip(messages, transcript.messages).allSatisfy { $0 === $1 }
         let contextsUnchanged = contextEntries.count == transcript.contextEntries.count
@@ -170,16 +166,6 @@ final class ChatClient: SSEEventHandlerDelegate {
         contextEntries = transcript.contextEntries
         transcriptEntryOrder = transcript.entryOrder
         messages = transcript.messages
-    }
-
-    private func cacheSessionTranscript(_ transcript: SessionTranscript, for sessionID: String) {
-        cachedSessionTranscripts[sessionID] = transcript
-        cachedSessionTranscriptOrder.removeAll { $0 == sessionID }
-        cachedSessionTranscriptOrder.append(sessionID)
-        while cachedSessionTranscriptOrder.count > Self.maximumCachedSessionTranscripts {
-            let oldest = cachedSessionTranscriptOrder.removeFirst()
-            cachedSessionTranscripts.removeValue(forKey: oldest)
-        }
     }
 
     func timelineItems(showsThinking: Bool) -> [ChatTimelineItem] {
@@ -1747,7 +1733,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     /// Prepares `ChatClient` synchronously before `NavigationStack` pushes `ChatView`
-    /// so Frame 0 already has `session` (and any cached transcript) installed instead
+    /// so Frame 0 already has `session` installed with an empty transcript instead
     /// of flashing the previous session's messages on the first frame.
     func prepareForOpeningSession(_ session: OCSession) {
         resetCachesForConnectionIfNeeded()
@@ -1755,18 +1741,14 @@ final class ChatClient: SSEEventHandlerDelegate {
         // A half-typed prompt belongs to the session it was typed in. Park it
         // and bring back whatever was drafted for the session being opened.
         if let previousID = currentSession?.id {
-            composerDraftsBySessionID[previousID] = inputText
+            composerDraftsBySessionID[previousID] = inputText.isEmpty ? nil : inputText
         }
         composerAttachments = []
         resetSessionState()
-        isStreamSynchronized = cachedSessionTranscripts[session.id] != nil
+        isStreamSynchronized = false
         currentSession = session
-        inputText = composerDraftsBySessionID[session.id] ?? ""
+        inputText = composerDraftsBySessionID.removeValue(forKey: session.id) ?? ""
         preparedSessionID = session.id
-        if let cached = cachedSessionTranscripts[session.id] {
-            preserveTurnFileChanges(in: cached.messages)
-            replaceTranscript(cached)
-        }
     }
 
     /// True when the destination view must run the authoritative load: either
@@ -1777,8 +1759,6 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     private func resetCachesForConnectionIfNeeded() {
         guard cacheClient !== connection?.client else { return }
-        cachedSessionTranscripts.removeAll()
-        cachedSessionTranscriptOrder.removeAll()
         cachedTurnDiffSummariesByMessageID.removeAll()
         composerDraftsBySessionID.removeAll()
         deferredPermissionIDs.removeAll()
@@ -1885,14 +1865,17 @@ final class ChatClient: SSEEventHandlerDelegate {
         guard !Task.isCancelled, sessionLoadToken == token else { return }
 
         if reopeningCurrentSession {
-            // Drain any in-flight state from the previous session
-            let existingCached = cachedSessionTranscripts[session.id]
+            // Preserve only the currently displayed session during its refresh.
+            // This temporary snapshot is never stored for a different session.
+            let existingTranscript = SessionTranscript(
+                messages: messages, contextEntries: contextEntries,
+                entryOrder: transcriptEntryOrder, olderCursor: olderTranscriptCursor
+            )
             resetSessionState()
+            isStreamSynchronized = false
             currentSession = session
-            if let existingCached {
-                preserveTurnFileChanges(in: existingCached.messages)
-                replaceTranscript(existingCached)
-            }
+            preserveTurnFileChanges(in: existingTranscript.messages)
+            replaceTranscript(existingTranscript)
         } else {
             currentSession = session
         }
@@ -2127,10 +2110,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     func unloadSession(ifMatching sessionID: String) {
+        composerDraftsBySessionID.removeValue(forKey: sessionID)
         guard currentSession?.id == sessionID else { return }
         sessionLoadToken = nil
-        cachedSessionTranscripts.removeValue(forKey: sessionID)
-        cachedSessionTranscriptOrder.removeAll { $0 == sessionID }
         resetSessionState()
         currentSession = nil
         inputText = ""
@@ -2476,6 +2458,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func discardStaleTranscriptAndDiffState() {
+        cachedTurnDiffSummariesByMessageID.removeAll()
         turnDiffTasksByAssistantID.values.forEach { $0.cancel() }
         turnDiffTasksByAssistantID.removeAll()
         resolvedTurnDiffAssistantIDs.removeAll()
@@ -5691,6 +5674,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func resetSessionState() {
+        cachedTurnDiffSummariesByMessageID.removeAll()
         stopViewingResults()
         viewedMarkerRefreshTask?.cancel()
         viewedMarkerRefreshTask = nil

@@ -26,7 +26,11 @@ nonisolated protocol OpenCodeTransport: AnyObject, Sendable {
 
 nonisolated final class DirectOpenCodeTransport: OpenCodeTransport, @unchecked Sendable {
     private static let sharedSession: URLSession = {
-        let configuration = URLSessionConfiguration.default
+        // Keep connection pooling, but never cache server transcripts on disk
+        // or serve an old HTTP response when revisiting a session.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 300
         configuration.waitsForConnectivity = false
@@ -78,7 +82,8 @@ nonisolated private final class DirectOpenCodeEventStream: NSObject, OpenCodeEve
         deliveryQueue.async { [self] in
             guard task == nil, session == nil else { return }
 
-            let configuration = URLSessionConfiguration.default
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
             configuration.timeoutIntervalForRequest = .infinity
             configuration.timeoutIntervalForResource = .infinity
 
