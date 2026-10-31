@@ -1125,7 +1125,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func handleResponseStateTransition(from oldState: ChatResponseState, to newState: ChatResponseState) {
-        let wasWorking = oldState == .thinking || oldState == .responding
+        let wasWorking = oldState == .generating
         guard wasWorking, newState == .idle, let sessionID = currentSession?.id else { return }
 
         let watchers = Self.extractActiveBackgroundWatchers(from: messages, pending: pendingAssistantMessage)
