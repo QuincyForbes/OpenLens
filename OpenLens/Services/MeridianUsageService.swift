@@ -142,6 +142,13 @@ final class MeridianUsageService {
         )
     }
 
+    nonisolated static let defaultFallbackEndpoints = [
+        "https://desktop-t43r9nu.taild1dd15.ts.net:8443",
+        "http://100.114.113.63:3456",
+        "http://desktop-t43r9nu.taild1dd15.ts.net:3456",
+        "http://192.168.68.57:3456"
+    ]
+
     nonisolated static func resolveCandidateURLs(
         customEndpoint: String,
         connectedServerURL: URL?
@@ -155,10 +162,19 @@ final class MeridianUsageService {
             }
         }
         if let host = connectedServerURL?.host(percentEncoded: false)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !host.isEmpty {
+           !host.isEmpty,
+           !host.lowercased().hasSuffix(".opentunnel.xyz") {
             let formattedHost = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
             if let httpURL = URL(string: "http://\(formattedHost):3456") {
                 candidates.append(httpURL)
+            }
+            if let httpsURL = URL(string: "https://\(formattedHost):8443") {
+                candidates.append(httpsURL)
+            }
+        }
+        for raw in defaultFallbackEndpoints {
+            if let url = URL(string: raw) {
+                candidates.append(url)
             }
         }
         var seen: Set<String> = []
@@ -171,14 +187,32 @@ final class MeridianUsageService {
             return
         }
         let candidates = candidateBaseURLs
-        guard !candidates.isEmpty else {
-            state = .failed("Connect to a server or set a Meridian URL (for example http://host:3456).")
-            return
-        }
-
         let previous = snapshot
         if previous == nil {
             state = .loading
+        }
+
+        // When no custom URL is forced and we have an active OpenCode connection
+        // (including remote tunnels like *.opentunnel.xyz), try reading the live
+        // Meridian bridge files through the authenticated OpenCode server first.
+        if customEndpointURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let client = connection.client {
+            let tmpDir = connection.serverCapabilities?.serverInfo?.paths?.temporaryDirectory
+                ?? #"C:\Users\Admin\AppData\Local\Temp\opencode"#
+            if let bridged = try? await Self.fetchSnapshotViaOpenCodeServer(
+                client: client,
+                tmpDirectory: tmpDir,
+                displayURL: URL(string: "https://desktop-t43r9nu.taild1dd15.ts.net:8443")!
+            ) {
+                guard !Task.isCancelled else { return }
+                state = .loaded(bridged)
+                return
+            }
+        }
+
+        guard !candidates.isEmpty else {
+            state = .failed("Connect to a server or set a Meridian URL (for example http://host:3456).")
+            return
         }
 
         var lastError: Error?
@@ -202,19 +236,50 @@ final class MeridianUsageService {
         }
     }
 
+    nonisolated static func fetchSnapshotViaOpenCodeServer(
+        client: OpenCodeClient,
+        tmpDirectory: String,
+        displayURL: URL
+    ) async throws -> MeridianUsageSnapshot {
+        async let quotaData = client.readFileData(path: "meridian-quota.json", directory: tmpDirectory)
+        async let profilesData = try? client.readFileData(path: "meridian-profiles.json", directory: tmpDirectory)
+        async let healthData = try? client.readFileData(path: "meridian-health.json", directory: tmpDirectory)
+        async let telemetryData = try? client.readFileData(path: "meridian-telemetry.json", directory: tmpDirectory)
+
+        let quota = try await quotaData
+        let profiles = await profilesData
+        let health = await healthData
+        let telemetry = await telemetryData
+
+        return try decodeSnapshot(
+            baseURL: displayURL,
+            quotaData: quota,
+            profilesData: profiles,
+            healthData: health,
+            telemetryData: telemetry
+        )
+    }
+
     func activateProfile(_ profileID: String) async {
         guard switchingProfileID == nil else { return }
-        let baseString = snapshot?.endpointURL ?? candidateBaseURLs.first?.absoluteString
-        guard let baseString, let baseURL = URL(string: baseString) else { return }
+        let urls = candidateBaseURLs
+        guard !urls.isEmpty else { return }
 
         switchingProfileID = profileID
         defer { switchingProfileID = nil }
 
-        do {
-            try await Self.postActiveProfile(profileID, baseURL: baseURL)
-            await refresh()
-        } catch {
-            state = .failed(error.localizedDescription)
+        var lastError: Error?
+        for baseURL in urls {
+            do {
+                try await Self.postActiveProfile(profileID, baseURL: baseURL)
+                await refresh()
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError {
+            state = .failed(lastError.localizedDescription)
         }
     }
 

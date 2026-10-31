@@ -100,9 +100,17 @@ struct MeridianUsageServiceTests {
             connectedServerURL: URL(string: "http://192.168.1.25:4096")
         )
 
-        #expect(urls.map(\.absoluteString) == [
+        #expect(urls.prefix(3).map(\.absoluteString) == [
             "http://100.114.113.63:3456",
-            "http://192.168.1.25:3456"
+            "http://192.168.1.25:3456",
+            "https://192.168.1.25:8443"
         ])
+
+        let remoteTunnelURLs = MeridianUsageService.resolveCandidateURLs(
+            customEndpoint: "",
+            connectedServerURL: URL(string: "https://a98316a55905c114.v7dxknkjb6dg.opentunnel.xyz")
+        )
+        #expect(!remoteTunnelURLs.contains { $0.host?.hasSuffix(".opentunnel.xyz") == true })
+        #expect(remoteTunnelURLs.first?.absoluteString == "https://desktop-t43r9nu.taild1dd15.ts.net:8443")
     }
 }
