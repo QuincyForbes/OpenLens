@@ -45,7 +45,7 @@ final class MessagesService {
     func loadTranscript(
         sessionID: String,
         cursor: String? = nil,
-        limit: Int = 25
+        limit: Int = 16
     ) async throws -> SessionTranscript {
         guard let client = connection.client else { throw OpenCodeError.notConnected }
         let page = try await client.listRecentTranscriptPage(

@@ -2264,7 +2264,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         do {
             inboxRecovered = await recoverSessionInbox() == .current
             guard isCurrent() else { return false }
-            let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 25
+            let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 16
             let rawTranscript = try await messagesService!.loadTranscript(
                 sessionID: session.id,
                 limit: fetchLimit

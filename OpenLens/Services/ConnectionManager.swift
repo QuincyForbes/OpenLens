@@ -378,6 +378,8 @@ final class ConnectionManager: ConnectionProviding {
         }
 
         let generation = projectContextGeneration
+        let hadSelectedDirectory = selectedProjectDirectory != nil
+        async let parallelVCS: OCVCSInfo? = hadSelectedDirectory ? (try? await client.getVCS()) : nil
         let (pathInfo, project) = await client.getLocationMetadata()
         guard !Task.isCancelled, generation == projectContextGeneration else { return }
 
@@ -416,14 +418,20 @@ final class ConnectionManager: ConnectionProviding {
             Logger.connection.debug("OpenLens kept restored/selected project directory \(self.selectedProjectDirectory ?? "nil", privacy: .public)")
         }
 
-        do {
-            let vcs = try await client.getVCS()
+        if hadSelectedDirectory {
+            let vcs = await parallelVCS
             guard !Task.isCancelled, generation == projectContextGeneration else { return }
-            branch = vcs.branch
-        } catch {
-            guard !Task.isCancelled, generation == projectContextGeneration else { return }
-            branch = nil
-            Logger.connection.warning("Failed to fetch VCS info: \(error, privacy: .public)")
+            branch = vcs?.branch
+        } else {
+            do {
+                let vcs = try await client.getVCS()
+                guard !Task.isCancelled, generation == projectContextGeneration else { return }
+                branch = vcs.branch
+            } catch {
+                guard !Task.isCancelled, generation == projectContextGeneration else { return }
+                branch = nil
+                Logger.connection.warning("Failed to fetch VCS info: \(error, privacy: .public)")
+            }
         }
 
         if let activeDirectory = selectedProjectDirectory {

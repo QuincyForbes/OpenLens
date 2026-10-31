@@ -90,8 +90,10 @@ struct WorkspaceRootView: View {
     @State private var filteredCommands: [WorkspaceCommandItem] = []
     @State private var workspaceOptions: [WorkspaceSelectionOption] = []
     @State private var workingTreeSummary = WorkingTreeSummary.empty
+    private let appearancePreference = AppearancePreference.shared
 
     var body: some View {
+        let _ = appearancePreference.appearance
         Group {
             if isInitialLoading {
                 ProgressView()
@@ -100,6 +102,7 @@ struct WorkspaceRootView: View {
                 content
             }
         }
+        .background(Color.appBackground)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             projectToolbarItem
@@ -201,10 +204,17 @@ struct WorkspaceRootView: View {
             }
 
             sourceControlSection
+                .listRowBackground(Color.appSurface)
             actionsSection
+                .listRowBackground(Color.appSurface)
             changedFilesSection
+                .listRowBackground(Color.appSurface)
             filesSection
+                .listRowBackground(Color.appSurface)
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .foregroundStyle(Color.appPrimary)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
     }
 
