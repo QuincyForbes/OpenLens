@@ -552,6 +552,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
     }
 
+    func refreshProviderFilter() {
+        rebuildAvailableModels()
+    }
+
     private func rebuildAvailableModels() {
         var activeProviders = connectedProviderIDs.isEmpty
             ? providers
@@ -563,6 +567,11 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         if let disabledProviders, !disabledProviders.isEmpty {
             activeProviders = activeProviders.filter { !disabledProviders.contains($0.id) }
+        }
+
+        if AppPreferences.hideOpenCodeFreeProvider,
+           activeProviders.contains(where: { $0.id.lowercased() != "opencode" }) {
+            activeProviders = activeProviders.filter { $0.id.lowercased() != "opencode" }
         }
 
         availableModels = activeProviders.flatMap { provider in

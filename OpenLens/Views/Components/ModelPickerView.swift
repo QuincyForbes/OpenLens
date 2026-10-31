@@ -21,6 +21,10 @@ struct ModelPickerView: View {
     @State private var searchQuery = ""
     @State private var activeConfigurationAction: ModelQuickAction?
     @State private var pendingConfigurationModel: ChatClient.SelectableModel?
+    @State private var favoriteModelIDs: Set<String> = AppPreferences.favoriteModelIDs()
+    @State private var selectedProviderFilter: String?
+
+    private static let favoritesFilterID = "__favorites__"
 
     /// Pre-computed grouped models — built once in init, O(n) via Dictionary.
     private let allModels: [ChatClient.SelectableModel]
@@ -280,10 +284,26 @@ struct ModelPickerView: View {
                 }
             }
 
+            if groupedModels.count > 1 || !favoriteModelIDs.isEmpty {
+                Section {
+                    providerFilterBar
+                        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
+                        .listRowBackground(Color.clear)
+                }
+            }
+
+            if !filteredFavoriteModels.isEmpty {
+                Section("Favorites") {
+                    ForEach(filteredFavoriteModels) { model in
+                        modelRow(model, showsProviderBadge: true)
+                    }
+                }
+            }
+
             if !filteredRecentModels.isEmpty {
                 Section(AppText.recentModels) {
                     ForEach(filteredRecentModels) { model in
-                        modelRow(model)
+                        modelRow(model, showsProviderBadge: true)
                     }
                 }
             }
@@ -311,8 +331,16 @@ struct ModelPickerView: View {
                     }
                 }
 
+                if groupedModels.count > 1 || !favoriteModelIDs.isEmpty {
+                    providerFilterBar
+                }
+
+                if !filteredFavoriteModels.isEmpty {
+                    retroModelSection("Favorites", models: filteredFavoriteModels, showsProviderBadge: true)
+                }
+
                 if !filteredRecentModels.isEmpty {
-                    retroModelSection(AppText.recentModels, models: filteredRecentModels)
+                    retroModelSection(AppText.recentModels, models: filteredRecentModels, showsProviderBadge: true)
                 }
 
                 ForEach(filteredGroupedModels, id: \.provider) { group in
@@ -322,6 +350,58 @@ struct ModelPickerView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 18)
         }
+    }
+
+    private var providerFilterBar: some View {
+        let favoriteCount = allModels.filter { favoriteModelIDs.contains($0.id) }.count
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                providerFilterChip(title: "All", filterID: nil)
+                if favoriteCount > 0 {
+                    providerFilterChip(
+                        title: "Favorites (\(favoriteCount))",
+                        filterID: Self.favoritesFilterID,
+                        icon: "heart.fill"
+                    )
+                }
+                ForEach(groupedModels, id: \.provider) { group in
+                    providerFilterChip(title: group.provider, filterID: group.provider)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func providerFilterChip(title: String, filterID: String?, icon: String? = nil) -> some View {
+        let isSelected = selectedProviderFilter == filterID
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) {
+                selectedProviderFilter = filterID
+            }
+        } label: {
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(isSelected ? Color.appOnAccent : primaryTextColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                isSelected ? Color.appAccent : Color.appSurface,
+                in: Capsule()
+            )
+            .overlay {
+                if !isSelected {
+                    Capsule()
+                        .stroke(Color.appSeparator, lineWidth: 1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private var quickActionsHeader: some View {
@@ -602,7 +682,8 @@ struct ModelPickerView: View {
 
     private func retroModelSection(
         _ title: String,
-        models: [ChatClient.SelectableModel]
+        models: [ChatClient.SelectableModel],
+        showsProviderBadge: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
@@ -613,7 +694,7 @@ struct ModelPickerView: View {
 
             VStack(spacing: 0) {
                 ForEach(models) { model in
-                    modelRow(model)
+                    modelRow(model, showsProviderBadge: showsProviderBadge)
 
                     if model.id != models.last?.id {
                         Rectangle()
@@ -631,6 +712,7 @@ struct ModelPickerView: View {
     /// keystroke in the search field stutter. Compute once per query instead.
     private struct FilterResult {
         var matchingIDs: Set<String>
+        var favorites: [ChatClient.SelectableModel]
         var recent: [ChatClient.SelectableModel]
         var grouped: [(provider: String, models: [ChatClient.SelectableModel])]
     }
@@ -640,15 +722,40 @@ struct ModelPickerView: View {
     }
 
     private func computeFilter(for query: String) -> FilterResult {
-        let matching = Self.models(matching: query, from: allModels)
-        let matchingIDs = Set(matching.map(\.id))
-        let recentIDs = Set(recentModels.map(\.id))
+        let queryMatching = Self.models(matching: query, from: allModels)
+        let providerScoped = queryMatching.filter { model in
+            guard let selectedProviderFilter else { return true }
+            if selectedProviderFilter == Self.favoritesFilterID {
+                return favoriteModelIDs.contains(model.id)
+            }
+            return model.providerName == selectedProviderFilter
+        }
+        let matchingIDs = Set(providerScoped.map(\.id))
+        let favorites = allModels.filter {
+            matchingIDs.contains($0.id) && favoriteModelIDs.contains($0.id)
+        }
+        let favoriteIDSet = Set(favorites.map(\.id))
+
+        if selectedProviderFilter == Self.favoritesFilterID {
+            return FilterResult(
+                matchingIDs: matchingIDs,
+                favorites: favorites,
+                recent: [],
+                grouped: []
+            )
+        }
+
+        let recent = recentModels.filter {
+            matchingIDs.contains($0.id) && !favoriteIDSet.contains($0.id)
+        }
+        let excludedIDs = favoriteIDSet.union(recent.map(\.id))
         let result = FilterResult(
             matchingIDs: matchingIDs,
-            recent: recentModels.filter { matchingIDs.contains($0.id) },
+            favorites: favorites,
+            recent: recent,
             grouped: groupedModels.compactMap { group in
                 let models = group.models.filter {
-                    matchingIDs.contains($0.id) && !recentIDs.contains($0.id)
+                    matchingIDs.contains($0.id) && !excludedIDs.contains($0.id)
                 }
                 guard !models.isEmpty else { return nil }
                 return (provider: group.provider, models: models)
@@ -661,6 +768,10 @@ struct ModelPickerView: View {
     private var filteredModels: [ChatClient.SelectableModel] {
         let ids = filterResult.matchingIDs
         return allModels.filter { ids.contains($0.id) }
+    }
+
+    private var filteredFavoriteModels: [ChatClient.SelectableModel] {
+        filterResult.favorites
     }
 
     private var filteredRecentModels: [ChatClient.SelectableModel] {
@@ -702,7 +813,7 @@ struct ModelPickerView: View {
 
     // MARK: - Model Row
 
-    private func modelRow(_ model: ChatClient.SelectableModel) -> some View {
+    private func modelRow(_ model: ChatClient.SelectableModel, showsProviderBadge: Bool = false) -> some View {
         let isSelected: Bool
         if let action = activeConfigurationAction {
             isSelected = quickModelAssignments[action]?.id == model.id
@@ -711,6 +822,7 @@ struct ModelPickerView: View {
         }
         let isDefault = defaultModelSelection?.providerID == model.providerID
             && defaultModelSelection?.modelID == model.modelID
+        let isFavorite = favoriteModelIDs.contains(model.id)
 
         return HStack(alignment: .top) {
             Button {
@@ -727,11 +839,22 @@ struct ModelPickerView: View {
             } label: {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(model.modelName)
-                            .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16, weight: isSelected ? .semibold : .regular))
-                            .foregroundStyle(primaryTextColor)
-                            .lineLimit(isRetroChat ? 1 : 2)
-                            .minimumScaleFactor(isRetroChat ? 0.75 : 1)
+                        HStack(spacing: 6) {
+                            Text(model.modelName)
+                                .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16, weight: isSelected ? .semibold : .regular))
+                                .foregroundStyle(primaryTextColor)
+                                .lineLimit(isRetroChat ? 1 : 2)
+                                .minimumScaleFactor(isRetroChat ? 0.75 : 1)
+
+                            if showsProviderBadge {
+                                Text(model.providerName)
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(Color.appAccent)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.appAccent.opacity(0.12), in: Capsule())
+                            }
+                        }
 
                         Text(model.modelID)
                             .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, design: .monospaced))
@@ -746,19 +869,39 @@ struct ModelPickerView: View {
             }
             .buttonStyle(.plain)
             Spacer()
-            Button {
-                onToggleDefault(model)
-            } label: {
-                Image(systemName: isDefault ? "star.fill" : "star")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(isDefault
-                        ? (isRetroChat ? RetroChatStyle.magentaAccent : Color.appAccent)
-                        : secondaryTextColor)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
+            HStack(spacing: 4) {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        favoriteModelIDs = AppPreferences.toggleFavoriteModelID(model.id)
+                        if selectedProviderFilter == Self.favoritesFilterID,
+                           allModels.filter({ favoriteModelIDs.contains($0.id) }).isEmpty {
+                            selectedProviderFilter = nil
+                        }
+                    }
+                } label: {
+                    Image(systemName: isFavorite ? "heart.fill" : "heart")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(isFavorite ? Color.pink : secondaryTextColor)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
+
+                Button {
+                    onToggleDefault(model)
+                } label: {
+                    Image(systemName: isDefault ? "star.fill" : "star")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(isDefault
+                            ? (isRetroChat ? RetroChatStyle.magentaAccent : Color.appAccent)
+                            : secondaryTextColor)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isDefault ? AppText.clearDefaultModel : AppText.setAsDefaultModel)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isDefault ? AppText.clearDefaultModel : AppText.setAsDefaultModel)
         }
         .padding(.horizontal, isRetroChat ? 12 : 0)
         .padding(.vertical, isRetroChat ? 10 : 4)

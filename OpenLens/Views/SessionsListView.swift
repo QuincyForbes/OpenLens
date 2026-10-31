@@ -62,6 +62,7 @@ struct SessionsListView: View {
     @State private var selectedRepositoryID: String?
     @AppStorage("sessions.layout") private var layout: SessionListOrganization.Layout = .focus
     @AppStorage("sessions.sortOrder") private var sortOrder: SessionListOrganization.SortOrder = .working
+    @AppStorage(AppPreferenceKeys.compactSessionRows) private var compactSessionRows = false
     /// Sessions with a permission, question or form waiting on the person.
     @State private var attentionSessionIDs: Set<String> = []
     @State private var attentionLabels: [String: String] = [:]
@@ -895,7 +896,7 @@ struct SessionsListView: View {
                     .foregroundStyle(Color.appSecondary.opacity(0.7))
             }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, compactSessionRows ? 8 : 12)
         .padding(.horizontal, isSidebar ? 10 : 14)
         .background(
             isSelected ? Color.appTertiary : Color.clear,

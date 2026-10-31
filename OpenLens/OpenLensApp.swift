@@ -199,6 +199,9 @@ struct OpenLensApp: App {
 
     @AppStorage("onboardingCompleted") private var onboardingCompleted: Bool = false
     @AppStorage(FeatureFlags.debugFeaturesKey) private var debugFeaturesEnabled: Bool = FeatureFlags.debugFeaturesDefault
+    @AppStorage(OpenLensAppearance.storageKey) private var appearance: OpenLensAppearance = .classic
+    @AppStorage(AppPreferenceKeys.colorSchemeMode) private var colorSchemeMode: AppColorSchemeMode = .system
+    @AppStorage(AppPreferenceKeys.hideOpenCodeFreeProvider) private var hideOpenCodeFreeProvider: Bool = true
 
     /// Deep link connection received via `openlens://connect` URL.
     @State private var pendingDeepLink: DeepLinkConnection?
@@ -488,7 +491,11 @@ struct OpenLensApp: App {
                 }
             }
             .animation(.easeInOut(duration: 0.45), value: isShowingConnectScreen)
-            .openLensTheme(OpenLensAppearance.fallback.theme)
+            .openLensTheme(appearance.theme)
+            .preferredColorScheme(colorSchemeMode.colorScheme)
+            .onChange(of: hideOpenCodeFreeProvider) { _, _ in
+                chatClient.refreshProviderFilter()
+            }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .environment(\.liveActivity, liveActivity)
             .environment(\.savedConnections, savedConnectionsStore)

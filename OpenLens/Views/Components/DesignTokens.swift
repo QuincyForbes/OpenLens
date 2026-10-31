@@ -137,6 +137,7 @@ enum OpenLensAppearance: String, CaseIterable, Identifiable {
     case classic
     case graphite
     case meadow
+    case midnight
 
     var id: String { rawValue }
 
@@ -145,6 +146,7 @@ enum OpenLensAppearance: String, CaseIterable, Identifiable {
         case .classic: "Classic"
         case .graphite: "Graphite"
         case .meadow: "Meadow"
+        case .midnight: "Midnight"
         }
     }
 
@@ -153,6 +155,7 @@ enum OpenLensAppearance: String, CaseIterable, Identifiable {
         case .classic: "Warm neutral"
         case .graphite: "Cool graphite"
         case .meadow: "Soft green"
+        case .midnight: "OLED dark slate"
         }
     }
 
@@ -161,6 +164,7 @@ enum OpenLensAppearance: String, CaseIterable, Identifiable {
         case .classic: .classic
         case .graphite: .graphite
         case .meadow: .meadow
+        case .midnight: .midnight
         }
     }
 
@@ -287,11 +291,47 @@ extension OpenLensTheme {
         ),
         components: OpenLensComponentTokens()
     )
+
+    static let midnight = OpenLensTheme(
+        id: "midnight",
+        name: "Midnight",
+        colors: OpenLensColorTokens(
+            background: .init(light: .openLens(240, 242, 247), dark: .openLens(0, 0, 0)),
+            surface: .init(light: .white, dark: .openLens(17, 19, 24)),
+            primary: .init(light: .openLens(17, 20, 28), dark: .openLens(244, 246, 250)),
+            secondary: .init(light: .openLens(92, 102, 118), dark: .openLens(156, 165, 180)),
+            tertiary: .init(light: .openLens(228, 232, 240), dark: .openLens(28, 32, 40)),
+            separator: .init(light: .openLens(212, 217, 227), dark: .openLens(46, 51, 62)),
+            accent: .init(light: .openLens(79, 70, 229), dark: .openLens(129, 140, 248)),
+            onAccent: .init(light: .white, dark: .openLens(14, 16, 24)),
+            success: .init(light: .openLens(22, 163, 74), dark: .openLens(74, 222, 128)),
+            warning: .init(light: .openLens(217, 119, 6), dark: .openLens(251, 191, 36)),
+            danger: .init(light: .openLens(220, 38, 38), dark: .openLens(248, 113, 113))
+        ),
+        typography: OpenLensTypographyTokens(),
+        spacing: OpenLensSpacingTokens(),
+        radius: OpenLensRadiusTokens(),
+        shadow: OpenLensShadowTokens(
+            surface: OpenLensShadowStyle(
+                color: .init(light: .openLens(15, 23, 42, alpha: 0.08), dark: .openLens(0, 0, 0, alpha: 0.45)),
+                radius: 8,
+                x: 0,
+                y: 2
+            ),
+            subtle: OpenLensShadowStyle(
+                color: .init(light: .openLens(15, 23, 42, alpha: 0.05), dark: .openLens(0, 0, 0, alpha: 0.30)),
+                radius: 4,
+                x: 0,
+                y: 1
+            )
+        ),
+        components: OpenLensComponentTokens()
+    )
 }
 
 enum OpenLensDesignSystem {
     static var currentTheme: OpenLensTheme {
-        OpenLensAppearance.fallback.theme
+        OpenLensAppearance.current.theme
     }
 }
 
@@ -350,6 +390,33 @@ final class AccentColorPreference {
         hex = newHex
         userDefaults.set(newHex, forKey: AppPreferenceKeys.accentColor)
     }
+
+    func setHex(_ rawHex: String) {
+        guard let normalized = Self.normalizedHex(rawHex), normalized != hex else { return }
+        hex = normalized
+        userDefaults.set(normalized, forKey: AppPreferenceKeys.accentColor)
+    }
+
+    struct Preset: Identifiable {
+        let id: String
+        let name: String
+        let hex: String
+
+        var color: Color {
+            Color(uiColor: AccentColorPreference.uiColor(fromHex: hex) ?? .systemBlue)
+        }
+    }
+
+    static let presets: [Preset] = [
+        Preset(id: "indigo", name: "Indigo", hex: "4F46E5"),
+        Preset(id: "blue", name: "Blue", hex: "007AFF"),
+        Preset(id: "teal", name: "Teal", hex: "0D9488"),
+        Preset(id: "emerald", name: "Emerald", hex: "10B981"),
+        Preset(id: "amber", name: "Amber", hex: "F59E0B"),
+        Preset(id: "coral", name: "Coral", hex: "F97316"),
+        Preset(id: "rose", name: "Rose", hex: "E11D48"),
+        Preset(id: "purple", name: "Purple", hex: "9333EA")
+    ]
 
     func reset() {
         guard hasCustomColor else { return }

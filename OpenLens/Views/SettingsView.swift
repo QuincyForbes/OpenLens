@@ -16,6 +16,10 @@ struct SettingsView: View {
     @AppStorage(AppPreferenceKeys.autoReconnect) private var autoReconnect = true
     @AppStorage(AppPreferenceKeys.hapticsEnabled) private var hapticsEnabled = true
     @AppStorage(AppPreferenceKeys.liveActivitiesEnabled) private var liveActivitiesEnabled = true
+    @AppStorage(AppPreferenceKeys.hideOpenCodeFreeProvider) private var hideOpenCodeFreeProvider = true
+    @AppStorage(AppPreferenceKeys.colorSchemeMode) private var colorSchemeMode: AppColorSchemeMode = .system
+    @AppStorage(OpenLensAppearance.storageKey) private var appearance: OpenLensAppearance = .classic
+    @AppStorage(AppPreferenceKeys.compactSessionRows) private var compactSessionRows = false
     private let accentColor = AccentColorPreference.shared
     @AppStorage(FeatureFlags.debugFeaturesKey) private var debugFeaturesEnabled = FeatureFlags.debugFeaturesDefault
 
@@ -106,10 +110,60 @@ struct SettingsView: View {
                 Toggle(isOn: $autoReconnect) {
                     preferenceLabel(AppText.autoReconnect, subtitle: AppText.autoReconnectSubtitle, icon: "arrow.triangle.2.circlepath")
                 }
+                Toggle(isOn: $hideOpenCodeFreeProvider) {
+                    preferenceLabel(
+                        "Hide OpenCode Free Provider",
+                        subtitle: "Only show Meridian (Anthropic & OpenAI) and API-key providers like Google",
+                        icon: "line.3.horizontal.decrease.circle"
+                    )
+                }
             }
             .tint(Color.appUserAccent)
 
             Section(AppText.appearance) {
+                Picker("Color Scheme", selection: $colorSchemeMode) {
+                    ForEach(AppColorSchemeMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Theme Palette", selection: $appearance) {
+                    ForEach(OpenLensAppearance.allCases) { item in
+                        Text("\(item.displayName) · \(item.subtitle)").tag(item)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Accent Presets")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(AccentColorPreference.presets) { preset in
+                                let isSelected = accentColor.hex.caseInsensitiveCompare(preset.hex) == .orderedSame
+                                Button {
+                                    accentColor.setHex(preset.hex)
+                                } label: {
+                                    Circle()
+                                        .fill(preset.color)
+                                        .frame(width: 28, height: 28)
+                                        .overlay {
+                                            if isSelected {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 11, weight: .bold))
+                                                    .foregroundStyle(.white)
+                                            }
+                                        }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Accent preset \(preset.name)")
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
                 ColorPicker(
                     AppText.settingsAccentColor,
                     selection: accentColor.binding,
@@ -119,6 +173,14 @@ struct SettingsView: View {
                     Button(AppText.settingsAccentColorReset, role: .destructive) {
                         accentColor.reset()
                     }
+                }
+
+                Toggle(isOn: $compactSessionRows) {
+                    preferenceLabel(
+                        "Compact Session List",
+                        subtitle: "Denser rows to fit more sessions on screen",
+                        icon: "rectangle.compress.vertical"
+                    )
                 }
             }
 
