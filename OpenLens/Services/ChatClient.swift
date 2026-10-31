@@ -945,6 +945,9 @@ final class ChatClient: SSEEventHandlerDelegate {
                 }
                 for message in messagesByID[id] ?? [] { message.reconcileSubagentResults(childResults) }
             }
+        } else {
+            for message in messages { message.reconcileSubagentResults([:]) }
+            pendingAssistantMessage?.reconcileSubagentResults([:])
         }
         var result: [ChatMessage]
         if contextEntries.isEmpty {

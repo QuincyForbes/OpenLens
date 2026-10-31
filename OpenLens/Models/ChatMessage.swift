@@ -1452,6 +1452,7 @@ final class ChatMessage: Identifiable {
     /// Later tool progress rebuilds the same projection with this evidence.
     func reconcileSubagentResults(_ results: [String: SubagentResultState]) {
         guard role == .assistant else { return }
+        if results.isEmpty, subagentResultsByChildID.isEmpty { return }
         // Fresh history already derived every message. Only a matching child
         // outcome may invalidate that projection; unrelated results are cheap.
         var relevant: [String: SubagentResultState] = [:]
