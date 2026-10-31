@@ -57,7 +57,7 @@ struct AccentColorPreferenceTests {
             }
         }
 
-        let client = ChatClient(demoMode: false)
+        let client = ChatClient(demoMode: true)
         client.providers = [
             OCProvider(id: "anthropic", name: "Anthropic", models: [
                 "claude-opus-5-5": OCProviderModel(id: "claude-opus-5-5", name: "Claude Opus 5.5")
