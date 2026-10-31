@@ -952,7 +952,7 @@ nonisolated enum OCSessionStatusType: String, Codable, Sendable {
     case retry
 }
 
-nonisolated struct OCSessionStatus: Codable, Sendable {
+nonisolated struct OCSessionStatus: Codable, Equatable, Sendable {
     let type: OCSessionStatusType
     let attempt: Int?
     let message: String?
