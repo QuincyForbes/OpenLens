@@ -136,19 +136,30 @@ struct SessionsListView: View {
         return sessions.filter { projectGroupID(for: $0) == selectedRepositoryID }
     }
 
-    private var runningSessionCount: Int {
-        repositorySessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }.count
+    private struct SessionFilterCounts {
+        var running = 0
+        var unread = 0
+        var attention = 0
     }
 
-    private var attentionSessionCount: Int {
-        repositorySessions.filter { attentionSessionIDs.contains($0.id) }.count
+    private var filterCounts: SessionFilterCounts {
+        var counts = SessionFilterCounts()
+        for session in repositorySessions {
+            let isBusy = SessionListOrganization.isWorking(sessionStatuses[session.id])
+            if isBusy {
+                counts.running += 1
+            } else if session.hasUnreadResult {
+                counts.unread += 1
+            }
+            if attentionSessionIDs.contains(session.id) {
+                counts.attention += 1
+            }
+        }
+        return counts
     }
 
     private var unreadSessionCount: Int {
-        repositorySessions.filter { session in
-            let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
-            return !isBusy && session.hasUnreadResult
-        }.count
+        filterCounts.unread
     }
 
     private struct PollTaskKey: Equatable {
@@ -559,18 +570,19 @@ struct SessionsListView: View {
     }
 
     private var sessionFilterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        let counts = filterCounts
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(SessionFilter.allCases) { filter in
                     let isSelected = sessionFilter == filter
                     let count: Int? = switch filter {
                     case .all: nil
-                    case .running: runningSessionCount > 0 ? runningSessionCount : nil
-                    case .unread: unreadSessionCount > 0 ? unreadSessionCount : nil
-                    case .attention: attentionSessionCount > 0 ? attentionSessionCount : nil
+                    case .running: counts.running > 0 ? counts.running : nil
+                    case .unread: counts.unread > 0 ? counts.unread : nil
+                    case .attention: counts.attention > 0 ? counts.attention : nil
                     }
                     // Hide the attention pill until something actually needs a reply.
-                    if filter != .attention || attentionSessionCount > 0 || sessionFilter == .attention {
+                    if filter != .attention || counts.attention > 0 || sessionFilter == .attention {
                         Button {
                             withAnimation(.snappy(duration: 0.2)) {
                                 sessionFilter = filter
@@ -605,7 +617,7 @@ struct SessionsListView: View {
                     }
                 }
 
-                if unreadSessionCount > 0 {
+                if counts.unread > 0 {
                     Button {
                         markSessionsAsRead(repositorySessions)
                     } label: {
@@ -1043,19 +1055,31 @@ struct SessionsListView: View {
         for form in snapshot.sessionForms {
             labels[form.sessionID] = "Form waiting for your response"
         }
-        attentionLabels = labels
+        if labels != attentionLabels {
+            attentionLabels = labels
+        }
         if let warning = snapshot.warning { refreshWarning = warning }
     }
 
     private func applyExecutionSnapshot(_ snapshot: SessionExecutionSnapshot, requestedIDs: Set<String>) {
-        sessions = SessionListOrganization.uniqueSessions(sessionsService.applyingConfirmedViewedMarkers(to: snapshot.sessions))
-        sessionStatuses = snapshot.statuses
-        failedOutcomeSessionIDs = snapshot.failedOutcomeSessionIDs
+        let updatedSessions = SessionListOrganization.uniqueSessions(
+            sessionsService.applyingConfirmedViewedMarkers(to: snapshot.sessions)
+        )
+        if updatedSessions != sessions {
+            sessions = updatedSessions
+        }
+        if snapshot.statuses != sessionStatuses {
+            sessionStatuses = snapshot.statuses
+        }
+        if snapshot.failedOutcomeSessionIDs != failedOutcomeSessionIDs {
+            failedOutcomeSessionIDs = snapshot.failedOutcomeSessionIDs
+        }
         if snapshot.statusRefreshFailed {
             refreshWarning = "Activity status could not be refreshed. Showing the last known status."
         }
-        openedSessionIDs.subtract(requestedIDs)
-        pruneExpandedProjects(using: snapshot.sessions)
+        if !requestedIDs.isEmpty {
+            openedSessionIDs.subtract(requestedIDs)
+        }
     }
 
     private func retryLoadingSessions() {
@@ -1095,7 +1119,6 @@ struct SessionsListView: View {
         openedSessionIDs.insert(session.id)
         viewState = .loaded
         sessions.insert(session, at: 0)
-        pruneExpandedProjects(using: sessions)
         onSelect(session)
     }
 
@@ -1106,7 +1129,6 @@ struct SessionsListView: View {
                 outcomeRefreshGeneration &+= 1
                 if case .loading = viewState { viewState = .loaded }
                 sessions.removeAll { $0.id == session.id }
-                pruneExpandedProjects(using: sessions)
                 onDelete(session)
             } catch {
                 viewState = .error(error.localizedDescription)
@@ -1151,12 +1173,6 @@ struct SessionsListView: View {
                 expandedProjectIDs.insert(groupID)
             }
         }
-    }
-
-    private func pruneExpandedProjects(using sessions: [OCSession]) {
-        let index = SessionRepositoryIndex(sessions: sessions, projects: sessionsService.repositoryProjects)
-        let validGroupIDs = Set(sessions.map { index.repository(for: $0).id })
-        expandedProjectIDs = expandedProjectIDs.intersection(validGroupIDs)
     }
 
     private func projectGroupID(for session: OCSession) -> String {

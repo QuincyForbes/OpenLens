@@ -874,6 +874,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     private let pageSize: Int = 15
 
     var displayedMessages: [ChatMessage] = []
+    private(set) var hasDisplayedMessages = false
 
     var hasEarlierMessages: Bool {
         messages.count + contextEntries.count > displayLimit || olderTranscriptCursor != nil
@@ -930,18 +931,20 @@ final class ChatClient: SSEEventHandlerDelegate {
     private func rebuildDisplayedMessages() {
         // Match each launch to the nearest later result for its child in
         // canonical order. Earlier outcomes cannot finish a reused session.
-        let contextsByID = Dictionary(contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
-        var messagesByID = Dictionary(grouping: messages, by: \.id)
-        if let pending = pendingAssistantMessage { messagesByID[pending.id, default: []].append(pending) }
-        var seen = Set<String>()
-        let order = (transcriptEntryOrder + messages.map(\.id) + (pendingAssistantMessage.map { [$0.id] } ?? []))
-            .filter { seen.insert($0).inserted }
-        var childResults: [String: SubagentResultState] = [:]
-        for id in order.reversed() {
-            if let result = contextsByID[id]?.subagentResult, let childID = result.childID, let state = result.state {
-                childResults[childID] = state
+        if contextEntries.contains(where: { $0.subagentResult != nil }) {
+            let contextsByID = Dictionary(contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            var messagesByID = Dictionary(grouping: messages, by: \.id)
+            if let pending = pendingAssistantMessage { messagesByID[pending.id, default: []].append(pending) }
+            var seen = Set<String>()
+            let order = (transcriptEntryOrder + messages.map(\.id) + (pendingAssistantMessage.map { [$0.id] } ?? []))
+                .filter { seen.insert($0).inserted }
+            var childResults: [String: SubagentResultState] = [:]
+            for id in order.reversed() {
+                if let result = contextsByID[id]?.subagentResult, let childID = result.childID, let state = result.state {
+                    childResults[childID] = state
+                }
+                for message in messagesByID[id] ?? [] { message.reconcileSubagentResults(childResults) }
             }
-            for message in messagesByID[id] ?? [] { message.reconcileSubagentResults(childResults) }
         }
         var result: [ChatMessage]
         if contextEntries.isEmpty {
@@ -967,6 +970,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         }
         displayedMessages = result
+        let nonEmpty = !result.isEmpty
+        if hasDisplayedMessages != nonEmpty {
+            hasDisplayedMessages = nonEmpty
+        }
         timelineVersion &+= 1
         scheduleTurnDiffLoads(for: result)
     }

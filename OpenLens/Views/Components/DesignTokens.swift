@@ -13,16 +13,15 @@ private extension UIColor {
 struct OpenLensSemanticColor {
     let light: UIColor
     let dark: UIColor
+    let color: Color
 
     init(light: UIColor, dark: UIColor? = nil) {
+        let resolvedDark = dark ?? light
         self.light = light
-        self.dark = dark ?? light
-    }
-
-    var color: Color {
-        Color(
+        self.dark = resolvedDark
+        self.color = Color(
             uiColor: UIColor { traits in
-                traits.userInterfaceStyle == .dark ? self.dark : self.light
+                traits.userInterfaceStyle == .dark ? resolvedDark : light
             }
         )
     }
@@ -168,16 +167,25 @@ enum OpenLensAppearance: String, CaseIterable, Identifiable {
         }
     }
 
+    private static var cachedAppearance: OpenLensAppearance = {
+        guard let rawValue = UserDefaults.standard.string(forKey: storageKey),
+              let appearance = OpenLensAppearance(rawValue: rawValue)
+        else {
+            return .fallback
+        }
+        return appearance
+    }()
+
+    static func syncCurrentAppearance(_ appearance: OpenLensAppearance) {
+        cachedAppearance = appearance
+    }
+
     static var current: OpenLensAppearance {
         get {
-            guard let rawValue = UserDefaults.standard.string(forKey: storageKey),
-                  let appearance = OpenLensAppearance(rawValue: rawValue)
-            else {
-                return .fallback
-            }
-            return appearance
+            cachedAppearance
         }
         set {
+            cachedAppearance = newValue
             UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
         }
     }
@@ -349,31 +357,46 @@ final class AccentColorPreference {
     static let shared = AccentColorPreference()
 
     @ObservationIgnored private let userDefaults: UserDefaults
+    @ObservationIgnored private var cachedCustomColor: Color?
+    @ObservationIgnored private var cachedCustomOnAccentColor: Color?
 
     /// Normalized `RRGGBB` hex, or empty when the theme default is used.
-    private(set) var hex: String
+    private(set) var hex: String {
+        didSet {
+            rebuildCachedColors()
+        }
+    }
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         self.hex = Self.normalizedHex(userDefaults.string(forKey: AppPreferenceKeys.accentColor)) ?? ""
+        rebuildCachedColors()
+    }
+
+    private func rebuildCachedColors() {
+        guard let custom = Self.uiColor(fromHex: hex) else {
+            cachedCustomColor = nil
+            cachedCustomOnAccentColor = nil
+            return
+        }
+        cachedCustomColor = Color(uiColor: custom)
+        cachedCustomOnAccentColor = Self.isLight(custom)
+            ? Color(red: 26 / 255, green: 26 / 255, blue: 26 / 255)
+            : .white
     }
 
     var hasCustomColor: Bool { !hex.isEmpty }
 
     /// The accent color used across the app.
     var color: Color {
-        guard let custom = Self.uiColor(fromHex: hex) else {
-            return OpenLensDesignSystem.currentTheme.colors.accent.color
-        }
-        return Color(uiColor: custom)
+        _ = hex
+        return cachedCustomColor ?? OpenLensDesignSystem.currentTheme.colors.accent.color
     }
 
     /// Foreground color that stays readable on top of `color`.
     var onAccentColor: Color {
-        guard let custom = Self.uiColor(fromHex: hex) else {
-            return OpenLensDesignSystem.currentTheme.colors.onAccent.color
-        }
-        return Self.isLight(custom) ? Color(red: 26 / 255, green: 26 / 255, blue: 26 / 255) : .white
+        _ = hex
+        return cachedCustomOnAccentColor ?? OpenLensDesignSystem.currentTheme.colors.onAccent.color
     }
 
     /// Two-way binding for `ColorPicker`.

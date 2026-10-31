@@ -197,7 +197,7 @@ struct ChatView: View {
                 onSyncSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
                     Task { await chatClient.refreshCurrentSessionFromServer() }
                 } : nil,
-                onScrollToBottom: !chatClient.displayedMessages.isEmpty ? {
+                onScrollToBottom: chatClient.hasDisplayedMessages ? {
                     jumpToLatestRequest &+= 1
                 } : nil,
                 onSwitchSession: (!chatClient.isOfflinePreviewMode && router != nil) ? {

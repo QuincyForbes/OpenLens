@@ -57,7 +57,7 @@ struct AccentColorPreferenceTests {
             }
         }
 
-        let client = ChatClient(connection: ConnectionManager())
+        let client = ChatClient(isDemoMode: false)
         client.providers = [
             OCProvider(id: "anthropic", name: "Anthropic", models: [
                 "claude-opus-5-5": OCProviderModel(id: "claude-opus-5-5", name: "Claude Opus 5.5")
@@ -75,10 +75,12 @@ struct AccentColorPreferenceTests {
 
         UserDefaults.standard.set(true, forKey: AppPreferenceKeys.hideOpenCodeFreeProvider)
         client.refreshProviderFilter()
-        #expect(Set(client.availableModels.map(\.providerID)) == ["anthropic", "openai", "google"])
+        let filteredProviders = Set(client.availableModels.map { $0.providerID })
+        #expect(filteredProviders == ["anthropic", "openai", "google"])
 
         UserDefaults.standard.set(false, forKey: AppPreferenceKeys.hideOpenCodeFreeProvider)
         client.refreshProviderFilter()
-        #expect(Set(client.availableModels.map(\.providerID)) == ["anthropic", "openai", "google", "opencode"])
+        let allProviders = Set(client.availableModels.map { $0.providerID })
+        #expect(allProviders == ["anthropic", "openai", "google", "opencode"])
     }
 }

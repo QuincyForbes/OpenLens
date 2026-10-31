@@ -493,6 +493,9 @@ struct OpenLensApp: App {
             .animation(.easeInOut(duration: 0.45), value: isShowingConnectScreen)
             .openLensTheme(appearance.theme)
             .preferredColorScheme(colorSchemeMode.colorScheme)
+            .onChange(of: appearance, initial: true) { _, newAppearance in
+                OpenLensAppearance.syncCurrentAppearance(newAppearance)
+            }
             .onChange(of: hideOpenCodeFreeProvider) { _, _ in
                 chatClient.refreshProviderFilter()
             }
