@@ -34,6 +34,7 @@ struct ChatView: View {
     @State private var jumpToLatestRequest: UInt = 0
     @State private var showContextStatus = false
     @State private var showSessionInsights = false
+    @State private var showSessionReview = false
     @State private var showMeridianUsage = false
     @State private var showRenameSessionAlert = false
     @State private var renameSessionDraft = ""
@@ -185,6 +186,9 @@ struct ChatView: View {
                 onShowInsights: chatClient.currentSession != nil ? {
                     showSessionInsights = true
                 } : nil,
+                onShowSessionReview: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
+                    showSessionReview = true
+                } : nil,
                 onShowMeridianUsage: {
                     showMeridianUsage = true
                 },
@@ -305,6 +309,21 @@ struct ChatView: View {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button(AppText.done) {
                                 showSessionInsights = false
+                            }
+                        }
+                    }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(Color.appBackground)
+        }
+        .sheet(isPresented: $showSessionReview) {
+            NavigationStack {
+                ReviewRootView(chatClient: chatClient)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(AppText.done) {
+                                showSessionReview = false
                             }
                         }
                     }

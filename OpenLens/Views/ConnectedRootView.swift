@@ -189,8 +189,6 @@ struct ConnectedRootView: View {
                 onDelete: handleDeletedSession,
                 newSessionModel: { await chatClient.newSessionModelPreference() }
             )
-        case .micro:
-            MicroRootView(chatClient: chatClient)
         case .review:
             ReviewRootView(chatClient: chatClient)
         case .workspace:
@@ -271,10 +269,6 @@ private struct ConnectedSidebarLayout: View {
         case .chat:
             sidebarNavigationStack(for: .chat) {
                 ChatDetailPlaceholderView()
-            }
-        case .micro:
-            sidebarNavigationStack(for: .micro) {
-                MicroRootView(chatClient: chatClient)
             }
         case .review:
             sidebarNavigationStack(for: .review) {

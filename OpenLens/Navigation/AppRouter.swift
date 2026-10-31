@@ -4,7 +4,6 @@ import Foundation
 final class AppRouter {
     var selectedTab: AppTab = .chat
     var chatPath: [RouterDestination] = []
-    var microPath: [RouterDestination] = []
     var reviewPath: [RouterDestination] = []
     var workspacePath: [RouterDestination] = []
     var settingsPath: [RouterDestination] = []
@@ -18,7 +17,6 @@ final class AppRouter {
     func path(for tab: AppTab) -> [RouterDestination] {
         switch tab {
         case .chat: chatPath
-        case .micro: microPath
         case .review: reviewPath
         case .workspace: workspacePath
         case .settings: settingsPath
@@ -29,8 +27,6 @@ final class AppRouter {
         switch tab {
         case .chat:
             chatPath = path
-        case .micro:
-            microPath = path
         case .review:
             reviewPath = path
         case .workspace:

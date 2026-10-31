@@ -64,11 +64,14 @@ struct ReviewRootView: View {
     @State private var inboxBadgeCount = 0
     @State private var isInboxPresented = false
     @State private var selectedScopeState = SelectedScopeState.empty
+    private let appearancePreference = AppearancePreference.shared
 
     var body: some View {
+        let _ = appearancePreference.appearance
         Group {
             content
         }
+        .background(Color.appBackground)
         .toolbarTitleDisplayMode(.inline)
         .task {
             await refreshInboxBadgeCount()
@@ -174,18 +177,82 @@ struct ReviewRootView: View {
 
     private var reviewForm: some View {
         Form {
+            if inboxBadgeCount > 0 {
+                Section("Needs Your Attention") {
+                    Button {
+                        isInboxPresented = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "bell.badge.fill")
+                                .foregroundStyle(Color.appWarning)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(inboxBadgeCount) pending request\(inboxBadgeCount == 1 ? "" : "s") waiting")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Color.appPrimary)
+                                Text("Permissions, questions, or forms waiting for your response")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.appSecondary)
+                            }
+                            Spacer()
+                            Text("Review")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.appWarning)
+                        }
+                    }
+                }
+                .listRowBackground(Color.appSurface)
+            }
+
+            if let reviewedSession = selectedReviewSession {
+                Section("Reviewed Session") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(reviewedSession.title.nilIfBlank ?? AppText.titleUntitled)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.appPrimary)
+                            if let directory = reviewedSession.directory?.nilIfBlank {
+                                Text(directory)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(Color.appSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        Spacer()
+                        if let router {
+                            Button {
+                                chatClient.prepareForOpeningSession(reviewedSession)
+                                router.selectChatSession(reviewedSession)
+                            } label: {
+                                Label("Open Chat", systemImage: "bubble.left.and.text.bubble.right")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                .listRowBackground(Color.appSurface)
+            }
+
             if !isReviewReloading {
                 if let reviewSnapshot, selectedScopeID != reviewSessionScopeID {
                     updateSection(reviewSnapshot)
+                        .listRowBackground(Color.appSurface)
                 }
 
                 filesSection
+                    .listRowBackground(Color.appSurface)
 
                 if let selectedChangeSet = selectedScopeState.changeSet {
                     revertSection(selectedChangeSet)
+                        .listRowBackground(Color.appSurface)
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .foregroundStyle(Color.appPrimary)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
         .safeAreaBar(edge: .top, spacing: 8) {
             if !isReviewReloading, let reviewSnapshot, !reviewSnapshot.changeSets.isEmpty {
@@ -304,8 +371,19 @@ struct ReviewRootView: View {
     private var filesSection: some View {
         Section {
             if selectedScopeState.files.isEmpty {
-                Text("No file changes available for this selection.")
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No turn snapshots recorded for this session yet.")
+                        .foregroundStyle(Color.appSecondary)
+                    if let router {
+                        Button {
+                            router.selectedTab = .workspace
+                        } label: {
+                            Label("Inspect Workspace Git Changes", systemImage: "arrow.triangle.branch")
+                                .font(.footnote.weight(.semibold))
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
             } else {
                 ForEach(selectedScopeState.files, id: \.id) { file in
                     Button {
@@ -313,7 +391,7 @@ struct ReviewRootView: View {
                     } label: {
                         fileRow(file)
                     }
-                    .tint(.primary)
+                    .tint(Color.appPrimary)
                 }
             }
         } header: {
