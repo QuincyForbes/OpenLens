@@ -18,12 +18,13 @@ struct SettingsView: View {
     @AppStorage(AppPreferenceKeys.liveActivitiesEnabled) private var liveActivitiesEnabled = true
     @AppStorage(AppPreferenceKeys.hideOpenCodeFreeProvider) private var hideOpenCodeFreeProvider = true
     @AppStorage(AppPreferenceKeys.colorSchemeMode) private var colorSchemeMode: AppColorSchemeMode = .system
-    @AppStorage(OpenLensAppearance.storageKey) private var appearance: OpenLensAppearance = .classic
     @AppStorage(AppPreferenceKeys.compactSessionRows) private var compactSessionRows = false
+    private let appearancePreference = AppearancePreference.shared
     private let accentColor = AccentColorPreference.shared
     @AppStorage(FeatureFlags.debugFeaturesKey) private var debugFeaturesEnabled = FeatureFlags.debugFeaturesDefault
 
     var body: some View {
+        let _ = appearancePreference.appearance
         Form {
             if let host = connection.serverHostDisplay {
                 Section("Connected Server") {
@@ -43,6 +44,7 @@ struct SettingsView: View {
                         Label("Meridian Quotas & Usage", systemImage: "gauge.with.dots.needle.67percent")
                     }
                 }
+                .listRowBackground(Color.appSurface)
             } else {
                 Section("Meridian") {
                     NavigationLink {
@@ -51,6 +53,7 @@ struct SettingsView: View {
                         Label("Meridian Quotas & Usage", systemImage: "gauge.with.dots.needle.67percent")
                     }
                 }
+                .listRowBackground(Color.appSurface)
             }
 
             if savedConnections.connections.count > 1 {
@@ -75,7 +78,7 @@ struct SettingsView: View {
                                         .foregroundStyle(Color.appPrimary)
                                     Text(saved.username)
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Color.appSecondary)
                                 }
                                 Spacer()
                                 if isActive {
@@ -95,6 +98,7 @@ struct SettingsView: View {
                         }
                     }
                 }
+                .listRowBackground(Color.appSurface)
             }
 
             Section(AppText.settingsAppPreferences) {
@@ -119,6 +123,7 @@ struct SettingsView: View {
                 }
             }
             .tint(Color.appUserAccent)
+            .listRowBackground(Color.appSurface)
 
             Section(AppText.appearance) {
                 Picker("Color Scheme", selection: $colorSchemeMode) {
@@ -128,16 +133,66 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Picker("Theme Palette", selection: $appearance) {
-                    ForEach(OpenLensAppearance.allCases) { item in
-                        Text("\(item.displayName) · \(item.subtitle)").tag(item)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Theme Palette")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.appSecondary)
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                        ForEach(OpenLensAppearance.allCases) { item in
+                            let isSelected = appearancePreference.appearance == item
+                            let palette = item.theme.colors
+                            Button {
+                                withAnimation(.snappy(duration: 0.2)) {
+                                    appearancePreference.setAppearance(item)
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    HStack(spacing: -4) {
+                                        Circle()
+                                            .fill(palette.background.color)
+                                            .frame(width: 16, height: 16)
+                                            .overlay(Circle().stroke(palette.separator.color, lineWidth: 1))
+                                        Circle()
+                                            .fill(palette.accent.color)
+                                            .frame(width: 16, height: 16)
+                                    }
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(item.displayName)
+                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(Color.appPrimary)
+                                        Text(item.subtitle)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(Color.appSecondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 0)
+                                    if isSelected {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundStyle(Color.appUserAccent)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(isSelected ? Color.appUserAccent.opacity(0.12) : Color.appTertiary)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(isSelected ? Color.appUserAccent : Color.appSeparator, lineWidth: isSelected ? 1.5 : 1)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
+                .padding(.vertical, 4)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Accent Presets")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.appSecondary)
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
                             ForEach(AccentColorPreference.presets) { preset in
@@ -183,6 +238,7 @@ struct SettingsView: View {
                     )
                 }
             }
+            .listRowBackground(Color.appSurface)
 
             Section {
                 if gitHubStars.state != .failed {
@@ -200,8 +256,11 @@ struct SettingsView: View {
             } header: {
                 Text(AppText.settingsAboutSupport)
             }
+            .listRowBackground(Color.appSurface)
 
             Text(appVersionBuild)
+                .foregroundStyle(Color.appSecondary)
+                .listRowBackground(Color.appSurface)
 
             #if DEBUG
             Section(AppText.developer) {
@@ -226,6 +285,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            .listRowBackground(Color.appSurface)
             #endif
 
             if showsDisconnectToolbarButton {
@@ -253,8 +313,12 @@ struct SettingsView: View {
                         Text(AppText.disconnectMessage)
                     }
                 }
+                .listRowBackground(Color.appSurface)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .foregroundStyle(Color.appPrimary)
         .navigationBarTitleDisplayMode(.inline)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
         .onChange(of: liveActivitiesEnabled) { _, enabled in
@@ -279,7 +343,7 @@ struct SettingsView: View {
                     Spacer()
                     Text(AppText.settingsStarGoalProgress(count, goal: gitHubStars.goal))
                         .font(.subheadline.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.appSecondary)
                 }
                 ProgressView(value: gitHubStars.progress)
                     .tint(Color.appUserAccent)
@@ -291,7 +355,7 @@ struct SettingsView: View {
 
             Text(AppText.settingsStarGoalBody(goal: gitHubStars.goal))
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.appSecondary)
         }
         .padding(.vertical, 4)
     }
@@ -299,13 +363,15 @@ struct SettingsView: View {
     private func preferenceLabel(_ title: String, subtitle: String, icon: String) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
+                .foregroundStyle(Color.appUserAccent)
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
+                    .foregroundStyle(Color.appPrimary)
                 Text(subtitle)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.appSecondary)
             }
         }
     }
@@ -313,6 +379,7 @@ struct SettingsView: View {
     private func detailRow(_ title: String, value: String) -> some View {
         LabeledContent(title) {
             Text(value)
+                .foregroundStyle(Color.appSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }

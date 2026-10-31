@@ -167,27 +167,48 @@ enum OpenLensAppearance: String, CaseIterable, Identifiable {
         }
     }
 
-    private static var cachedAppearance: OpenLensAppearance = {
-        guard let rawValue = UserDefaults.standard.string(forKey: storageKey),
-              let appearance = OpenLensAppearance(rawValue: rawValue)
-        else {
-            return .fallback
-        }
-        return appearance
-    }()
-
     static func syncCurrentAppearance(_ appearance: OpenLensAppearance) {
-        cachedAppearance = appearance
+        AppearancePreference.shared.setAppearance(appearance)
     }
 
     static var current: OpenLensAppearance {
         get {
-            cachedAppearance
+            AppearancePreference.shared.appearance
         }
         set {
-            cachedAppearance = newValue
-            UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
+            AppearancePreference.shared.setAppearance(newValue)
         }
+    }
+}
+
+@Observable
+final class AppearancePreference {
+    static let shared = AppearancePreference()
+
+    @ObservationIgnored private let userDefaults: UserDefaults
+    private(set) var appearance: OpenLensAppearance
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        if let rawValue = userDefaults.string(forKey: OpenLensAppearance.storageKey),
+           let stored = OpenLensAppearance(rawValue: rawValue) {
+            self.appearance = stored
+        } else {
+            self.appearance = .fallback
+        }
+    }
+
+    func setAppearance(_ newAppearance: OpenLensAppearance) {
+        guard newAppearance != appearance else { return }
+        appearance = newAppearance
+        userDefaults.set(newAppearance.rawValue, forKey: OpenLensAppearance.storageKey)
+    }
+
+    var binding: Binding<OpenLensAppearance> {
+        Binding(
+            get: { self.appearance },
+            set: { self.setAppearance($0) }
+        )
     }
 }
 
@@ -513,12 +534,15 @@ extension EnvironmentValues {
 private struct OpenLensThemeModifier: ViewModifier {
     let theme: OpenLensTheme
     private let accent = AccentColorPreference.shared
+    private let appearancePreference = AppearancePreference.shared
 
     func body(content: Content) -> some View {
+        let activeTheme = appearancePreference.appearance.theme
         content
-            .environment(\.openLensTheme, theme)
+            .environment(\.openLensTheme, activeTheme)
             .environment(accent)
-            .tint(theme.colors.accent.color)
+            .environment(appearancePreference)
+            .tint(activeTheme.colors.accent.color)
     }
 }
 
