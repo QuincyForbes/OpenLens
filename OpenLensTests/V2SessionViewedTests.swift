@@ -131,6 +131,25 @@ struct V2SessionViewedTests {
         #expect(failed[0].hasUnreadResult)
     }
 
+    @Test func markAllReadAcknowledgesOnlyUnreadInactiveSessionsInBulk() async throws {
+        let server = ViewedTransport()
+        let service = try await makeService(server)
+        let first = try await service.getSession(id: "ses_1")
+        let second = OCSession(id: "ses_2", title: "Second", time: first.time, outcome: "succeeded")
+        let busy = OCSession(id: "ses_busy", title: "Busy", time: first.time, outcome: "succeeded")
+        let alreadyRead = OCSession(id: "ses_read", title: "Read", time: .init(created: 1000, updated: 2000, idle: 2000, viewed: 2000), outcome: "succeeded")
+
+        let statuses = [busy.id: OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil)]
+        let result = await service.markAllRead(in: [first, second, busy, alreadyRead], statuses: statuses)
+
+        #expect(result.failedCount == 0)
+        #expect(result.sessions[0].hasUnreadResult == false)
+        #expect(result.sessions[1].hasUnreadResult == false)
+        #expect(result.sessions[2].hasUnreadResult == true)
+        #expect(result.sessions[3].hasUnreadResult == false)
+        #expect(await server.viewRequests.count == 2)
+    }
+
     @Test func aDesktopViewedEventRequestsOnlyReadMarkerRecovery() throws {
         var adapter = V2EventAdapter()
         let event = try #require(try adapter.event(["type": "session.viewed", "data": ["sessionID": "ses_1", "idle": 2000]], directory: nil))
@@ -597,7 +616,7 @@ private actor ViewedTransport: OpenCodeTransport {
             body = #"{"version":"2.0.23"}"#
             if !usesV2 { status = 404 }
         case "/global/health": body = #"{"healthy":true,"version":"1.2.0"}"#
-        case "/api/session/ses_1/view":
+        case let path where path.hasPrefix("/api/session/") && path.hasSuffix("/view"):
             viewRequests.append(request)
             concurrentViews += 1
             maximumConcurrentViews = max(maximumConcurrentViews, concurrentViews)

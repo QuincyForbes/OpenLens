@@ -386,6 +386,74 @@ final class SessionsService {
         return recovered
     }
 
+    /// Acknowledges all unread, non-working sessions in `sessions` with bounded concurrency.
+    func markAllRead(
+        in sessions: [OCSession],
+        statuses: [String: OCSessionStatus]
+    ) async -> (sessions: [OCSession], failedCount: Int) {
+        let candidates = sessions.filter { session in
+            !SessionListOrganization.isWorking(statuses[session.id]) && session.hasUnreadResult
+        }
+        guard !candidates.isEmpty else {
+            return (applyingConfirmedViewedMarkers(to: sessions), 0)
+        }
+
+        if ScreenshotFixtures.isEnabled {
+            let updated = sessions.map { session -> OCSession in
+                guard !SessionListOrganization.isWorking(statuses[session.id]),
+                      let idle = session.completedResultMarker else {
+                    return session
+                }
+                return session.withViewedMarker(idle)
+            }
+            return (updated, 0)
+        }
+
+        guard connection.serverCapabilities?.protocolVersion == .v2 else {
+            return (sessions, 0)
+        }
+
+        let results = await withTaskGroup(of: (String, OCSession?, Bool).self) { group in
+            var iterator = candidates.makeIterator()
+            for _ in 0..<min(6, candidates.count) {
+                if let next = iterator.next() {
+                    group.addTask {
+                        do {
+                            let viewed = try await self.viewResult(next)
+                            return (next.id, viewed, true)
+                        } catch {
+                            return (next.id, nil, false)
+                        }
+                    }
+                }
+            }
+
+            var recoveredByID: [String: OCSession] = [:]
+            var failures = 0
+            for await (id, recovered, succeeded) in group {
+                if let recovered {
+                    recoveredByID[id] = recovered
+                } else if !succeeded {
+                    failures += 1
+                }
+                if !Task.isCancelled, let next = iterator.next() {
+                    group.addTask {
+                        do {
+                            let viewed = try await self.viewResult(next)
+                            return (next.id, viewed, true)
+                        } catch {
+                            return (next.id, nil, false)
+                        }
+                    }
+                }
+            }
+            return (recoveredByID, failures)
+        }
+
+        let merged = sessions.map { results.0[$0.id] ?? $0 }
+        return (applyingConfirmedViewedMarkers(to: merged), results.1)
+    }
+
     // MARK: - Abort
 
     /// Abort the active generation on a session.

@@ -65,6 +65,7 @@ struct SessionsListView: View {
     /// Sessions with a permission, question or form waiting on the person.
     @State private var attentionSessionIDs: Set<String> = []
     @State private var attentionLabels: [String: String] = [:]
+    @State private var isMarkingAllRead = false
     @State private var isOnScreen = true
     @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
@@ -602,6 +603,33 @@ struct SessionsListView: View {
                         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
                     }
                 }
+
+                if unreadSessionCount > 0 {
+                    Button {
+                        markSessionsAsRead(repositorySessions)
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isMarkingAllRead {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            Text("Mark all read")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.appAccent.opacity(0.12), in: Capsule())
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isMarkingAllRead)
+                    .accessibilityIdentifier("sessions.markAllRead")
+                }
             }
         }
     }
@@ -665,7 +693,10 @@ struct SessionsListView: View {
     }
 
     private func timelineSection(_ section: SessionTimelineSection, showsRepository: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let unreadInSection = section.sessions.filter {
+            !SessionListOrganization.isWorking(sessionStatuses[$0.id]) && $0.hasUnreadResult
+        }
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if section.isWorking {
                     Image(systemName: "circle.dotted")
@@ -682,6 +713,17 @@ struct SessionsListView: View {
                 Text(AppText.groupedProjectCount(section.sessions.count))
                     .font(.system(size: 12, design: .rounded))
                     .foregroundStyle(Color.appSecondary)
+
+                if !unreadInSection.isEmpty {
+                    Spacer(minLength: 4)
+                    Button("Mark read") {
+                        markSessionsAsRead(unreadInSection)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appAccent)
+                    .buttonStyle(.plain)
+                    .disabled(isMarkingAllRead)
+                }
             }
             .foregroundStyle(section.isWorking ? Color.appAccent : Color.appPrimary)
             .padding(.horizontal, sectionHeaderInset)
@@ -728,6 +770,13 @@ struct SessionsListView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            if !SessionListOrganization.isWorking(sessionStatuses[session.id]), session.hasUnreadResult {
+                Button {
+                    markSessionsAsRead([session])
+                } label: {
+                    Label("Mark as Read", systemImage: "checkmark.circle")
+                }
+            }
             Button {
                 sessionsService.togglePin(session.id)
             } label: {
@@ -1011,6 +1060,28 @@ struct SessionsListView: View {
     private func retryLoadingSessions() {
         Task {
             await loadSessions()
+        }
+    }
+
+    private func markSessionsAsRead(_ targetSessions: [OCSession]) {
+        guard !isMarkingAllRead else { return }
+        let targetIDs = Set(targetSessions.map(\.id))
+        let subset = sessions.filter { targetIDs.contains($0.id) }
+        guard !subset.isEmpty else { return }
+
+        isMarkingAllRead = true
+        Task {
+            defer { isMarkingAllRead = false }
+            let result = await sessionsService.markAllRead(in: subset, statuses: sessionStatuses)
+            let updatedByID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.id, $0) })
+            sessions = sessions.map { updatedByID[$0.id] ?? $0 }
+            sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
+            if result.failedCount > 0 {
+                refreshWarning = "Could not mark \(result.failedCount) session\(result.failedCount == 1 ? "" : "s") as read."
+            }
+            if sessionFilter == .unread, unreadSessionCount == 0 {
+                sessionFilter = .all
+            }
         }
     }
 
