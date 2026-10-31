@@ -38,6 +38,7 @@ struct ChatView: View {
     @State private var showRenameSessionAlert = false
     @State private var renameSessionDraft = ""
     @State private var showTodoList = false
+    @State private var showBackgroundWatchersPopover = false
     @State private var availableSlashActions: [WorkspaceSlashActionItem] = []
     @State private var selectedSlashAction: WorkspaceSlashActionItem?
     @State private var attachedSkills: [WorkspaceSkillItem] = []
@@ -525,7 +526,101 @@ struct ChatView: View {
                         .combined(with: .scale(scale: 0.86))
                 )
             )
+        } else if !chatClient.activeBackgroundWatchers.isEmpty {
+            backgroundWatcherOverlayPill
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: .top)
+                            .combined(with: .opacity)
+                            .combined(with: .scale(scale: 0.92)),
+                        removal: .opacity
+                            .combined(with: .scale(scale: 0.86))
+                    )
+                )
         }
+    }
+
+    private var backgroundWatcherOverlayPill: some View {
+        let watchers = chatClient.activeBackgroundWatchers
+        let summaryLabel = watchers.count == 1
+            ? "Watching · \(watchers[0].title)"
+            : "Watching \(watchers.count) background tasks"
+        let isRemindArmed = chatClient.isCurrentSessionReminderArmed
+
+        return HStack(spacing: 8) {
+            Button {
+                showBackgroundWatchersPopover.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.arrow.2.circlepath")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.appAccent)
+                        .symbolEffect(.pulse)
+                    Text(summaryLabel)
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(primaryTextColor)
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showBackgroundWatchersPopover, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Active Background Watchers")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(secondaryTextColor)
+                    ForEach(watchers) { item in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: item.kind == .shell ? "terminal" : "person.2.wave.2")
+                                .font(.caption)
+                                .foregroundStyle(Color.appAccent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(primaryTextColor)
+                                    .lineLimit(2)
+                                if let detail = item.detail {
+                                    Text(detail)
+                                        .font(.caption2)
+                                        .foregroundStyle(secondaryTextColor)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: 300, alignment: .leading)
+                .presentationCompactAdaptation(.popover)
+            }
+
+            Divider()
+                .frame(height: 14)
+
+            Button {
+                chatClient.toggleCurrentSessionReminder()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: isRemindArmed ? "bell.fill" : "bell")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(isRemindArmed ? "Remind on" : "Remind me")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(isRemindArmed ? Color.appAccent : secondaryTextColor)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isRemindArmed ? "Disable completion reminder" : "Notify when background task finishes")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface,
+            in: Capsule()
+        )
+        .overlay {
+            Capsule()
+                .stroke(Color.appAccent.opacity(0.35), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 2)
+        .padding(.horizontal, 16)
     }
 
     private func updateDisplayedResponseState(_ state: ChatResponseState) {
@@ -747,7 +842,9 @@ struct ChatView: View {
             }
 
             Spacer()
-            VStack(alignment: .trailing, spacing: 8) {
+            HStack(spacing: 6) {
+                reminderChip
+
                 if !chatClient.todos.isEmpty {
                     todoChip
                 }
@@ -788,6 +885,31 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 2)
+    }
+
+    private var reminderChip: some View {
+        let isArmed = chatClient.isCurrentSessionReminderArmed
+        return Button {
+            chatClient.toggleCurrentSessionReminder()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isArmed ? "bell.fill" : "bell")
+                    .font(.system(size: 11, weight: .semibold))
+                if isArmed {
+                    Text("Remind")
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                }
+            }
+            .foregroundStyle(isArmed ? Color.appAccent : secondaryTextColor)
+            .padding(.horizontal, isArmed ? 9 : 8)
+            .padding(.vertical, 5)
+            .chatModeChipChrome(visualMode)
+        }
+        .buttonStyle(.plain)
+        .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
+        .accessibilityLabel(isArmed ? "Reminder active for next completion" : "Notify when agent finishes")
+        .accessibilityIdentifier("chat.reminderToggle")
     }
 
     private var modelSelectorButton: some View {

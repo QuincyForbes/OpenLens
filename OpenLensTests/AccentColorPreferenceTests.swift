@@ -83,4 +83,18 @@ struct AccentColorPreferenceTests {
         let allProviders = Set(client.availableModels.map { $0.providerID })
         #expect(allProviders == ["anthropic", "openai", "google", "opencode"])
     }
+
+    @Test
+    func reminderRequestsAndBackgroundShellWatchersAreParsedAccurately() {
+        #expect(ChatNotificationService.containsReminderRequest("Please remind us when the CI build finishes"))
+        #expect(ChatNotificationService.containsReminderRequest("Remind me in 5 minutes to check the logs"))
+        #expect(!ChatNotificationService.containsReminderRequest("Refactor the login screen"))
+        #expect(ChatNotificationService.parseRelativeReminderDelaySeconds(from: "Remind me in 5 minutes") == 300)
+
+        let shellOutput = "Command moved to the background (shell ID: sh_1907af52f001oC2jmU1gnJMHkM)."
+        #expect(ChatClient.extractBackgroundShellID(from: shellOutput) == "sh_1907af52f001oC2jmU1gnJMHkM")
+
+        let completionPayload = #"<shell id="sh_1907af52f001oC2jmU1gnJMHkM" state="completed" command="gh run watch">"#
+        #expect(ChatClient.extractCompletedShellIDs(from: completionPayload) == ["sh_1907af52f001oC2jmU1gnJMHkM"])
+    }
 }

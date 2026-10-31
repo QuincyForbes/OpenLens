@@ -327,6 +327,7 @@ struct OpenLensApp: App {
         }
 
         let liveActivity = LiveActivityManager()
+        ChatNotificationService.shared.configureIfNeeded()
 
         let sessions = SessionsService(connection: connection)
         let messages = MessagesService(connection: connection)

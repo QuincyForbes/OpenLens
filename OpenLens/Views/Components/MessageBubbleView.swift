@@ -377,11 +377,23 @@ struct MessageBubbleView: View {
     }
 
     private func toolSegment(_ step: ChatMessage.PersistedToolStep) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(toolTranscriptLine(step))
-                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium, design: .monospaced))
-                .foregroundStyle(step.isError ? (isRetroChat ? RetroChatStyle.danger : .orange) : (isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary))
-                .fixedSize(horizontal: false, vertical: true)
+        let isBackgroundShellLaunch = step.outputPreview.flatMap(ChatClient.extractBackgroundShellID(from:)) != nil
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(toolTranscriptLine(step))
+                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(step.isError ? (isRetroChat ? RetroChatStyle.danger : .orange) : (isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if isBackgroundShellLaunch {
+                    Label("Background task", systemImage: "clock.arrow.2.circlepath")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.appAccent.opacity(0.12), in: Capsule())
+                }
+            }
 
             if let output = step.outputPreview {
                 LinkedPlainText(text: output, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)

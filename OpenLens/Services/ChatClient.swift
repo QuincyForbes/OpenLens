@@ -184,9 +184,44 @@ final class ChatClient: SSEEventHandlerDelegate {
     var queuedPrompts: [QueuedPrompt] = []
     private(set) var queuedPromptMutationID: UUID?
     private(set) var promptSubmissions: [PromptSubmission] = []
+    struct BackgroundWatcherItem: Identifiable, Equatable, Sendable {
+        enum Kind: String, Equatable, Sendable {
+            case shell
+            case subagent
+        }
+
+        let id: String
+        let kind: Kind
+        let title: String
+        let detail: String?
+    }
+
+    private(set) var activeBackgroundWatchers: [BackgroundWatcherItem] = []
+    private(set) var notifyWhenDoneSessionIDs: Set<String> = []
+    @ObservationIgnored private var hadActiveBackgroundWatchersInSession: Set<String> = []
+
+    var isCurrentSessionReminderArmed: Bool {
+        guard let id = currentSession?.id else { return false }
+        return notifyWhenDoneSessionIDs.contains(id)
+    }
+
+    func toggleCurrentSessionReminder() {
+        guard let id = currentSession?.id else { return }
+        if notifyWhenDoneSessionIDs.contains(id) {
+            notifyWhenDoneSessionIDs.remove(id)
+        } else {
+            notifyWhenDoneSessionIDs.insert(id)
+            ChatNotificationService.shared.requestAuthorizationIfNeeded()
+        }
+    }
+
     /// True while OpenCode is reverting a selected user message.
     var isUndoingMessage: Bool = false
-    var responseState: ChatResponseState = .idle
+    var responseState: ChatResponseState = .idle {
+        didSet {
+            handleResponseStateTransition(from: oldValue, to: responseState)
+        }
+    }
     var errorMessage: String?
     private(set) var sessionLocationState: SessionLocationState = .ready
     var sessionLocationError: String? {
@@ -977,8 +1012,146 @@ final class ChatClient: SSEEventHandlerDelegate {
         if hasDisplayedMessages != nonEmpty {
             hasDisplayedMessages = nonEmpty
         }
+        let watchers = Self.extractActiveBackgroundWatchers(from: messages, pending: pendingAssistantMessage)
+        if activeBackgroundWatchers != watchers {
+            activeBackgroundWatchers = watchers
+        }
         timelineVersion &+= 1
         scheduleTurnDiffLoads(for: result)
+    }
+
+    static func extractActiveBackgroundWatchers(
+        from messages: [ChatMessage],
+        pending: ChatMessage?
+    ) -> [BackgroundWatcherItem] {
+        var completedShellIDs = Set<String>()
+        for message in messages {
+            for id in extractCompletedShellIDs(from: message.content) {
+                completedShellIDs.insert(id)
+            }
+            for part in message.parts {
+                if let text = part.text {
+                    for id in extractCompletedShellIDs(from: text) {
+                        completedShellIDs.insert(id)
+                    }
+                }
+            }
+        }
+
+        var watchers: [BackgroundWatcherItem] = []
+        var seenIDs = Set<String>()
+        var allMessages = messages
+        if let pending, !allMessages.contains(where: { $0.id == pending.id }) {
+            allMessages.append(pending)
+        }
+
+        for message in allMessages where message.role == .assistant {
+            for segment in message.assistantSegments {
+                switch segment.kind {
+                case .tool(let step):
+                    if let output = step.outputPreview,
+                       let shellID = extractBackgroundShellID(from: output),
+                       !completedShellIDs.contains(shellID),
+                       seenIDs.insert(shellID).inserted {
+                        let cleanedTitle = step.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                        watchers.append(
+                            BackgroundWatcherItem(
+                                id: shellID,
+                                kind: .shell,
+                                title: cleanedTitle.isEmpty ? "Background shell task" : cleanedTitle,
+                                detail: shellID
+                            )
+                        )
+                    }
+                case .subagent(let step):
+                    if step.isActive, !message.isStreaming, seenIDs.insert(step.id).inserted {
+                        watchers.append(
+                            BackgroundWatcherItem(
+                                id: step.id,
+                                kind: .subagent,
+                                title: step.title,
+                                detail: step.agentName
+                            )
+                        )
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        return watchers
+    }
+
+    nonisolated static func extractBackgroundShellID(from text: String) -> String? {
+        guard let markerRange = text.range(of: "shell ID: sh_") else { return nil }
+        let start = text.index(markerRange.lowerBound, offsetBy: "shell ID: ".count)
+        let suffix = text[start...]
+        let id = suffix.prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        return id.isEmpty ? nil : String(id)
+    }
+
+    nonisolated static func extractCompletedShellIDs(from text: String) -> [String] {
+        guard text.contains("<shell id=\"") else { return [] }
+        var results: [String] = []
+        var searchRange = text.startIndex..<text.endIndex
+        let prefix = "<shell id=\""
+        while let found = text.range(of: prefix, range: searchRange) {
+            let afterPrefix = found.upperBound
+            if let closingQuote = text[afterPrefix...].firstIndex(of: "\"") {
+                let shellID = String(text[afterPrefix..<closingQuote])
+                if !shellID.isEmpty {
+                    results.append(shellID)
+                }
+                searchRange = text.index(after: closingQuote)..<text.endIndex
+            } else {
+                break
+            }
+        }
+        return results
+    }
+
+    private func evaluateReminderRequest(in promptText: String) {
+        guard ChatNotificationService.containsReminderRequest(promptText),
+              let sessionID = currentSession?.id else {
+            return
+        }
+        notifyWhenDoneSessionIDs.insert(sessionID)
+        ChatNotificationService.shared.requestAuthorizationIfNeeded()
+        ChatNotificationService.shared.scheduleTimedReminderIfPresent(
+            in: promptText,
+            sessionID: sessionID,
+            sessionTitle: currentSession?.title
+        )
+    }
+
+    private func handleResponseStateTransition(from oldState: ChatResponseState, to newState: ChatResponseState) {
+        let wasWorking = oldState == .thinking || oldState == .responding
+        guard wasWorking, newState == .idle, let sessionID = currentSession?.id else { return }
+
+        let watchers = Self.extractActiveBackgroundWatchers(from: messages, pending: pendingAssistantMessage)
+        if activeBackgroundWatchers != watchers {
+            activeBackgroundWatchers = watchers
+        }
+
+        if !watchers.isEmpty {
+            hadActiveBackgroundWatchersInSession.insert(sessionID)
+            return
+        }
+
+        guard notifyWhenDoneSessionIDs.contains(sessionID) else {
+            hadActiveBackgroundWatchersInSession.remove(sessionID)
+            return
+        }
+
+        notifyWhenDoneSessionIDs.remove(sessionID)
+        let wasWatchingBackground = hadActiveBackgroundWatchersInSession.remove(sessionID) != nil
+        let latestAssistantText = messages.last(where: { $0.role == .assistant })?.content ?? ""
+        ChatNotificationService.shared.scheduleTurnCompletionNotification(
+            sessionID: sessionID,
+            sessionTitle: currentSession?.title,
+            preview: latestAssistantText,
+            isBackgroundWatcherCompletion: wasWatchingBackground
+        )
     }
 
     /// A foreground refresh can return an assistant message while the same
@@ -3431,6 +3604,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let attachments = composerAttachments
         guard validateComposerAttachments(attachments, text: text, delivery: .steer) else { return }
 
+        evaluateReminderRequest(in: text)
         beginResponse()
 
         let userMessage = makeOptimisticUserMessage(text: text, attachments: attachments)
@@ -3478,6 +3652,8 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         let attachments = composerAttachments
         guard validateComposerAttachments(attachments, text: text, delivery: .queue) else { return }
+
+        evaluateReminderRequest(in: text)
 
         let tracksAdmission = usesV2SessionAPI && !isDemoMode && !isRecordedReplayMode
         let queuedPrompt = QueuedPrompt(
