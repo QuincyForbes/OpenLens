@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import os.log
 
 /// Central connection manager that owns the API client and SSE client.
@@ -49,12 +50,14 @@ final class ConnectionManager: ConnectionProviding {
     /// Used by the heartbeat watchdog to detect silently dead connections.
     private var lastHeartbeat: Date = .distantPast
     private var heartbeatWatchdog: Timer?
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var lastNetworkInterfaceSignature: String?
 
     @ObservationIgnored private let localNetworkAccessProbe: any LocalNetworkAccessProbing
 
     /// If no heartbeat arrives within this interval, the connection is considered stale.
-    /// OpenCode server typically sends heartbeats every ~30s; 90s allows 3 missed beats.
-    private static let heartbeatTimeout: TimeInterval = 90
+    /// OpenCode server typically sends heartbeats every ~15-30s; 60s catches zombie sockets quickly.
+    private static let heartbeatTimeout: TimeInterval = 60
 
     init() {
         self.localNetworkAccessProbe = LocalNetworkAccessProbe()
@@ -225,6 +228,7 @@ final class ConnectionManager: ConnectionProviding {
         sseConnectionContinuation?.resume()
         sseConnectionContinuation = nil
         stopHeartbeatWatchdog()
+        stopNetworkPathMonitor()
         sseClient?.disconnect()
         sseClient = nil
         client = nil
@@ -251,6 +255,7 @@ final class ConnectionManager: ConnectionProviding {
             case .connected:
                 self.state = .connected
                 self.startHeartbeatWatchdog()
+                self.startNetworkPathMonitor()
                 self.sseConnectionContinuation?.resume()
                 self.sseConnectionContinuation = nil
             case .connecting:
@@ -469,13 +474,51 @@ final class ConnectionManager: ConnectionProviding {
                 guard let self else { return }
                 let elapsed = Date().timeIntervalSince(self.lastHeartbeat)
                 if elapsed > Self.heartbeatTimeout, self.state == .connected {
-                    Logger.connection.warning("Heartbeat timeout (\(elapsed, format: .fixed(precision: 0))s since last heartbeat)")
+                    Logger.connection.warning("Heartbeat timeout (\(elapsed, format: .fixed(precision: 0))s since last heartbeat) — forcing SSE reconnect")
                     self.enterReconnectingState(trackDisconnection: true)
+                    self.sseClient?.reconnectNow()
                 }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         heartbeatWatchdog = timer
+    }
+
+    /// Immediately forces a fresh SSE connection if currently reconnecting or if the heartbeat is stale.
+    func reconnectIfNeeded() {
+        guard !didManuallyDisconnect, sseClient != nil else { return }
+        let elapsed = Date().timeIntervalSince(lastHeartbeat)
+        if state == .reconnecting || (state == .connected && elapsed > Self.heartbeatTimeout) {
+            enterReconnectingState(trackDisconnection: false)
+            sseClient?.reconnectNow()
+        }
+    }
+
+    private func startNetworkPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            let signature = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
+            Task { @MainActor [weak self] in
+                guard let self, !self.didManuallyDisconnect else { return }
+                let previous = self.lastNetworkInterfaceSignature
+                self.lastNetworkInterfaceSignature = signature
+                let interfaceChanged = previous != nil && previous != signature
+                if self.state == .reconnecting || interfaceChanged {
+                    Logger.connection.debug("Network path satisfied (changed=\(interfaceChanged)) — triggering immediate SSE reconnect")
+                    self.sseClient?.reconnectNow()
+                }
+            }
+        }
+        pathMonitor = monitor
+        monitor.start(queue: DispatchQueue(label: "com.openlens.network-path-monitor", qos: .utility))
+    }
+
+    private func stopNetworkPathMonitor() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lastNetworkInterfaceSignature = nil
     }
 
     private func enterReconnectingState(trackDisconnection: Bool) {

@@ -259,6 +259,7 @@ struct ChatView: View {
         // incremental stream is considered current again.
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
+                connection.reconnectIfNeeded()
                 chatClient.setupSSEHandlers()
                 chatClient.synchronizeCurrentSessionFromServer()
                 Task {

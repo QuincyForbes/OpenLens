@@ -35,6 +35,8 @@ nonisolated final class DirectOpenCodeTransport: OpenCodeTransport, @unchecked S
         configuration.timeoutIntervalForResource = 300
         configuration.waitsForConnectivity = false
         configuration.httpMaximumConnectionsPerHost = 8
+        configuration.multipathServiceType = .handover
+        configuration.httpAdditionalHeaders = ["Accept-Encoding": "br, gzip, deflate"]
         return URLSession(configuration: configuration)
     }()
 
@@ -84,8 +86,9 @@ nonisolated private final class DirectOpenCodeEventStream: NSObject, OpenCodeEve
 
             let configuration = URLSessionConfiguration.ephemeral
             configuration.urlCache = nil
-            configuration.timeoutIntervalForRequest = .infinity
+            configuration.timeoutIntervalForRequest = 75
             configuration.timeoutIntervalForResource = .infinity
+            configuration.multipathServiceType = .handover
 
             let delegateQueue = OperationQueue()
             delegateQueue.underlyingQueue = deliveryQueue

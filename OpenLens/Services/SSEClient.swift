@@ -1046,6 +1046,21 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         }
     }
 
+    /// Immediately tears down a stale/zombie stream or cancels a pending backoff
+    /// timer and starts a fresh SSE connection (e.g., on heartbeat timeout,
+    /// network path recovery, or foreground resume).
+    func reconnectNow() {
+        queue.async { [self] in
+            guard shouldReconnect else { return }
+            reconnectWorkItem?.cancel()
+            reconnectWorkItem = nil
+            reconnectDelay = Self.initialReconnectDelay
+            cleanupConnection()
+            shouldReconnect = true
+            startConnection()
+        }
+    }
+
     func disconnect() {
         // This runs on the caller's executor before the worker queue can be
         // busy decoding another transport callback. It prevents a previously
