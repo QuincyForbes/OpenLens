@@ -924,10 +924,16 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     func loadEarlierMessages() {
-        displayLimit += pageSize
-        guard messages.count + contextEntries.count < displayLimit,
-              let cursor = olderTranscriptCursor,
-              !isLoadingEarlierHistory,
+        let nextLimit = displayLimit + pageSize
+        // Already-loaded history is revealed immediately. The limit only grows
+        // past a fetch once that fetch succeeds, so a failed page can be retried
+        // instead of silently leaving an empty gap above the transcript.
+        guard messages.count + contextEntries.count < nextLimit,
+              let cursor = olderTranscriptCursor else {
+            displayLimit = nextLimit
+            return
+        }
+        guard !isLoadingEarlierHistory,
               let sessionID = currentSession?.id,
               let messagesService else {
             return
@@ -937,16 +943,26 @@ final class ChatClient: SSEEventHandlerDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.isLoadingEarlierHistory = false }
-            guard let older = try? await messagesService.loadTranscript(
-                sessionID: sessionID,
-                cursor: cursor,
-                limit: 30
-            ),
-            !Task.isCancelled,
-            self.currentSession?.id == sessionID,
-            self.sessionLoadToken == loadToken else {
+            let older: SessionTranscript
+            do {
+                older = try await messagesService.loadTranscript(
+                    sessionID: sessionID,
+                    cursor: cursor,
+                    limit: 30
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.currentSession?.id == sessionID, self.sessionLoadToken == loadToken else { return }
+                self.errorMessage = "Failed to load earlier messages: \(error.localizedDescription)"
                 return
             }
+            guard !Task.isCancelled,
+                  self.currentSession?.id == sessionID,
+                  self.sessionLoadToken == loadToken else {
+                return
+            }
+            self.displayLimit = nextLimit
             self.prependOlderTranscript(older)
         }
     }
@@ -2866,6 +2882,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 if let error = self.errorMessage, [
                     "Failed to refresh session status:", "Failed to recover pending interactions:",
                     "Failed to synchronize chat:", "Failed to load messages:",
+                    "Failed to load earlier messages:",
                     "Failed to rebind session location",
                     AppText.sessionInboxLoadFailedPrefix
                 ].contains(where: { error.hasPrefix($0) }) {
@@ -2884,12 +2901,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     /// Retry read-only recovery after transient REST failures even if the
-    /// still-live SSE stream has coalesced further gap notifications.
+    /// still-live SSE stream has coalesced further gap notifications. Only the
+    /// delay is capped: a chat must never stay stale after a long outage.
     private func scheduleStreamSynchronizationRetry() {
         guard connection?.isConnected == true, !isStreamSynchronized,
-              streamSynchronizationRetryTask == nil, streamSynchronizationRetryCount < 5,
+              streamSynchronizationRetryTask == nil,
               let context = sessionWorkContext else { return }
-        let delay = 1 << streamSynchronizationRetryCount
+        let delay = Self.streamSynchronizationRetryDelay(attempt: streamSynchronizationRetryCount)
         streamSynchronizationRetryCount += 1
         streamSynchronizationRetryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(delay)) } catch { return }
@@ -2899,6 +2917,24 @@ final class ChatClient: SSEEventHandlerDelegate {
                   !self.isStreamSynchronized else { return }
             self.synchronizeCurrentSessionFromServer()
         }
+    }
+
+    nonisolated static func streamSynchronizationRetryDelay(attempt: Int) -> Int {
+        min(1 << min(attempt, 5), 30)
+    }
+
+    /// A short trip to another app keeps the socket alive, so the chat is still
+    /// current; anything longer may have been suspended by iOS and must reconcile.
+    /// A stream already out of sync or disconnected always reconciles.
+    nonisolated static let foregroundReconcileGrace: TimeInterval = 10
+
+    nonisolated static func shouldReconcileOnForeground(
+        awayInterval: TimeInterval,
+        isConnected: Bool,
+        isStreamSynchronized: Bool
+    ) -> Bool {
+        guard isConnected, isStreamSynchronized else { return true }
+        return awayInterval >= foregroundReconcileGrace
     }
 
     private func reconcileCurrentSessionStatus(_ status: OCSessionStatus?) {

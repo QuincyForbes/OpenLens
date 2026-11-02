@@ -582,7 +582,7 @@ final class SessionsService {
                 && mayContainActivitySince($0, startOfDay: startOfDay)
         }
 
-        let messagesBySession = try await loadMessages(for: matchingSessions, client: client)
+        let messagesBySession = try await loadMessages(for: matchingSessions, since: startOfDay, client: client)
         return Self.turnActivityDays(from: messagesBySession, since: startOfDay, calendar: calendar)
     }
 
@@ -612,7 +612,11 @@ final class SessionsService {
             .sorted { $0.date < $1.date }
     }
 
-    private func loadMessages(for sessions: [OCSession], client: OpenCodeClient) async throws -> [[OCMessageWithParts]] {
+    private func loadMessages(
+        for sessions: [OCSession],
+        since startOfDay: Date,
+        client: OpenCodeClient
+    ) async throws -> [[OCMessageWithParts]] {
         guard !sessions.isEmpty else { return [] }
 
         let indexedResults = try await withThrowingTaskGroup(of: (Int, [OCMessageWithParts]).self) { group in
@@ -623,7 +627,7 @@ final class SessionsService {
                 let sessionID = sessions[current].id
                 nextIndex += 1
                 group.addTask {
-                    (current, try await client.listMessages(sessionID: sessionID))
+                    (current, try await Self.loadRecentMessages(sessionID: sessionID, since: startOfDay, client: client))
                 }
             }
 
@@ -636,7 +640,7 @@ final class SessionsService {
                     let sessionID = sessions[current].id
                     nextIndex += 1
                     group.addTask {
-                        (current, try await client.listMessages(sessionID: sessionID))
+                        (current, try await Self.loadRecentMessages(sessionID: sessionID, since: startOfDay, client: client))
                     }
                 }
             }
@@ -644,6 +648,34 @@ final class SessionsService {
         }
 
         return indexedResults.map(\.1)
+    }
+
+    /// Activity only counts turns inside the window, so a long session is read
+    /// newest-first and stops at the first page that reaches before the window.
+    nonisolated private static func loadRecentMessages(
+        sessionID: String,
+        since startOfDay: Date,
+        client: OpenCodeClient
+    ) async throws -> [OCMessageWithParts] {
+        var messages: [OCMessageWithParts] = []
+        var cursor: String?
+        var seenCursors: Set<String> = []
+        repeat {
+            let page = try await client.listRecentTranscriptPage(sessionID: sessionID, cursor: cursor, limit: 50)
+            let pageMessages = page.entries.compactMap { entry -> OCMessageWithParts? in
+                guard case .message(let message) = entry else { return nil }
+                return message
+            }
+            messages.append(contentsOf: pageMessages)
+            let reachedWindowStart = pageMessages.contains {
+                guard let created = $0.info.createdTimestamp else { return false }
+                return Date(timeIntervalSince1970: created) < startOfDay
+            }
+            guard !reachedWindowStart, let next = page.olderCursor, seenCursors.insert(next).inserted else { break }
+            cursor = next
+            try Task.checkCancellation()
+        } while true
+        return messages
     }
 
     private func mayContainActivitySince(_ session: OCSession, startOfDay: Date) -> Bool {

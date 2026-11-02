@@ -265,6 +265,33 @@ struct SSEClientHTTPStatusTests {
         #expect(!isTerminalSSEHTTPStatus(500))
     }
 
+    @MainActor
+    @Test(arguments: [404, 429, 500, 502, 503])
+    func errorPagesAreCancelledInsteadOfBeingParsedAsEvents(statusCode: Int) async {
+        let connection = makeActiveSSEConnection(protocolVersion: .v2)
+        var disposition: URLSession.ResponseDisposition?
+        connection.client.receiveResponseForTesting(
+            session: connection.session, task: connection.task,
+            response: HTTPURLResponse(url: URL(string: "http://127.0.0.1:1/event")!, statusCode: statusCode,
+                                      httpVersion: nil, headerFields: nil)!
+        ) { disposition = $0 }
+        try? await Task.sleep(for: .milliseconds(40))
+        #expect(disposition == .cancel)
+    }
+
+    @MainActor
+    @Test func aSuccessfulStreamResponseIsStillAllowed() async {
+        let connection = makeActiveSSEConnection(protocolVersion: .v2)
+        var disposition: URLSession.ResponseDisposition?
+        connection.client.receiveResponseForTesting(
+            session: connection.session, task: connection.task,
+            response: HTTPURLResponse(url: URL(string: "http://127.0.0.1:1/event")!, statusCode: 200,
+                                      httpVersion: nil, headerFields: nil)!
+        ) { disposition = $0 }
+        try? await Task.sleep(for: .milliseconds(40))
+        #expect(disposition == .allow)
+    }
+
     @Test func preparesMessageMetadataBeforeMainDelivery() {
         let event = OCEvent(
             type: "message.updated",

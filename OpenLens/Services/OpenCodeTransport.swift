@@ -47,7 +47,25 @@ nonisolated final class DirectOpenCodeTransport: OpenCodeTransport, @unchecked S
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await session.data(for: request)
+        try await Self.retryingStaleConnection(request) { [session] in
+            try await session.data(for: request)
+        }
+    }
+
+    /// A pooled keep-alive socket is often dead after a Wi-Fi/cellular handoff,
+    /// so the first request on it fails before reaching the server. Reads are
+    /// safe to replay once; writes keep their own admission reconciliation.
+    static func retryingStaleConnection(
+        _ request: URLRequest,
+        perform: () async throws -> (Data, URLResponse)
+    ) async throws -> (Data, URLResponse) {
+        do {
+            return try await perform()
+        } catch let error as URLError where error.code == .networkConnectionLost {
+            guard (request.httpMethod ?? "GET").uppercased() == "GET" else { throw error }
+            try Task.checkCancellation()
+            return try await perform()
+        }
     }
 
     func makeEventStream(

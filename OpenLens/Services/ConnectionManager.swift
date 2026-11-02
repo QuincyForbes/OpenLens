@@ -56,6 +56,8 @@ final class ConnectionManager: ConnectionProviding {
     private var heartbeatWatchdog: Timer?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastNetworkInterfaceSignature: String?
+    @ObservationIgnored private var pathReconnectTask: Task<Void, Never>?
+    private static let pathChangeDebounce: Duration = .seconds(1)
 
     @ObservationIgnored private let localNetworkAccessProbe: any LocalNetworkAccessProbing
 
@@ -116,7 +118,9 @@ final class ConnectionManager: ConnectionProviding {
         password: String = "",
         method: ConnectionMethod = .manual
     ) async {
-        disconnect()
+        // Replacing an attempt must not forget the saved connection: a failed
+        // retry would otherwise leave nothing to reconnect to.
+        tearDownConnection()
         let generation = connectionGeneration
         await withTaskCancellationHandler {
             guard !Task.isCancelled else { return }
@@ -124,7 +128,7 @@ final class ConnectionManager: ConnectionProviding {
         } onCancel: {
             Task { @MainActor [weak self] in
                 guard let self, self.connectionGeneration == generation else { return }
-                self.disconnect()
+                self.tearDownConnection()
             }
         }
     }
@@ -249,6 +253,13 @@ final class ConnectionManager: ConnectionProviding {
     // MARK: - Disconnect
 
     func disconnect() {
+        tearDownConnection()
+        savedConnectionsStore?.clearActiveConnection()
+        SharedConnectionStore.clear()
+    }
+
+    /// Stops the live connection without changing the saved active connection.
+    private func tearDownConnection() {
         connectionGeneration &+= 1
         projectContextGeneration &+= 1
         projectContextRevision &+= 1
@@ -270,8 +281,6 @@ final class ConnectionManager: ConnectionProviding {
         selectedProjectDirectory = nil
         connectionMethod = nil
         localNetworkAccessRequired = false
-        savedConnectionsStore?.clearActiveConnection()
-        SharedConnectionStore.clear()
     }
 
     private func configureSSECallbacks(_ sse: SSEClient) {
@@ -322,7 +331,7 @@ final class ConnectionManager: ConnectionProviding {
                 do { try await Task.sleep(for: timeout) } catch { return }
                 guard let self, self.connectionGeneration == generation,
                       self.sseClient === sse, self.sseConnectionContinuation != nil else { return }
-                self.disconnect()
+                self.tearDownConnection()
                 self.state = .error("Timed out connecting to the live event stream. Please retry.")
             }
             sse.connect()
@@ -540,15 +549,22 @@ final class ConnectionManager: ConnectionProviding {
         let generation = connectionGeneration
         monitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
-            let signature = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
+            let signature = Self.primaryInterfaceSignature(path.availableInterfaces.map { "\($0.type):\($0.name)" })
             Task { @MainActor [weak self] in
                 guard let self, !self.didManuallyDisconnect,
                       self.connectionGeneration == generation else { return }
                 let previous = self.lastNetworkInterfaceSignature
                 self.lastNetworkInterfaceSignature = signature
                 let interfaceChanged = previous != nil && previous != signature
-                if self.state == .reconnecting || interfaceChanged {
-                    Logger.connection.debug("Network path satisfied (changed=\(interfaceChanged)) — triggering immediate SSE reconnect")
+                guard self.state == .reconnecting || interfaceChanged else { return }
+                // A handoff usually arrives as a burst of path updates; reconnect once it settles.
+                self.pathReconnectTask?.cancel()
+                self.pathReconnectTask = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: Self.pathChangeDebounce) } catch { return }
+                    guard let self, !self.didManuallyDisconnect,
+                          self.connectionGeneration == generation else { return }
+                    self.pathReconnectTask = nil
+                    Logger.connection.debug("Network path settled (changed=\(interfaceChanged)) — triggering SSE reconnect")
                     self.sseClient?.reconnectNow()
                 }
             }
@@ -557,7 +573,15 @@ final class ConnectionManager: ConnectionProviding {
         monitor.start(queue: DispatchQueue(label: "com.openlens.network-path-monitor", qos: .utility))
     }
 
+    /// Only the preferred interface carries the stream. A secondary interface
+    /// appearing (cellular under weak Wi-Fi, a VPN tunnel) must not reconnect.
+    nonisolated static func primaryInterfaceSignature(_ interfaces: [String]) -> String {
+        interfaces.first ?? "none"
+    }
+
     private func stopNetworkPathMonitor() {
+        pathReconnectTask?.cancel()
+        pathReconnectTask = nil
         pathMonitor?.cancel()
         pathMonitor = nil
         lastNetworkInterfaceSignature = nil

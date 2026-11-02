@@ -1227,6 +1227,11 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
                 }
                 return false
             }
+
+            // A proxy or server error page is not an event stream. Cancelling
+            // completes the transport, which reports a gap and backs off.
+            Logger.sse.warning("Rejecting SSE response with HTTP \(http.statusCode, privacy: .public)")
+            return false
         }
 
         return true

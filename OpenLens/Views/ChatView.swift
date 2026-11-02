@@ -54,6 +54,7 @@ struct ChatView: View {
     @State private var attachmentSource: ComposerAttachmentSource?
     @State private var previewedTextFile: PromptTextFileAttachment?
     @State private var isOnScreen = false
+    @State private var backgroundedAt: Date?
 
     private struct ResultViewingContext: Equatable {
         let sessionID: String?
@@ -258,21 +259,31 @@ struct ChatView: View {
         // suspended the app, so reconcile session and transcript before the
         // incremental stream is considered current again.
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active {
-                connection.reconnectIfNeeded()
-                chatClient.setupSSEHandlers()
+            if newPhase != .active {
+                if backgroundedAt == nil { backgroundedAt = .now }
+                return
+            }
+            let awayInterval = backgroundedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
+            backgroundedAt = nil
+            connection.reconnectIfNeeded()
+            chatClient.setupSSEHandlers()
+            if ChatClient.shouldReconcileOnForeground(
+                awayInterval: awayInterval,
+                isConnected: connection.isConnected,
+                isStreamSynchronized: chatClient.isStreamSynchronized
+            ) {
                 chatClient.synchronizeCurrentSessionFromServer()
-                Task {
-                    async let commandsLoad: Void = loadCommands(force: true)
-                    async let skillsLoad: Void = loadSkills(force: true)
-                    if chatClient.currentSession == nil {
-                        async let permissionLoad = chatClient.recoverPendingPermission()
-                        async let questionLoad = chatClient.recoverPendingQuestions()
-                        async let formLoad = chatClient.recoverPendingForms()
-                        _ = await (permissionLoad, questionLoad, formLoad)
-                    }
-                    _ = await (commandsLoad, skillsLoad)
+            }
+            Task {
+                async let commandsLoad: Void = loadCommands(force: true)
+                async let skillsLoad: Void = loadSkills(force: true)
+                if chatClient.currentSession == nil {
+                    async let permissionLoad = chatClient.recoverPendingPermission()
+                    async let questionLoad = chatClient.recoverPendingQuestions()
+                    async let formLoad = chatClient.recoverPendingForms()
+                    _ = await (permissionLoad, questionLoad, formLoad)
                 }
+                _ = await (commandsLoad, skillsLoad)
             }
         }
 

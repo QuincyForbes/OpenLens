@@ -114,6 +114,95 @@ struct ConnectionRecoveryTests {
         try await waitUntil { transport.cancelledCount == 1 }
     }
 
+    @Test func staleGetRequestsAreRetriedOnceAndWritesAreNot() async throws {
+        var getRequest = URLRequest(url: URL(string: "https://example.com/api/info")!)
+        getRequest.httpMethod = "GET"
+        var attempts = 0
+        let (data, _) = try await DirectOpenCodeTransport.retryingStaleConnection(getRequest) {
+            attempts += 1
+            if attempts == 1 { throw URLError(.networkConnectionLost) }
+            return (Data("ok".utf8), HTTPURLResponse(url: getRequest.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        #expect(attempts == 2)
+        #expect(String(decoding: data, as: UTF8.self) == "ok")
+
+        attempts = 0
+        await #expect(throws: URLError.self) {
+            _ = try await DirectOpenCodeTransport.retryingStaleConnection(getRequest) {
+                attempts += 1
+                throw URLError(.networkConnectionLost)
+            }
+        }
+        #expect(attempts == 2)
+
+        var postRequest = getRequest
+        postRequest.httpMethod = "POST"
+        attempts = 0
+        await #expect(throws: URLError.self) {
+            _ = try await DirectOpenCodeTransport.retryingStaleConnection(postRequest) {
+                attempts += 1
+                throw URLError(.networkConnectionLost)
+            }
+        }
+        #expect(attempts == 1)
+
+        attempts = 0
+        await #expect(throws: URLError.self) {
+            _ = try await DirectOpenCodeTransport.retryingStaleConnection(getRequest) {
+                attempts += 1
+                throw URLError(.timedOut)
+            }
+        }
+        #expect(attempts == 1)
+    }
+
+    @Test func onlyThePreferredInterfaceDecidesAPathChange() {
+        let wifiOnly = ConnectionManager.primaryInterfaceSignature(["wifi:en0"])
+        let wifiWithCellularBackup = ConnectionManager.primaryInterfaceSignature(["wifi:en0", "cellular:pdp_ip0"])
+        let cellularFirst = ConnectionManager.primaryInterfaceSignature(["cellular:pdp_ip0", "wifi:en0"])
+        #expect(wifiOnly == wifiWithCellularBackup)
+        #expect(wifiOnly != cellularFirst)
+        #expect(ConnectionManager.primaryInterfaceSignature([]) == "none")
+    }
+
+    @Test func recoveryRetryDelayIsCappedButNeverStops() {
+        #expect(ChatClient.streamSynchronizationRetryDelay(attempt: 0) == 1)
+        #expect(ChatClient.streamSynchronizationRetryDelay(attempt: 3) == 8)
+        #expect(ChatClient.streamSynchronizationRetryDelay(attempt: 5) == 30)
+        #expect(ChatClient.streamSynchronizationRetryDelay(attempt: 40) == 30)
+        #expect(ChatClient.streamSynchronizationRetryDelay(attempt: Int.max) == 30)
+    }
+
+    @Test func aBriefTripToAnotherAppDoesNotReloadAHealthyChat() {
+        #expect(!ChatClient.shouldReconcileOnForeground(awayInterval: 3, isConnected: true, isStreamSynchronized: true))
+        #expect(ChatClient.shouldReconcileOnForeground(awayInterval: 60, isConnected: true, isStreamSynchronized: true))
+        #expect(ChatClient.shouldReconcileOnForeground(awayInterval: .infinity, isConnected: true, isStreamSynchronized: true))
+        #expect(ChatClient.shouldReconcileOnForeground(awayInterval: 3, isConnected: false, isStreamSynchronized: true))
+        #expect(ChatClient.shouldReconcileOnForeground(awayInterval: 3, isConnected: true, isStreamSynchronized: false))
+    }
+
+    @Test func aFailedRetryKeepsTheSavedActiveConnection() async throws {
+        let transport = RecoveryTransport()
+        let store = SavedConnectionsStore(initialConnections: [])
+        let connection = makeConnection(transport)
+        connection.savedConnectionsStore = store
+        defer { connection.disconnect() }
+        let first = Task { await connection.connect(url: "https://new.example") }
+        try await waitUntil { transport.streamCount == 1 }
+        transport.respond(status: 200)
+        await first.value
+        #expect(connection.isConnected)
+        let activeID = try #require(store.activeConnectionID)
+
+        await transport.server.failProbe(host: "broken.example")
+        await connection.connect(url: "https://broken.example")
+        guard case .error = connection.state else {
+            Issue.record("Connecting to an unreachable server did not fail")
+            return
+        }
+        #expect(store.activeConnectionID == activeID)
+    }
+
     private func makeConnection(_ transport: RecoveryTransport, timeout: Duration = .seconds(30)) -> ConnectionManager {
         ConnectionManager(localNetworkAccessProbe: RecoveryAccessProbe(), transport: transport,
                           sseConnectionTimeout: timeout)
@@ -137,9 +226,11 @@ private final class RecoveryAccessProbe: LocalNetworkAccessProbing {
 
 private actor RecoveryServer {
     private var heldHost: String?
+    private var failingHost: String?
     private var waiter: CheckedContinuation<Void, Never>?
     var isWaiting: Bool { waiter != nil }
     func holdProbe(host: String) { heldHost = host }
+    func failProbe(host: String) { failingHost = host }
     func release() { waiter?.resume(); waiter = nil }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -147,6 +238,9 @@ private actor RecoveryServer {
         if url.path.hasSuffix("/prompt_async") {
             await withCheckedContinuation { waiter = $0 }
             throw URLError(.networkConnectionLost)
+        }
+        if url.path == "/api/info", url.host() == failingHost {
+            throw URLError(.cannotConnectToHost)
         }
         if url.path == "/api/info", url.host() == heldHost {
             heldHost = nil
