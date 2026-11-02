@@ -1101,7 +1101,7 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = .infinity
+        request.timeoutInterval = 75
         if let authHeader {
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }

@@ -45,6 +45,10 @@ final class ConnectionManager: ConnectionProviding {
     /// Continuation used to bridge the SSE callback-based connection into async/await.
     /// Resumed once when SSE reports `.connected` or fails to connect.
     private var sseConnectionContinuation: CheckedContinuation<Void, Never>?
+    private var connectionGeneration: UInt = 0
+    @ObservationIgnored private var sseConnectionDeadline: Task<Void, Never>?
+    @ObservationIgnored private var transport: (any OpenCodeTransport)?
+    private var sseConnectionTimeout: Duration = .seconds(30)
 
     /// Timestamp of the last liveness signal: stream bytes or a heartbeat event.
     /// Used by the heartbeat watchdog to detect silently dead connections.
@@ -63,8 +67,12 @@ final class ConnectionManager: ConnectionProviding {
         self.localNetworkAccessProbe = LocalNetworkAccessProbe()
     }
 
-    init(localNetworkAccessProbe: any LocalNetworkAccessProbing) {
+    init(localNetworkAccessProbe: any LocalNetworkAccessProbing,
+         transport: (any OpenCodeTransport)? = nil,
+         sseConnectionTimeout: Duration = .seconds(30)) {
         self.localNetworkAccessProbe = localNetworkAccessProbe
+        self.transport = transport
+        self.sseConnectionTimeout = sseConnectionTimeout
     }
 
 #if DEBUG
@@ -108,6 +116,21 @@ final class ConnectionManager: ConnectionProviding {
         password: String = "",
         method: ConnectionMethod = .manual
     ) async {
+        disconnect()
+        let generation = connectionGeneration
+        await withTaskCancellationHandler {
+            guard !Task.isCancelled else { return }
+            await performConnect(url: url, username: username, password: password, method: method, generation: generation)
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.connectionGeneration == generation else { return }
+                self.disconnect()
+            }
+        }
+    }
+
+    private func performConnect(url: String, username: String, password: String,
+                                method: ConnectionMethod, generation: UInt) async {
         didManuallyDisconnect = false
         hasAttemptedConnection = true
         connectionMethod = method
@@ -131,7 +154,7 @@ final class ConnectionManager: ConnectionProviding {
         state = .connecting
 
         let localNetworkProbeResult = await localNetworkAccessProbe.probe(baseURL)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == connectionGeneration else { return }
         guard localNetworkProbeResult == .continueConnection else {
             localNetworkAccessRequired = true
             state = .error(AppText.localNetworkAccessRequiredBody)
@@ -157,10 +180,12 @@ final class ConnectionManager: ConnectionProviding {
         let apiClient = OpenCodeClient(
             baseURL: baseURL,
             authHeader: authHeader,
-            contextDirectory: restoredProjectDirectory
+            contextDirectory: restoredProjectDirectory,
+            transport: transport
         )
         do {
             let capabilities = try await apiClient.probeCapabilities()
+            guard !Task.isCancelled, generation == connectionGeneration else { return }
             guard capabilities.isHealthy else {
                 state = .error("Server is not healthy.")
                 return
@@ -195,7 +220,8 @@ final class ConnectionManager: ConnectionProviding {
                 baseURL: baseURL,
                 authHeader: authHeader,
                 protocolVersion: capabilities.protocolVersion,
-                contextDirectory: selectedProjectDirectory
+                contextDirectory: selectedProjectDirectory,
+                transport: transport
             )
             self.sseClient = sse
             configureSSECallbacks(sse)
@@ -204,7 +230,7 @@ final class ConnectionManager: ConnectionProviding {
             async let sseConnect: Void = connectSSEAndWait(sse)
             _ = await (metadataRefresh, sseConnect)
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == connectionGeneration else { return }
             state = .error(error.localizedDescription)
         }
     }
@@ -223,10 +249,10 @@ final class ConnectionManager: ConnectionProviding {
     // MARK: - Disconnect
 
     func disconnect() {
+        connectionGeneration &+= 1
         projectContextGeneration &+= 1
         projectContextRevision &+= 1
-        sseConnectionContinuation?.resume()
-        sseConnectionContinuation = nil
+        finishSSEConnectionWait()
         stopHeartbeatWatchdog()
         stopNetworkPathMonitor()
         sseClient?.disconnect()
@@ -249,15 +275,14 @@ final class ConnectionManager: ConnectionProviding {
     }
 
     private func configureSSECallbacks(_ sse: SSEClient) {
-        sse.onStateChange = { [weak self] sseState in
-            guard let self else { return }
+        sse.onStateChange = { [weak self, weak sse] sseState in
+            guard let self, let sse, self.sseClient === sse else { return }
             switch sseState {
             case .connected:
                 self.state = .connected
                 self.startHeartbeatWatchdog()
                 self.startNetworkPathMonitor()
-                self.sseConnectionContinuation?.resume()
-                self.sseConnectionContinuation = nil
+                self.finishSSEConnectionWait()
             case .connecting:
                 if self.state == .connected {
                     self.enterReconnectingState(trackDisconnection: false)
@@ -271,30 +296,45 @@ final class ConnectionManager: ConnectionProviding {
 
         // Any bytes on the stream (including v2 comment keep-alives) prove
         // liveness, independently of whether a chat has attached its handler.
-        sse.onLiveness = { [weak self] in
-            self?.receivedHeartbeat()
+        sse.onLiveness = { [weak self, weak sse] in
+            guard let self, let sse, self.sseClient === sse else { return }
+            self.receivedHeartbeat()
         }
 
-        sse.onTerminalHTTPError = { [weak self] statusCode in
-            guard let self else { return }
+        sse.onTerminalHTTPError = { [weak self, weak sse] statusCode in
+            guard let self, let sse, self.sseClient === sse else { return }
             self.stopHeartbeatWatchdog()
+            self.stopNetworkPathMonitor()
             self.state = .error(
                 "Authentication failed for the live event stream (HTTP \(statusCode)). Check the OpenCode username and password."
             )
-            self.sseConnectionContinuation?.resume()
-            self.sseConnectionContinuation = nil
+            self.finishSSEConnectionWait()
         }
     }
 
     private func connectSSEAndWait(_ sse: SSEClient) async {
-        sse.connect()
+        guard !Task.isCancelled, sseClient === sse else { return }
         await withCheckedContinuation { continuation in
-            if state == .connected {
-                continuation.resume()
-            } else {
-                sseConnectionContinuation = continuation
+            sseConnectionContinuation = continuation
+            let generation = connectionGeneration
+            let timeout = sseConnectionTimeout
+            sseConnectionDeadline = Task { [weak self] in
+                do { try await Task.sleep(for: timeout) } catch { return }
+                guard let self, self.connectionGeneration == generation,
+                      self.sseClient === sse, self.sseConnectionContinuation != nil else { return }
+                self.disconnect()
+                self.state = .error("Timed out connecting to the live event stream. Please retry.")
             }
+            sse.connect()
         }
+    }
+
+    private func finishSSEConnectionWait() {
+        sseConnectionDeadline?.cancel()
+        sseConnectionDeadline = nil
+        let continuation = sseConnectionContinuation
+        sseConnectionContinuation = nil
+        continuation?.resume()
     }
 
     func setProjectContext(directory: String?) async {
@@ -497,11 +537,13 @@ final class ConnectionManager: ConnectionProviding {
     private func startNetworkPathMonitor() {
         guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
+        let generation = connectionGeneration
         monitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
             let signature = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
             Task { @MainActor [weak self] in
-                guard let self, !self.didManuallyDisconnect else { return }
+                guard let self, !self.didManuallyDisconnect,
+                      self.connectionGeneration == generation else { return }
                 let previous = self.lastNetworkInterfaceSignature
                 self.lastNetworkInterfaceSignature = signature
                 let interfaceChanged = previous != nil && previous != signature

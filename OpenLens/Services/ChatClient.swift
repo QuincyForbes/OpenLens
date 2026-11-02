@@ -103,6 +103,8 @@ private enum PromptAdmissionOutcome: Equatable {
 private struct SessionWorkContext {
     let session: OCSession
     let projectRevision: UInt?
+    let client: OpenCodeClient?
+    let generation: UInt
 }
 
 private struct SessionMovedBeforeSend: LocalizedError {
@@ -270,6 +272,12 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Current session being viewed.
     var currentSession: OCSession? {
         didSet {
+            if currentSession?.id != oldValue?.id {
+                sessionWorkGeneration &+= 1
+                streamSynchronizationRetryTask?.cancel()
+                streamSynchronizationRetryTask = nil
+                streamSynchronizationRetryCount = 0
+            }
             if currentSession == nil {
                 activeContextWasV2 = false
             } else if let version = connection?.serverCapabilities?.protocolVersion {
@@ -1269,6 +1277,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// reconciled against the session and transcript endpoints. Coalesce gap
     /// notifications while that authoritative refresh is in flight.
     @ObservationIgnored private var streamSynchronizationTask: Task<Void, Never>?
+    @ObservationIgnored private var streamSynchronizationRetryTask: Task<Void, Never>?
+    private var streamSynchronizationRetryCount = 0
+    private var sessionWorkGeneration: UInt = 0
     private struct SessionComposerDraft: Equatable {
         var text: String
         var attachments: [PromptAttachment]
@@ -2039,6 +2050,12 @@ final class ChatClient: SSEEventHandlerDelegate {
         var session = session
         let token = UUID()
         sessionLoadToken = token
+        let loadingClient = connection?.client
+        defer {
+            if sessionLoadToken == token, connection?.client === loadingClient {
+                setupSSEHandlers()
+            }
+        }
         let wasAlreadyPreparedForSession = preparedSessionID == session.id && currentSession?.id == session.id
         preparedSessionID = nil
         let reopeningCurrentSession = usesV2SessionAPI && currentSession?.id == session.id && !wasAlreadyPreparedForSession
@@ -2052,7 +2069,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             do {
                 session = try await sessionsService.getSession(id: session.id)
             } catch {
-                guard !Task.isCancelled, sessionLoadToken == token else { return }
+                guard !Task.isCancelled, sessionLoadToken == token, connection?.client === loadingClient else { return }
                 // A stale list entry cannot clear a known failed handoff when
                 // the canonical read itself is unavailable.
                 if reopeningCurrentSession, sessionLocationState != .ready {
@@ -2063,7 +2080,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 }
             }
         }
-        guard !Task.isCancelled, sessionLoadToken == token else { return }
+        guard !Task.isCancelled, sessionLoadToken == token, connection?.client === loadingClient else { return }
         if reopeningCurrentSession {
             guard currentSession?.id == session.id, generation == streamSynchronizationGeneration,
                   revision == connection?.projectContextRevision else { return }
@@ -2088,7 +2105,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             connection?.sseClient?.onSynchronizationGap = nil
             await restoreProjectContext(for: session)
         }
-        guard !Task.isCancelled, sessionLoadToken == token else { return }
+        guard !Task.isCancelled, sessionLoadToken == token, connection?.client === loadingClient else { return }
 
         if reopeningCurrentSession {
             // Preserve only the currently displayed session during its refresh.
@@ -2107,12 +2124,16 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
 
         setupSSEHandlers(includesSynchronizationGap: false)
+        let loadingStream = connection?.sseClient
+        let gapGeneration = await loadingStream?.synchronizationGeneration()
+        let loadingGeneration = streamSynchronizationGeneration
         let shouldLoadProviders = providers.isEmpty
         let shouldLoadV2Providers = shouldLoadProviders && usesV2SessionAPI
         if shouldLoadProviders, !usesV2SessionAPI {
             await loadProviders()
         }
-        guard !Task.isCancelled, currentSession?.id == session.id else { return }
+        guard !Task.isCancelled, sessionLoadToken == token,
+              connection?.client === loadingClient, currentSession?.id == session.id else { return }
         restoredWorkspaceRevision = connection?.projectContextRevision
         async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
         async let messagesTask = loadMessages()
@@ -2126,13 +2147,28 @@ final class ChatClient: SSEEventHandlerDelegate {
             formTask,
             providersTask
         )
-        guard !Task.isCancelled, currentSession?.id == session.id else { return }
-        if let stream = connection?.sseClient {
-            let gapGen = await stream.synchronizationGeneration()
-            _ = await stream.acknowledgeSynchronization(since: gapGen)
+        guard !Task.isCancelled, sessionLoadToken == token,
+              connection?.client === loadingClient, currentSession?.id == session.id else { return }
+        let recovered = didLoadMessages && permissionRecovered && questionRecovered && formRecovered
+        // Reattach before acknowledging: any gap after the acknowledgement
+        // must also have a live observer, rather than falling into a blind spot.
+        setupSSEHandlers()
+        var acknowledged = loadingStream === connection?.sseClient
+            && loadingGeneration == streamSynchronizationGeneration
+        if recovered, acknowledged, let loadingStream, let gapGeneration {
+            acknowledged = await loadingStream.acknowledgeSynchronization(since: gapGeneration)
         }
-        setupSSEHandlers(includesSynchronizationGap: true)
-        isStreamSynchronized = didLoadMessages && permissionRecovered && questionRecovered && formRecovered
+        guard !Task.isCancelled, sessionLoadToken == token,
+              connection?.client === loadingClient, currentSession?.id == session.id else { return }
+        isStreamSynchronized = recovered && acknowledged
+            && loadingGeneration == streamSynchronizationGeneration
+        if isStreamSynchronized {
+            streamSynchronizationRetryCount = 0
+        } else if !acknowledged || loadingGeneration != streamSynchronizationGeneration {
+            synchronizeCurrentSessionFromServer()
+        } else {
+            scheduleStreamSynchronizationRetry()
+        }
     }
 
     func restoreProjectContext(for session: OCSession) async {
@@ -2252,9 +2288,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     @discardableResult
     func loadMessages(syncModelSelection: Bool = true) async -> Bool {
         guard !isOfflinePreviewMode, let session = currentSession else { return false }
+        let loadingClient = connection?.client
         let generation = streamSynchronizationGeneration
         let revision = connection?.projectContextRevision
         let isCurrent = { !Task.isCancelled && self.currentSession?.id == session.id
+            && self.connection?.client === loadingClient
             && self.streamSynchronizationGeneration == generation
             && self.connection?.projectContextRevision == revision }
 
@@ -2751,17 +2789,21 @@ final class ChatClient: SSEEventHandlerDelegate {
               messagesService != nil
         else { return }
 
+        streamSynchronizationRetryTask?.cancel()
+        streamSynchronizationRetryTask = nil
         streamSynchronizationGeneration &+= 1
         isStreamSynchronized = false
         guard streamSynchronizationTask == nil else { return }
         let token = UUID()
         streamSynchronizationToken = token
+        let recoveringClient = connection?.client
 
         streamSynchronizationTask = Task { [weak self] in
             guard let self else { return }
 
             while !Task.isCancelled {
-                guard self.streamSynchronizationToken == token else { break }
+                guard self.streamSynchronizationToken == token,
+                      self.connection?.client === recoveringClient else { break }
                 let generation = self.streamSynchronizationGeneration
                 let stream = self.connection?.sseClient
                 let gapGeneration = await stream?.synchronizationGeneration()
@@ -2772,6 +2814,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 do {
                     let session = try await sessionsService.getSession(id: sessionID)
                     guard !Task.isCancelled,
+                          self.connection?.client === recoveringClient,
                           self.streamSynchronizationToken == token,
                           self.currentSession?.id == sessionID
                     else { break }
@@ -2810,6 +2853,8 @@ final class ChatClient: SSEEventHandlerDelegate {
                 }
 
                 guard generation == self.streamSynchronizationGeneration else { continue }
+                guard self.connection?.client === recoveringClient,
+                      self.connection?.sseClient === stream else { break }
                 if let stream, let gapGeneration {
                     guard await stream.acknowledgeSynchronization(since: gapGeneration) else { continue }
                 }
@@ -2817,6 +2862,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                       self.streamSynchronizationToken == token else { break }
                 guard generation == self.streamSynchronizationGeneration else { continue }
                 self.isStreamSynchronized = true
+                self.streamSynchronizationRetryCount = 0
                 if let error = self.errorMessage, [
                     "Failed to refresh session status:", "Failed to recover pending interactions:",
                     "Failed to synchronize chat:", "Failed to load messages:",
@@ -2831,6 +2877,27 @@ final class ChatClient: SSEEventHandlerDelegate {
             guard self.streamSynchronizationToken == token else { return }
             self.streamSynchronizationTask = nil
             self.streamSynchronizationToken = nil
+            if !Task.isCancelled, self.connection?.client === recoveringClient, !self.isStreamSynchronized {
+                self.scheduleStreamSynchronizationRetry()
+            }
+        }
+    }
+
+    /// Retry read-only recovery after transient REST failures even if the
+    /// still-live SSE stream has coalesced further gap notifications.
+    private func scheduleStreamSynchronizationRetry() {
+        guard connection?.isConnected == true, !isStreamSynchronized,
+              streamSynchronizationRetryTask == nil, streamSynchronizationRetryCount < 5,
+              let context = sessionWorkContext else { return }
+        let delay = 1 << streamSynchronizationRetryCount
+        streamSynchronizationRetryCount += 1
+        streamSynchronizationRetryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self else { return }
+            self.streamSynchronizationRetryTask = nil
+            guard self.isCurrentWork(context), self.connection?.isConnected == true,
+                  !self.isStreamSynchronized else { return }
+            self.synchronizeCurrentSessionFromServer()
         }
     }
 
@@ -3686,11 +3753,11 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
 
         isQueueingPrompt = true
-        let context = SessionWorkContext(session: session, projectRevision: connection?.projectContextRevision)
+        guard let context = sessionWorkContext else { return }
 
         Task {
             defer {
-                if currentSession?.id == session.id {
+                if isCurrentWork(context) {
                     isQueueingPrompt = false
                 }
             }
@@ -3712,18 +3779,19 @@ final class ChatClient: SSEEventHandlerDelegate {
                     skills: skillAttachments(in: text),
                     attachments: attachments
                 )
+                guard isCurrentWork(context) else { return }
                 if tracksAdmission {
                     settlePromptSubmission(
                         queuedPrompt.messageID,
                         as: .accepted(admissionID: admission?.id ?? queuedPrompt.messageID)
                     )
                 }
-                guard currentSession?.id == session.id else { return }
                 acceptQueuedPrompt(id: queuedPrompt.id)
                 if usesV2SessionAPI {
                     await loadMessages(syncModelSelection: false)
                 }
             } catch {
+                guard isCurrentWork(context) else { return }
                 let outcome: PromptAdmissionOutcome = tracksAdmission
                     ? await reconcilePromptAdmission(
                         after: error,
@@ -3732,7 +3800,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                         messageID: queuedPrompt.messageID
                     )
                     : .failed
-                guard currentSession?.id == session.id else { return }
+                guard isCurrentWork(context) else { return }
                 if case .admitted = outcome {
                     acceptQueuedPrompt(id: queuedPrompt.id)
                     await loadMessages(syncModelSelection: false)
@@ -4522,11 +4590,20 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private var sessionWorkContext: SessionWorkContext? {
-        currentSession.map { SessionWorkContext(session: $0, projectRevision: connection?.projectContextRevision) }
+        currentSession.map {
+            SessionWorkContext(session: $0, projectRevision: connection?.projectContextRevision,
+                               client: connection?.client, generation: sessionWorkGeneration)
+        }
+    }
+
+    private func isCurrentWork(_ context: SessionWorkContext) -> Bool {
+        currentSession?.id == context.session.id && connection?.client === context.client
+            && sessionWorkGeneration == context.generation
     }
 
     private func requireCurrentWorkLocation(_ context: SessionWorkContext) throws {
-        guard currentSession?.id == context.session.id else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard isCurrentWork(context) else { throw CancellationError() }
         guard canCompose,
               WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory) == WorkspaceSelectionBuilder.normalizedDirectory(context.session.directory),
               connection?.projectContextRevision == context.projectRevision else {
@@ -4652,10 +4729,10 @@ final class ChatClient: SSEEventHandlerDelegate {
                 skills: skillAttachments(in: text),
                 attachments: attachments
             )
+            guard isCurrentWork(context) else { return }
             if tracksAdmission, let messageID {
                 settlePromptSubmission(messageID, as: .accepted(admissionID: admission?.id ?? messageID))
             }
-            guard currentSession?.id == session.id else { return }
             if usesV2SessionAPI {
                 // Prompt admission is durable but projection is asynchronous.
                 // Reload now; the merge above keeps the local row visible until
@@ -4663,6 +4740,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 await loadMessages(syncModelSelection: false)
             }
         } catch {
+            guard isCurrentWork(context) else { return }
             guard tracksAdmission, let messageID else {
                 guard responseState == .generating else { return }
                 markPromptFailed(error, agent: agent)
@@ -4675,7 +4753,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 sessionID: session.id,
                 messageID: messageID
             )
-            guard currentSession?.id == session.id else { return }
+            guard isCurrentWork(context) else { return }
             if case .admitted = outcome {
                 await loadMessages(syncModelSelection: false)
                 return
@@ -4733,7 +4811,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 skills: skillAttachments(in: arguments),
                 delivery: delivery
             )
-            guard currentSession?.id == session.id else { return }
+            guard isCurrentWork(context) else { return }
             if usesV2SessionAPI {
                 // Commands are admitted asynchronously just like prompts, but
                 // their v2 endpoint does not accept a caller-provided message
@@ -4741,7 +4819,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 await loadMessages(syncModelSelection: false)
             }
         } catch {
-            guard currentSession?.id == session.id else { return }
+            guard isCurrentWork(context) else { return }
             if usesV2SessionAPI {
                 optimisticV2CommandMessages.removeValue(forKey: messageID)
             }
@@ -5912,6 +5990,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func resetSessionState() {
+        sessionWorkGeneration &+= 1
+        streamSynchronizationRetryTask?.cancel()
+        streamSynchronizationRetryTask = nil
+        streamSynchronizationRetryCount = 0
         cachedTurnDiffSummariesByMessageID.removeAll()
         stopViewingResults()
         viewedMarkerRefreshTask?.cancel()

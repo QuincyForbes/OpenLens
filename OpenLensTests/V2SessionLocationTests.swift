@@ -4,6 +4,57 @@ import Testing
 
 @MainActor
 struct V2SessionLocationTests {
+    @Test func gapDuringInitialTranscriptReadRequiresAnotherAuthoritativePass() async throws {
+        let server = LocationServer()
+        let transport = LocationStreamingTransport(server: server)
+        let stream = SSEClient(baseURL: URL(string: "https://example.com")!, protocolVersion: .v2,
+                               contextDirectory: "/workspace/Old", transport: transport)
+        let (chat, _, _) = try await makeChat(server, stream: stream)
+        stream.connect()
+        defer { stream.disconnect() }
+        try await waitUntil { await stream.synchronizationGeneration() > 0 }
+        await server.hold("/api/session/ses_move/message", directory: "/workspace/Old")
+        let opening = Task { await chat.loadSession(session()) }
+        try await waitUntil { await server.isWaiting }
+        let before = await stream.synchronizationGeneration()
+        await server.setTranscriptText("Recovered after the missing event")
+        transport.sendMalformedRecord()
+        try await waitUntil { await stream.synchronizationGeneration() > before }
+        await server.release()
+        await opening.value
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(chat.messages.first?.content == "Recovered after the missing event")
+        #expect(await server.transcriptReads >= 2)
+    }
+
+    @Test func failedRecoveryRetriesWithoutAnotherStreamEvent() async throws {
+        let server = LocationServer()
+        let (chat, _, _) = try await makeChat(server)
+        await chat.loadSession(session())
+        await server.failCanonicalReads(true)
+        chat.synchronizeCurrentSessionFromServer()
+        try await waitUntil { chat.errorMessage?.contains("Failed to synchronize") == true }
+        #expect(!chat.isStreamSynchronized)
+        await server.failCanonicalReads(false)
+        await server.setTranscriptText("Recovered by the scheduled retry")
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(chat.messages.first?.content == "Recovered by the scheduled retry")
+        #expect(chat.errorMessage == nil)
+    }
+
+    @Test func failedInitialLoadAlsoSchedulesRecovery() async throws {
+        let server = LocationServer()
+        let (chat, _, _) = try await makeChat(server)
+        await server.hold("/api/session/ses_move/message", directory: "/workspace/Old", fails: true)
+        let opening = Task { await chat.loadSession(session()) }
+        try await waitUntil { await server.isWaiting }
+        await server.release()
+        await opening.value
+        #expect(!chat.isStreamSynchronized)
+        try await waitUntil { chat.isStreamSynchronized }
+        #expect(chat.messages.first?.content == "Preserve this conversation")
+    }
+
     @Test(arguments: ["refresh", "status", "open"], ["/api/location", "/api/vcs", "/api/model"])
     func retryAfterACommittedRebindRestoresProjectMetadataAndModels(path: String, heldPath: String) async throws {
         let server = LocationServer()
@@ -567,6 +618,9 @@ private actor LocationServer: OpenCodeTransport {
     var refusal: Int?
     var canonicalReadsFail = false
     var sessionActive = false
+    var transcriptText = "Preserve this conversation"
+    var transcriptReads = 0
+    func setTranscriptText(_ text: String) { transcriptText = text }
     func setSessionActive(_ active: Bool) { sessionActive = active }
     func failCanonicalReads(_ fail: Bool) { canonicalReadsFail = fail }
     var mutations: [String] = []
@@ -615,7 +669,9 @@ private actor LocationServer: OpenCodeTransport {
         case "/api/fs/list": body = #"{"location":\#(location),"data":[{"path":"\#(name).swift","type":"file"}]}"#
         case "/api/session/active": body = sessionActive ? #"{"data":{"ses_move":{"type":"running"}}}"# : #"{"data":{}}"#
         case "/api/session/ses_move/model": body = ""
-        case "/api/session/ses_move/message": body = #"{"data":[{"id":"msg_existing","type":"user","time":{"created":1},"text":"Preserve this conversation"}],"cursor":{"next":null}}"#
+        case "/api/session/ses_move/message":
+            transcriptReads += 1
+            body = #"{"data":[{"id":"msg_existing","type":"user","time":{"created":1},"text":"\#(transcriptText)"}],"cursor":{"next":null}}"#
         case "/api/session/ses_move/prompt":
             let input = try JSONDecoder().decode(PromptIdentity.self, from: #require(request.httpBody))
             promptRequests.append(request)
@@ -681,6 +737,10 @@ nonisolated private final class LocationStreamingTransport: OpenCodeTransport, @
         bytes.append(try JSONSerialization.data(withJSONObject: envelope))
         bytes.append(Data("\n\n".utf8))
         lock.withLock { streams.last }?.send(bytes)
+    }
+
+    func sendMalformedRecord() {
+        lock.withLock { streams.last }?.send(Data("data: invalid-json\n\n".utf8))
     }
 }
 
