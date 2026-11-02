@@ -155,7 +155,11 @@ private actor RecoveryServer {
         let body: String
         switch url.path {
         case "/api/info": body = #"{"version":"2.0.23"}"#
-        case "/api/location": body = #"{"directory":"/workspace","project":{"id":"project","directory":"/workspace"}}"#
+        case "/api/location":
+            // These tests isolate connection ownership from workspace discovery.
+            // A discovered directory deliberately reconnects SSE and is covered
+            // separately by V2SessionLocationTests.
+            return (Data(), HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!)
         case "/api/vcs": body = #"{"location":{"directory":"/workspace"},"data":{"branch":"main"}}"#
         default: throw URLError(.unsupportedURL)
         }
