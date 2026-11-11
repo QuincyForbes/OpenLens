@@ -63,9 +63,22 @@ struct MessageBubbleView: View {
     private func makeCopyText() -> String? {
         switch message.role {
         case .user:
-            return message.content.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+            guard BoundedTextInspection.hasNonWhitespace(message.content) else { return nil }
+            return BoundedTextInspection.trimOuterWhitespaceAndNewlines(message.content)
         case .assistant:
             return assistantCopyableText().nilIfBlank
+        }
+    }
+
+    private func makePreviewSnippet() -> String {
+        switch message.role {
+        case .user:
+            return UserMessagePresentation.boundedContextPreview(message.content, characterLimit: 600)
+        case .assistant:
+            if !message.content.isEmpty {
+                return UserMessagePresentation.boundedContextPreview(message.content, characterLimit: 600)
+            }
+            return UserMessagePresentation.boundedContextPreview(assistantCopyableText(), characterLimit: 600)
         }
     }
 
@@ -129,6 +142,7 @@ struct MessageBubbleView: View {
                     .messageCopyActions(
                         canCopy: canCopyText && !message.isStreaming,
                         makeText: makeCopyText,
+                        makePreviewSnippet: makePreviewSnippet,
                         onReuseInComposer: onReuseInComposer,
                         onUndo: onUndo
                     )
@@ -137,6 +151,7 @@ struct MessageBubbleView: View {
                     .messageCopyActions(
                         canCopy: canCopyText && !message.isStreaming,
                         makeText: makeCopyText,
+                        makePreviewSnippet: makePreviewSnippet,
                         onReuseInComposer: onReuseInComposer,
                         onUndo: onUndo
                     )
@@ -153,27 +168,30 @@ struct MessageBubbleView: View {
                 MessageAttachmentsRow(images: message.imageAttachments, files: message.fileAttachments)
             }
             if !message.content.isEmpty || (message.imageAttachments.isEmpty && message.fileAttachments.isEmpty) {
-                SkillMentionText(text: message.content, chipStyle: isRetroChat ? .retro : .standard(.appUserOnAccent))
-                    .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
-                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appUserOnAccent)
-                    .padding(.horizontal, isRetroChat ? 14 : 16)
-                    .padding(.vertical, isRetroChat ? 10 : 11)
-                    .background {
-                        if isRetroChat {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(RetroChatStyle.playerFill)
-                                .shadow(color: RetroChatStyle.shadow, radius: 0, x: 3, y: 3)
-                        } else {
-                            bubbleFill(Color.appUserAccent)
-                        }
+                UserMessageBubbleContentView(
+                    messageID: message.id,
+                    text: message.content,
+                    isRetroChat: isRetroChat,
+                    onReuseInComposer: onReuseInComposer
+                )
+                .padding(.horizontal, isRetroChat ? 14 : 16)
+                .padding(.vertical, isRetroChat ? 10 : 11)
+                .background {
+                    if isRetroChat {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(RetroChatStyle.playerFill)
+                            .shadow(color: RetroChatStyle.shadow, radius: 0, x: 3, y: 3)
+                    } else {
+                        bubbleFill(Color.appUserAccent)
                     }
-                    .overlay {
-                        if isRetroChat {
-                            RetroChatDoubleBorder(cornerRadius: 7)
-                        } else {
-                            bubbleStroke(theme.components.controlBorder)
-                        }
+                }
+                .overlay {
+                    if isRetroChat {
+                        RetroChatDoubleBorder(cornerRadius: 7)
+                    } else {
+                        bubbleStroke(theme.components.controlBorder)
                     }
+                }
             }
             submissionStatus
         }
@@ -1483,9 +1501,183 @@ private struct StreamingTextTail: View {
     }
 }
 
+private struct UserMessageBubbleContentView: View {
+    let messageID: String
+    let text: String
+    let isRetroChat: Bool
+    let onReuseInComposer: ((String) -> Void)?
+
+    @State private var isExpandedInline = false
+    @State private var inlineChunks: [UserMessagePresentation.InlineChunk] = []
+    @State private var showFullReader = false
+    @State private var exactMetrics: LongTextMetrics?
+
+    private var foregroundColor: Color {
+        isRetroChat ? RetroChatStyle.ink : Color.appUserOnAccent
+    }
+
+    private var chipStyle: SkillChipStyle {
+        isRetroChat ? .retro : .standard(.appUserOnAccent)
+    }
+
+    private var bodyFont: Font {
+        isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16)
+    }
+
+    var body: some View {
+        switch UserMessagePresentation.make(for: text) {
+        case .full(let shortText):
+            SkillMentionText(text: shortText, chipStyle: chipStyle)
+                .font(bodyFont)
+                .foregroundStyle(foregroundColor)
+
+        case let .collapsible(preview, initialMetrics, canExpandInline):
+            let metrics = exactMetrics ?? initialMetrics
+
+            VStack(alignment: .leading, spacing: 10) {
+                if isExpandedInline && !inlineChunks.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(inlineChunks) { chunk in
+                            SkillMentionText(text: chunk.text, chipStyle: chipStyle)
+                                .font(bodyFont)
+                                .foregroundStyle(foregroundColor)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    SkillMentionText(text: preview, chipStyle: chipStyle)
+                        .font(bodyFont)
+                        .foregroundStyle(foregroundColor)
+                        .lineLimit(UserMessagePresentation.collapsedPreviewLineLimit)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .mask {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: 0),
+                                    .init(color: .black, location: 0.76),
+                                    .init(color: .black.opacity(0.38), location: 1.0)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                }
+
+                (isRetroChat ? RetroChatStyle.ink.opacity(0.32) : foregroundColor.opacity(0.2))
+                    .frame(height: isRetroChat ? 1.5 : 0.75)
+
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(metrics.summaryLabel)
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(foregroundColor.opacity(0.84))
+
+                    Spacer(minLength: 8)
+
+                    if canExpandInline {
+                        Button {
+                            withAnimation(.snappy(duration: 0.22)) {
+                                if isExpandedInline {
+                                    isExpandedInline = false
+                                } else {
+                                    if inlineChunks.isEmpty {
+                                        inlineChunks = UserMessagePresentation.prepareInlineChunks(text)
+                                    }
+                                    isExpandedInline = true
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(isExpandedInline ? "Show less" : "Show more")
+                                Image(systemName: isExpandedInline ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(foregroundColor)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(
+                                foregroundColor.opacity(isRetroChat ? 0.14 : 0.18),
+                                in: Capsule()
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            showFullReader = true
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(foregroundColor)
+                                .frame(width: 26, height: 24)
+                                .background(
+                                    foregroundColor.opacity(isRetroChat ? 0.14 : 0.18),
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Read full message")
+                    } else {
+                        Button {
+                            showFullReader = true
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text("Read full")
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(foregroundColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(
+                                foregroundColor.opacity(isRetroChat ? 0.14 : 0.18),
+                                in: Capsule()
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Read full message, \(metrics.summaryLabel)")
+                    }
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .task(id: messageID) {
+                guard initialMetrics.isLineCountApproximate else { return }
+                let sourceText = text
+                let computed = await Task.detached(priority: .utility) {
+                    LongTextMetrics.computeExact(for: sourceText)
+                }.value
+                exactMetrics = computed
+            }
+            .onChange(of: text) { _, newText in
+                inlineChunks = []
+                exactMetrics = nil
+                if isExpandedInline {
+                    inlineChunks = UserMessagePresentation.prepareInlineChunks(newText)
+                }
+            }
+            .sheet(isPresented: $showFullReader) {
+                SelectableTextSheet(
+                    text: text,
+                    title: "Message",
+                    subtitle: metrics.summaryLabel,
+                    onReuseInComposer: onReuseInComposer
+                )
+            }
+        }
+    }
+}
+
 private struct MessageCopyActions: ViewModifier {
     let canCopy: Bool
     let makeText: () -> String?
+    let makePreviewSnippet: () -> String
     let onReuseInComposer: ((String) -> Void)?
     let onUndo: (() -> Void)?
 
@@ -1547,10 +1739,13 @@ private struct MessageCopyActions: ViewModifier {
                     // A dedicated preview is stable: iOS no longer snapshots the
                     // live, transparent, multi-Text row, which produced the
                     // flickering highlight and the oddly shaped card.
-                    MessagePreviewCard(text: makeText() ?? "")
+                    MessagePreviewCard(snippet: makePreviewSnippet())
                 }
                 .sheet(item: $selectableText) { item in
-                    SelectableTextSheet(text: item.text)
+                    SelectableTextSheet(
+                        text: item.text,
+                        onReuseInComposer: onReuseInComposer
+                    )
                 }
         } else {
             content
@@ -1561,13 +1756,7 @@ private struct MessageCopyActions: ViewModifier {
 /// Bounded card shown while the long-press menu is open. Shows enough of the
 /// message to confirm which one was pressed without laying out a huge reply.
 private struct MessagePreviewCard: View {
-    let text: String
-
-    private var snippet: String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let end = trimmed.index(trimmed.startIndex, offsetBy: 600, limitedBy: trimmed.endIndex) ?? trimmed.endIndex
-        return end == trimmed.endIndex ? trimmed : String(trimmed[..<end]) + "…"
-    }
+    let snippet: String
 
     var body: some View {
         Text(snippet.isEmpty ? " " : snippet)
@@ -1586,12 +1775,14 @@ private extension View {
     func messageCopyActions(
         canCopy: Bool,
         makeText: @escaping () -> String?,
+        makePreviewSnippet: @escaping () -> String,
         onReuseInComposer: ((String) -> Void)? = nil,
         onUndo: (() -> Void)? = nil
     ) -> some View {
         modifier(MessageCopyActions(
             canCopy: canCopy,
             makeText: makeText,
+            makePreviewSnippet: makePreviewSnippet,
             onReuseInComposer: onReuseInComposer,
             onUndo: onUndo
         ))

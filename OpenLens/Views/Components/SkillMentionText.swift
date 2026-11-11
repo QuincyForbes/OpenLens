@@ -23,39 +23,53 @@ struct SkillChipStyle {
 /// rest keeps wrapping as one paragraph. Font and text color come from the
 /// caller; the chip style tints the chips and their labels.
 struct SkillMentionText: View {
+    /// Hard safety ceiling so `SkillMentionText` never runs synchronous link
+    /// detection or single-node TextKit layout on an unbounded string.
+    private static let maximumDisplayCharacters = 2_400
+
     let text: String
     let chipStyle: SkillChipStyle
 
     @Environment(\.chatSkillIDs) private var skillIDs
 
+    private var boundedText: String {
+        guard text.utf8.count > Self.maximumDisplayCharacters,
+              let cut = text.index(text.startIndex, offsetBy: Self.maximumDisplayCharacters, limitedBy: text.endIndex),
+              cut < text.endIndex else {
+            return text
+        }
+        return String(text[..<cut]) + "…"
+    }
+
     var body: some View {
-        let mentions = SkillMention.mentionRanges(in: text, skillIDs: skillIDs)
+        let display = boundedText
+        let mentions = SkillMention.mentionRanges(in: display, skillIDs: skillIDs)
         if mentions.isEmpty {
-            if let linked = MarkdownContentView.linkedPlainText(text, underlined: true) {
+            if let linked = MarkdownContentView.linkedPlainText(display, underlined: true) {
                 // User bubbles sit on the accent fill, so links keep the text
                 // color and are underlined instead of recolored.
                 Text(linked)
                     .tint(chipStyle.color)
             } else {
-                Text(text)
+                Text(display)
             }
         } else {
-            textWithChips(for: mentions)
+            textWithChips(in: display, for: mentions)
                 .textRenderer(
                     SkillChipRenderer(fill: chipStyle.color.opacity(0.2), stroke: chipStyle.color.opacity(0.5))
                 )
         }
     }
 
-    private func textWithChips(for mentions: [Range<String.Index>]) -> Text {
+    private func textWithChips(in source: String, for mentions: [Range<String.Index>]) -> Text {
         var result = Text(verbatim: "")
-        var cursor = text.startIndex
+        var cursor = source.startIndex
         for mention in mentions {
-            let plain = Text(verbatim: String(text[cursor..<mention.lowerBound]))
-            result = Text("\(result)\(plain)\(chip(named: text[mention].dropFirst()))")
+            let plain = Text(verbatim: String(source[cursor..<mention.lowerBound]))
+            result = Text("\(result)\(plain)\(chip(named: source[mention].dropFirst()))")
             cursor = mention.upperBound
         }
-        return Text("\(result)\(Text(verbatim: String(text[cursor...])))")
+        return Text("\(result)\(Text(verbatim: String(source[cursor...])))")
     }
 
     /// No-break spaces pad the label inside the chip and keep the icon on the

@@ -29,9 +29,31 @@ final class ChatNotificationService: NSObject, UNUserNotificationCenterDelegate 
         }
     }
 
+    private nonisolated static let reminderInspectionWindowCharacters = 1_500
+    private nonisolated static let reminderTrailingWindowCharacters = 500
+    private nonisolated static let maximumNotificationBodyCharacters = 240
+
+    private nonisolated static func boundedReminderInspectionSample(from text: String) -> String {
+        guard text.utf8.count > reminderInspectionWindowCharacters else { return text }
+        let headEnd = text.index(
+            text.startIndex,
+            offsetBy: reminderInspectionWindowCharacters,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+        guard headEnd < text.endIndex else { return text }
+
+        let tailStart = text.index(
+            text.endIndex,
+            offsetBy: -reminderTrailingWindowCharacters,
+            limitedBy: headEnd
+        ) ?? headEnd
+        return String(text[..<headEnd]) + "\n" + String(text[tailStart...])
+    }
+
     /// Detects natural-language requests in a chat prompt asking for a reminder or notification.
     nonisolated static func containsReminderRequest(_ text: String) -> Bool {
-        let lowered = text.lowercased()
+        let sample = boundedReminderInspectionSample(from: text)
+        let lowered = sample.lowercased()
         let triggers = [
             "remind me",
             "remind us",
@@ -51,21 +73,22 @@ final class ChatNotificationService: NSObject, UNUserNotificationCenterDelegate 
 
     /// Parses an optional relative time delay such as "in 5 minutes", "in 2 hours", or "in 30s".
     nonisolated static func parseRelativeReminderDelaySeconds(from text: String) -> TimeInterval? {
-        guard containsReminderRequest(text) else { return nil }
+        let sample = boundedReminderInspectionSample(from: text)
+        guard containsReminderRequest(sample) else { return nil }
         let pattern = #"\bin\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return nil
         }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range),
-              let amountRange = Range(match.range(at: 1), in: text),
-              let unitRange = Range(match.range(at: 2), in: text),
-              let amount = Double(text[amountRange]),
+        let range = NSRange(sample.startIndex..<sample.endIndex, in: sample)
+        guard let match = regex.firstMatch(in: sample, options: [], range: range),
+              let amountRange = Range(match.range(at: 1), in: sample),
+              let unitRange = Range(match.range(at: 2), in: sample),
+              let amount = Double(sample[amountRange]),
               amount > 0 else {
             return nil
         }
 
-        let unit = text[unitRange].lowercased()
+        let unit = sample[unitRange].lowercased()
         if unit.hasPrefix("h") {
             return min(amount * 3600, 86_400)
         } else if unit.hasPrefix("m") {
@@ -91,7 +114,10 @@ final class ChatNotificationService: NSObject, UNUserNotificationCenterDelegate 
         content.title = (titleSuffix?.isEmpty == false)
             ? "Reminder · \(titleSuffix!)"
             : "OpenLens Reminder"
-        content.body = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        content.body = UserMessagePresentation.boundedContextPreview(
+            promptText,
+            characterLimit: Self.maximumNotificationBodyCharacters
+        )
         content.sound = .default
         if let sessionID {
             content.userInfo = ["sessionID": sessionID]

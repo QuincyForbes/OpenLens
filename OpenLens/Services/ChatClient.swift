@@ -176,6 +176,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     var inputText: String = ""
+    private(set) var composerPastedSnippets: [ComposerPastedSnippet] = []
     private(set) var composerAttachments: [PromptAttachment] = []
     private(set) var isPreparingComposerImage = false
     var isLoading: Bool = false
@@ -1298,11 +1299,12 @@ final class ChatClient: SSEEventHandlerDelegate {
     private var sessionWorkGeneration: UInt = 0
     private struct SessionComposerDraft: Equatable {
         var text: String
+        var pastedSnippets: [ComposerPastedSnippet]
         var attachments: [PromptAttachment]
         var directory: String?
 
         var isEmpty: Bool {
-            text.isEmpty && attachments.isEmpty
+            text.isEmpty && pastedSnippets.isEmpty && attachments.isEmpty
         }
     }
 
@@ -1977,18 +1979,21 @@ final class ChatClient: SSEEventHandlerDelegate {
         // and bring back whatever was drafted for the session being opened.
         if let previousID = currentSession?.id {
             let draft = SessionComposerDraft(
-                text: inputText,
+                text: ComposerPasteExtractor.sanitizedInput(inputText),
+                pastedSnippets: composerPastedSnippets,
                 attachments: composerAttachments,
                 directory: WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory)
             )
             composerDraftsBySessionID[previousID] = draft.isEmpty ? nil : draft
         }
+        composerPastedSnippets = []
         composerAttachments = []
         resetSessionState()
         isStreamSynchronized = false
         currentSession = session
         if let restored = composerDraftsBySessionID.removeValue(forKey: session.id) {
             inputText = restored.text
+            composerPastedSnippets = restored.pastedSnippets
             let nextDirectory = WorkspaceSelectionBuilder.normalizedDirectory(session.directory)
             if restored.directory == nil || nextDirectory == nil || restored.directory == nextDirectory {
                 composerAttachments = restored.attachments
@@ -2000,6 +2005,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         } else {
             inputText = ""
+            composerPastedSnippets = []
         }
         preparedSessionID = session.id
     }
@@ -2396,6 +2402,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         resetSessionState()
         currentSession = nil
         inputText = ""
+        composerPastedSnippets = []
         composerAttachments = []
     }
 
@@ -3216,6 +3223,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         isStreamSynchronized = false
         currentSession = nil
         inputText = ""
+        composerPastedSnippets = []
         composerAttachments = []
 
         await loadProviders()
@@ -3671,11 +3679,12 @@ final class ChatClient: SSEEventHandlerDelegate {
     // MARK: - Send Message
 
     func send() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = composedPromptText()
         guard canCompose, !text.isEmpty, !isLoading, !isQueueingPrompt, currentSession != nil else { return }
 
         if Self.isUndoCommand(text) {
             inputText = ""
+            composerPastedSnippets = []
             Task {
                 await undoLatestMessage()
             }
@@ -3685,6 +3694,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         if isDemoMode {
             beginResponse()
             inputText = ""
+            composerPastedSnippets = []
             demoPlayer?.play(demoScript)
             return
         }
@@ -3713,6 +3723,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let userMessage = makeOptimisticUserMessage(text: text, attachments: attachments)
         messages.append(userMessage)
         inputText = ""
+        composerPastedSnippets = []
         composerAttachments = []
 
         currentActivity = AgentActivity()
@@ -3733,7 +3744,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// deliberately does not change response state or live activity: the
     /// current turn remains in control until the server promotes the input.
     func queuePrompt() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = composedPromptText()
         if Self.isUndoCommand(text) {
             errorMessage = "Wait for the active session to finish before undoing."
             return
@@ -3766,6 +3777,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             state: isDemoMode ? .queued : .submitting
         )
         inputText = ""
+        composerPastedSnippets = []
         composerAttachments = []
         queuedPrompts.append(queuedPrompt)
         contentVersion &+= 1
@@ -3913,6 +3925,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let userMessage = makeOptimisticCommandUserMessage(text: text)
         messages.append(userMessage)
         inputText = ""
+        composerPastedSnippets = []
 
         if startsNewResponse {
             currentActivity = AgentActivity()
@@ -3947,6 +3960,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let userMessage = makeOptimisticUserMessage(text: text, attachments: attachments)
         messages.append(userMessage)
         inputText = ""
+        composerPastedSnippets = []
         composerAttachments = []
 
         currentActivity = AgentActivity()
@@ -4013,6 +4027,74 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func removeComposerAttachment(id: String) {
         composerAttachments.removeAll { $0.id == id }
+    }
+
+    // MARK: - Composer Pasted Snippets
+
+    func composedPromptText(withOverrideInput overrideInput: String? = nil) -> String {
+        ComposerPasteExtractor.composePrompt(
+            inputText: overrideInput ?? inputText,
+            snippets: composerPastedSnippets
+        )
+    }
+
+    @discardableResult
+    func addComposerPastedSnippet(_ text: String) -> Bool {
+        let clean = ComposerPasteExtractor.sanitizedInput(text)
+        guard BoundedTextInspection.hasNonWhitespace(clean) else { return false }
+
+        let existingSnippetBytes = composerPastedSnippets.reduce(0) { $0 + $1.byteCount }
+        guard existingSnippetBytes + clean.utf8.count <= ComposerPastedSnippet.maximumAllowedUTF8Bytes else {
+            errorMessage = "Pasted text is too large to send in a single prompt (limit 1.8 MB). Paste a smaller section or attach a repository file."
+            return false
+        }
+
+        composerPastedSnippets.append(ComposerPastedSnippet(text: clean))
+        return true
+    }
+
+    func updateComposerPastedSnippet(id: String, text: String) {
+        guard let index = composerPastedSnippets.firstIndex(where: { $0.id == id }) else { return }
+        let otherBytes = composerPastedSnippets.enumerated().reduce(0) { sum, entry in
+            entry.offset == index ? sum : sum + entry.element.byteCount
+        }
+        guard otherBytes + text.utf8.count <= ComposerPastedSnippet.maximumAllowedUTF8Bytes else {
+            errorMessage = "Pasted text is too large to send in a single prompt (limit 1.8 MB)."
+            return
+        }
+        if let updated = composerPastedSnippets[index].updatingText(text) {
+            composerPastedSnippets[index] = updated
+        } else {
+            composerPastedSnippets.remove(at: index)
+        }
+    }
+
+    func removeComposerPastedSnippet(id: String) {
+        composerPastedSnippets.removeAll { $0.id == id }
+    }
+
+    func expandComposerPastedSnippetIntoInput(id: String) {
+        guard let index = composerPastedSnippets.firstIndex(where: { $0.id == id }),
+              composerPastedSnippets[index].canExpandIntoTextField else {
+            return
+        }
+        let snippet = composerPastedSnippets.remove(at: index)
+        let current = BoundedTextInspection.trimOuterWhitespaceAndNewlines(
+            ComposerPasteExtractor.sanitizedInput(inputText)
+        )
+        inputText = current.isEmpty ? snippet.text : "\(current)\n\n\(snippet.text)"
+    }
+
+    /// Places short text directly in the input field and converts large reused
+    /// text into a compact pasted-text snippet so the composer never freezes.
+    func reuseTextInComposer(_ text: String) {
+        let clean = ComposerPasteExtractor.sanitizedInput(text)
+        guard BoundedTextInspection.hasNonWhitespace(clean) else { return }
+        if ComposerPasteExtractor.shouldStoreAsSnippet(clean) {
+            _ = addComposerPastedSnippet(clean)
+        } else {
+            inputText = clean
+        }
     }
 
     /// Prepares picked image data off the main actor and attaches it,
@@ -4082,7 +4164,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// optionally limited to a line range. `relativePath` is relative to the
     /// session folder; the server reads the file when the prompt is admitted.
     func appendQuotedDiff(_ quote: String) {
-        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ComposerPasteExtractor.shouldStoreAsSnippet(quote) {
+            _ = addComposerPastedSnippet(quote)
+            return
+        }
+        let trimmed = BoundedTextInspection.trimOuterWhitespaceAndNewlines(
+            ComposerPasteExtractor.sanitizedInput(inputText)
+        )
         if trimmed.isEmpty {
             inputText = quote + "\n"
         } else {
@@ -4109,10 +4197,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func appendIfItFits(_ attachment: PromptAttachment) throws {
+        let promptText = composedPromptText()
         let input = OpenCodeClient.makePromptInput(
             messageID: "msg_\(UUID().uuidString)",
-            text: inputText,
-            skills: skillAttachments(in: inputText),
+            text: promptText,
+            skills: skillAttachments(in: promptText),
             attachments: composerAttachments + [attachment],
             delivery: .queue
         )
@@ -4125,10 +4214,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func currentComposerBodySize() -> Int {
+        let promptText = composedPromptText()
         let input = OpenCodeClient.makePromptInput(
             messageID: "msg_\(UUID().uuidString)",
-            text: inputText,
-            skills: skillAttachments(in: inputText),
+            text: promptText,
+            skills: skillAttachments(in: promptText),
             attachments: composerAttachments,
             delivery: .queue
         )
@@ -4280,9 +4370,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         for index in promptSubmissions.indices
         where promptSubmissions[index].state == .uncertain && admittedIDs.contains(promptSubmissions[index].id) {
             promptSubmissions[index].state = .accepted(admissionID: promptSubmissions[index].id)
-            if inputText == promptSubmissions[index].text,
+            if composedPromptText() == promptSubmissions[index].text,
                composerAttachments == promptSubmissions[index].attachments {
                 inputText = ""
+                composerPastedSnippets = []
                 composerAttachments = []
             }
             if errorMessage == AppText.promptAdmissionUncertain {
@@ -4648,9 +4739,15 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func restoreComposer(_ text: String, attachments: [PromptAttachment], context: SessionWorkContext) {
-        let restoresText = inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let restoresText = composedPromptText().isEmpty
         if restoresText {
-            inputText = text
+            if ComposerPasteExtractor.shouldStoreAsSnippet(text) {
+                inputText = ""
+                composerPastedSnippets = [ComposerPastedSnippet(text: text)]
+            } else {
+                inputText = text
+                composerPastedSnippets = []
+            }
         }
         if restoresText, composerAttachments.isEmpty {
             let locationUnchanged = canCompose && currentSession?.directory == context.session.directory
@@ -4711,7 +4808,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// Sends a busy-session prompt as a v2 steering instruction rather than
     /// appending it behind the active turn.
     func steerPrompt() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = composedPromptText()
         guard !text.isEmpty, canSteerPrompt else { return }
         guard let context = sessionWorkContext else { return }
 
@@ -4725,6 +4822,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         let userMessage = makeOptimisticUserMessage(text: text, attachments: attachments)
         messages.append(userMessage)
         inputText = ""
+        composerPastedSnippets = []
         composerAttachments = []
         contentVersion &+= 1
         scrollAnchor &+= 1
@@ -4882,20 +4980,24 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     static func isUndoCommand(_ text: String) -> Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/undo"
+        guard text.utf8.count <= 32 else { return false }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/undo"
     }
 
     private func parseSlashAction(_ text: String) -> SlashAction? {
         guard text.hasPrefix("/") else { return nil }
 
-        let raw = String(text.dropFirst())
-        let parts = raw.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-        guard let commandPart = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !commandPart.isEmpty else { return nil }
+        let afterSlash = text.dropFirst()
+        let tokenEnd = afterSlash.firstIndex(where: { $0.isWhitespace || $0.isNewline }) ?? afterSlash.endIndex
+        let commandPart = String(afterSlash[..<tokenEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !commandPart.isEmpty else { return nil }
 
-        let arguments = parts.count > 1
-            ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-            : ""
+        let arguments: String
+        if tokenEnd < afterSlash.endIndex {
+            arguments = BoundedTextInspection.trimOuterWhitespaceAndNewlines(String(afterSlash[tokenEnd...]))
+        } else {
+            arguments = ""
+        }
 
         let normalizedToken = commandPart.lowercased()
 

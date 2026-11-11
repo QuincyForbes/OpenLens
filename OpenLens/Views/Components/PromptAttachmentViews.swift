@@ -166,17 +166,27 @@ struct PromptAttachmentChip: View {
     }
 }
 
-/// Attachments waiting in the composer, each removable before sending.
-/// Text files from the phone can be opened to check their content.
+/// Attachments and pasted text snippets waiting in the composer, each removable
+/// before sending. Text files and pasted snippets can be opened to check or edit content.
 struct ComposerAttachmentStrip: View {
+    var pastedSnippets: [ComposerPastedSnippet] = []
     let attachments: [PromptAttachment]
     let isPreparing: Bool
+    var onRemoveSnippet: ((String) -> Void)? = nil
+    var onSelectSnippet: ((ComposerPastedSnippet) -> Void)? = nil
     let onRemove: (String) -> Void
     let onPreview: (PromptTextFileAttachment) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                ForEach(pastedSnippets) { snippet in
+                    ComposerPastedSnippetCard(
+                        snippet: snippet,
+                        onTap: { onSelectSnippet?(snippet) },
+                        onRemove: { onRemoveSnippet?(snippet.id) }
+                    )
+                }
                 ForEach(attachments) { attachment in
                     item(for: attachment)
                 }
@@ -253,7 +263,77 @@ enum AttachmentPreviewText {
 
     /// Very long files are previewed only in part to keep the sheet responsive.
     static func truncated(_ text: String) -> String {
-        guard text.count > maximumCharacters else { return text }
-        return String(text.prefix(maximumCharacters)) + "\n\n" + AppText.previewTruncated
+        guard let cut = text.index(text.startIndex, offsetBy: maximumCharacters, limitedBy: text.endIndex),
+              cut < text.endIndex else {
+            return text
+        }
+        return String(text[..<cut]) + "\n\n" + AppText.previewTruncated
+    }
+}
+
+/// Compact card representing a large block of pasted text parked in the composer.
+struct ComposerPastedSnippetCard: View {
+    let snippet: ComposerPastedSnippet
+    let onTap: () -> Void
+    let onRemove: () -> Void
+
+    @Environment(\.chatEasterEgg) private var chatEasterEgg
+
+    private var isRetro: Bool {
+        chatEasterEgg.visualMode.isRetro
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isRetro ? RetroChatStyle.blueAccent : Color.appAccent)
+
+                Text("Pasted")
+                    .font(isRetro ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(isRetro ? RetroChatStyle.ink : Color.appPrimary)
+
+                Text(snippet.metricsLabel)
+                    .font(isRetro ? RetroChatStyle.smallFont : .system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(isRetro ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(isRetro ? RetroChatStyle.secondaryInk : Color.appSecondary.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Remove pasted text")
+            }
+
+            Text(snippet.preview)
+                .font(isRetro ? RetroChatStyle.smallFont : .system(size: 12))
+                .foregroundStyle(isRetro ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: 224, height: 56, alignment: .leading)
+        .background(
+            isRetro ? RetroChatStyle.paperWarm : Color.appSurface,
+            in: RoundedRectangle(cornerRadius: isRetro ? 6 : 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: isRetro ? 6 : 12, style: .continuous)
+                .stroke(
+                    isRetro ? RetroChatStyle.ink : Color.appSeparator,
+                    lineWidth: isRetro ? 1.5 : 1
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: isRetro ? 6 : 12, style: .continuous))
+        .onTapGesture(perform: onTap)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Pasted text, \(snippet.metricsLabel)")
+        .accessibilityAction(named: AppText.previewAttachment, onTap)
     }
 }

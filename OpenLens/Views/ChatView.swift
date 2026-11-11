@@ -53,6 +53,7 @@ struct ChatView: View {
     @State private var pickedPhotos: [PhotosPickerItem] = []
     @State private var attachmentSource: ComposerAttachmentSource?
     @State private var previewedTextFile: PromptTextFileAttachment?
+    @State private var editingPastedSnippet: ComposerPastedSnippet?
     @State private var isOnScreen = false
     @State private var backgroundedAt: Date?
 
@@ -1022,10 +1023,15 @@ struct ChatView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            if !chatClient.composerAttachments.isEmpty || chatClient.isPreparingComposerImage {
+            if !chatClient.composerPastedSnippets.isEmpty
+                || !chatClient.composerAttachments.isEmpty
+                || chatClient.isPreparingComposerImage {
                 ComposerAttachmentStrip(
+                    pastedSnippets: chatClient.composerPastedSnippets,
                     attachments: chatClient.composerAttachments,
                     isPreparing: chatClient.isPreparingComposerImage,
+                    onRemoveSnippet: chatClient.removeComposerPastedSnippet(id:),
+                    onSelectSnippet: { editingPastedSnippet = $0 },
                     onRemove: chatClient.removeComposerAttachment(id:),
                     onPreview: { previewedTextFile = $0 }
                 )
@@ -1048,7 +1054,7 @@ struct ChatView: View {
                                 .transition(.scale(scale: 0.8).combined(with: .opacity))
                         }
 
-                        TextField(composerPlaceholder, text: $chatClient.inputText, axis: .vertical)
+                        TextField(composerPlaceholder, text: composerInputBinding, axis: .vertical)
                             .focused($isInputFocused)
                             .onSubmit {
                                 performComposerAction()
@@ -1073,6 +1079,20 @@ struct ChatView: View {
             }
         }
         .padding(.horizontal, 16)
+        .sheet(item: $editingPastedSnippet) { snippet in
+            PastedSnippetEditorSheet(
+                snippet: snippet,
+                onSave: { updated in
+                    chatClient.updateComposerPastedSnippet(id: snippet.id, text: updated)
+                },
+                onExpandIntoField: snippet.canExpandIntoTextField ? {
+                    chatClient.expandComposerPastedSnippetIntoInput(id: snippet.id)
+                } : nil,
+                onRemove: {
+                    chatClient.removeComposerPastedSnippet(id: snippet.id)
+                }
+            )
+        }
     }
 
     private var composerAttachMenu: some View {
@@ -1187,7 +1207,41 @@ struct ChatView: View {
     private var composerPlaceholder: String {
         guard selectedSlashAction == nil else { return "Add arguments..." }
         guard attachedSkills.isEmpty else { return AppText.messagePlaceholderWithAttachedSkills }
+        if !chatClient.composerPastedSnippets.isEmpty {
+            return "Add a prompt for pasted text, or send…"
+        }
         return availableSkills.isEmpty ? AppText.messagePlaceholder : AppText.messagePlaceholderWithSkills
+    }
+
+    private var composerInputBinding: Binding<String> {
+        Binding(
+            get: { chatClient.inputText },
+            set: { newValue in
+                ingestComposerInput(newValue)
+            }
+        )
+    }
+
+    private func ingestComposerInput(_ newValue: String) {
+        let previous = chatClient.inputText
+        if let extraction = ComposerPasteExtractor.extractLargePaste(previous: previous, updated: newValue) {
+            _ = chatClient.addComposerPastedSnippet(extraction.pastedText)
+            let remaining = extraction.remainingInputText
+            let previousClean = ComposerPasteExtractor.sanitizedInput(previous)
+            if remaining == previousClean {
+                let sentinelValue = remaining + ComposerPasteExtractor.focusResetSentinel
+                chatClient.inputText = sentinelValue
+                Task { @MainActor in
+                    if chatClient.inputText == sentinelValue {
+                        chatClient.inputText = remaining
+                    }
+                }
+            } else {
+                chatClient.inputText = remaining
+            }
+            return
+        }
+        chatClient.inputText = newValue
     }
 
     private var selectedSlashActionTint: Color {
@@ -1366,10 +1420,15 @@ struct ChatView: View {
     /// sends, returning false when there is nothing to send. If the client
     /// leaves that text in place, the skill mentions turn back into chips.
     private func commitComposerChips() -> Bool {
-        guard selectedSlashAction != nil || !attachedSkills.isEmpty else { return true }
+        guard selectedSlashAction != nil || !attachedSkills.isEmpty else {
+            return hasComposerText
+        }
 
         let composedText = composerSendText
-        guard !composedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard !composedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !chatClient.composerPastedSnippets.isEmpty else {
+            return false
+        }
 
         chatClient.inputText = composedText
         selectedSlashAction = nil
@@ -1387,7 +1446,9 @@ struct ChatView: View {
 
     private func composedSlashActionText(for action: WorkspaceSlashActionItem) -> String {
         let prompt = action.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let arguments = chatClient.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let arguments = BoundedTextInspection.trimOuterWhitespaceAndNewlines(
+            ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        )
 
         guard !arguments.isEmpty else { return prompt }
         guard !prompt.isEmpty else { return arguments }
@@ -1582,23 +1643,31 @@ struct ChatView: View {
     }
 
     private var hasComposerText: Bool {
-        !composerSendText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !chatClient.composerPastedSnippets.isEmpty
+            || selectedSlashAction != nil
+            || !attachedSkills.isEmpty {
+            return true
+        }
+        return BoundedTextInspection.hasNonWhitespace(
+            ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        )
     }
 
     private var composerSendText: String {
-        let text = selectedSlashAction.map(composedSlashActionText(for:)) ?? chatClient.inputText
+        let sanitizedInput = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        let text = selectedSlashAction.map(composedSlashActionText(for:)) ?? sanitizedInput
         guard !attachedSkills.isEmpty else { return text }
 
         return SkillMention.composing(
-            text.trimmingCharacters(in: .whitespacesAndNewlines),
+            BoundedTextInspection.trimOuterWhitespaceAndNewlines(text),
             mentioning: attachedSkills.map(\.id)
         )
     }
 
     private var slashQuery: String? {
         guard selectedSlashAction == nil else { return nil }
-        let text = chatClient.inputText
-        guard text.hasPrefix("/") else { return nil }
+        let text = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        guard text.utf8.count <= 256, text.hasPrefix("/") else { return nil }
 
         let raw = String(text.dropFirst())
         if raw.contains(where: { $0.isWhitespace || $0.isNewline }) {
@@ -1625,7 +1694,9 @@ struct ChatView: View {
     }
 
     private var skillMentionQuery: String? {
-        SkillMention.activeQuery(in: chatClient.inputText)
+        let text = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        guard text.utf8.count <= 2_048 else { return nil }
+        return SkillMention.activeQuery(in: text)
     }
 
     private var filteredSkills: [WorkspaceSkillItem] {
@@ -1696,10 +1767,13 @@ struct ChatView: View {
         isInputFocused = true
     }
 
-    private func handleComposerTextChange(_ newValue: String) {
+    private func handleComposerTextChange(_ rawNewValue: String) {
+        let newValue = ComposerPasteExtractor.sanitizedInput(rawNewValue)
         if shouldClearSelectedSlashAction(forComposerText: newValue) {
             clearSelectedSlashAction()
         }
+
+        guard newValue.utf8.count <= 2_048 else { return }
 
         if SkillMention.activeQuery(in: newValue) == "", availableSkills.isEmpty, !isLoadingSkills {
             Task {
@@ -1726,6 +1800,7 @@ struct ChatView: View {
     /// Covers mentions typed out in full or put back by the chat client, such
     /// as a prompt restored after a failed queue.
     private func convertFinishedSkillMentionsToChips(in text: String) {
+        guard text.utf8.count <= 2_048 else { return }
         let extracted = SkillMention.extractingCompletedMentions(from: text, skillIDs: availableSkills.map(\.id))
         guard !extracted.skillIDs.isEmpty else { return }
 
@@ -1736,7 +1811,7 @@ struct ChatView: View {
     private func shouldClearSelectedSlashAction(forComposerText newValue: String) -> Bool {
         selectedSlashAction != nil &&
             !isInputFocused &&
-            !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            BoundedTextInspection.hasNonWhitespace(newValue)
     }
 
     private func commandDisplayTitle(_ title: String) -> String {
@@ -3171,7 +3246,7 @@ private struct ChatMessagesListView: View {
                         ? chatClient.promptSubmissionState(forMessageID: message.id)
                         : nil,
                     onReuseInComposer: chatClient.canCompose ? { text in
-                        chatClient.inputText = text
+                        chatClient.reuseTextInComposer(text)
                     } : nil,
                     onUndo: chatClient.canUndo(message) ? {
                         Task { await chatClient.undo(message) }
@@ -3185,7 +3260,7 @@ private struct ChatMessagesListView: View {
                         message: message,
                         isRetroChat: isRetroChat,
                         onReuseInComposer: chatClient.canCompose ? { text in
-                            chatClient.inputText = text
+                            chatClient.reuseTextInComposer(text)
                         } : nil
                     )
                 }
@@ -3197,7 +3272,7 @@ private struct ChatMessagesListView: View {
                     segmentID: segment.id,
                     animatesSubagentStatus: item.animatesSubagentStatus,
                     onReuseInComposer: chatClient.canCompose ? { text in
-                        chatClient.inputText = text
+                        chatClient.reuseTextInComposer(text)
                     } : nil
                 )
                 // One always-visible action row under the finished reply, so
@@ -3210,7 +3285,7 @@ private struct ChatMessagesListView: View {
                         message: message,
                         isRetroChat: isRetroChat,
                         onReuseInComposer: chatClient.canCompose ? { text in
-                            chatClient.inputText = text
+                            chatClient.reuseTextInComposer(text)
                         } : nil
                     )
                 }
@@ -3380,8 +3455,11 @@ private struct QueuedPromptBubbleView: View {
     @Environment(\.openLensTheme) private var theme
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(ChatClient.self) private var chatClient
+    @State private var showFullReader = false
 
     var body: some View {
+        let presentation = UserMessagePresentation.makeQueuedPreview(for: bodyText)
+
         HStack(alignment: .bottom, spacing: isRetroChat ? 6 : 8) {
             Spacer(minLength: isRetroChat ? 42 : 64)
 
@@ -3415,11 +3493,7 @@ private struct QueuedPromptBubbleView: View {
                         .padding(.trailing, 4)
                 }
 
-                SkillMentionText(text: bodyText, chipStyle: isRetroChat ? .retro : .standard(.appAccent))
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel([kindTitle, bodyText].compactMap { $0 }.joined(separator: ". "))
-                    .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
-                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
+                queuedBubbleContent(for: presentation)
                     .padding(.horizontal, isRetroChat ? 14 : 16)
                     .padding(.vertical, isRetroChat ? 10 : 11)
                     .background {
@@ -3528,6 +3602,63 @@ private struct QueuedPromptBubbleView: View {
             AppText.queuedCompaction
         case let .move(directory):
             AppText.queuedMove(to: directory)
+        }
+    }
+
+    @ViewBuilder
+    private func queuedBubbleContent(for presentation: UserMessagePresentation.Mode) -> some View {
+        let chipStyle: SkillChipStyle = isRetroChat ? .retro : .standard(.appAccent)
+        let textFont: Font = isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16)
+        let textColor: Color = isRetroChat ? RetroChatStyle.ink : Color.appPrimary
+
+        switch presentation {
+        case .full(let shortText):
+            SkillMentionText(text: shortText, chipStyle: chipStyle)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel([kindTitle, shortText].compactMap { $0 }.joined(separator: ". "))
+                .font(textFont)
+                .foregroundStyle(textColor)
+
+        case let .collapsible(preview, metrics, _):
+            VStack(alignment: .leading, spacing: 8) {
+                SkillMentionText(text: preview, chipStyle: chipStyle)
+                    .font(textFont)
+                    .foregroundStyle(textColor)
+                    .lineLimit(UserMessagePresentation.queuedPreviewLineLimit)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 8) {
+                    Label(metrics.summaryLabel, systemImage: "doc.text")
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        showFullReader = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Read full")
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel([kindTitle, preview, metrics.summaryLabel].compactMap { $0 }.joined(separator: ". "))
+            .sheet(isPresented: $showFullReader) {
+                SelectableTextSheet(
+                    text: bodyText,
+                    title: "Queued Prompt",
+                    subtitle: metrics.summaryLabel
+                )
+            }
         }
     }
 
