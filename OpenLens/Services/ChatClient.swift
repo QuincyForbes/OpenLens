@@ -5790,11 +5790,14 @@ final class ChatClient: SSEEventHandlerDelegate {
         // Moving a ring is O(1): no queued string/chunk has to be rewritten on
         // MainActor when the server replaces an optimistic message identifier.
         if let mailbox = streamingUpdateMailboxes.removeValue(forKey: oldID) {
+            if streamingUpdateMailboxes[newID] != nil {
+                flushStreamingBuffer()
+            }
             if let existingTarget = streamingUpdateMailboxes[newID] {
-                while let pendingUpdate = mailbox.popFirst() {
+                while let pendingUpdate = mailbox.removeFirst() {
                     if !existingTarget.append(pendingUpdate) {
                         flushStreamingBuffer()
-                        _ = existingTarget.append(pendingUpdate)
+                        _ = streamingMailbox(for: newID).append(pendingUpdate)
                     }
                 }
             } else {
