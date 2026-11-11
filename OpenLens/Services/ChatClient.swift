@@ -1379,7 +1379,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     @ObservationIgnored private var preparedSessionID: String?
     @ObservationIgnored private var composerDraftsBySessionID: [String: SessionComposerDraft] = [:]
     @ObservationIgnored private var composerDraftOrder: [String] = []
-    private static let maximumParkedComposerDrafts = 12:]
+    private static let maximumParkedComposerDrafts = 12
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
