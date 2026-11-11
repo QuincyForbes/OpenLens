@@ -286,7 +286,7 @@ struct FormView: View {
                 if !field.options.isEmpty,
                    field.custom,
                    !defaultString.isEmpty,
-                   !field.options.contains(defaultString) {
+                   !field.options.contains(where: { $0.value == defaultString }) {
                     customSelections[field.key] = defaultString
                     strings[field.key] = ""
                 } else {
