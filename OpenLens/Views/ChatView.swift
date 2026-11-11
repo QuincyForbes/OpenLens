@@ -253,12 +253,6 @@ struct ChatView: View {
                 handleImportedProviders(providers, includePlainText: true)
                 return true
             }
-            #if targetEnvironment(macCatalyst)
-            .onPasteCommand(of: ComposerItemImporter.supportedContentTypes) { providers in
-                guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return }
-                handleImportedProviders(providers, includePlainText: true)
-            }
-            #endif
             .safeAreaInset(edge: .bottom) {
                 if chatClient.showsComposer {
                     chatComposerInset(contextUsage: currentContextUsage)
