@@ -46,6 +46,7 @@ struct ChatView: View {
     @State private var isLoadingCommands = false
     @State private var commandLoadToken = UUID()
     @State private var availableSkills: [WorkspaceSkillItem] = []
+    @State private var availableSkillIDs: [String] = []
     @State private var isLoadingSkills = false
     @State private var skillLoadToken = UUID()
     @State private var displayedResponseState: ChatResponseState = .idle
@@ -90,7 +91,7 @@ struct ChatView: View {
                 chatClient: chatClient,
                 jumpToLatestRequest: jumpToLatestRequest
             )
-            .environment(\.chatSkillIDs, availableSkills.map(\.id))
+            .environment(\.chatSkillIDs, availableSkillIDs)
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
             if let attention = pendingAttention {
@@ -238,6 +239,7 @@ struct ChatView: View {
             attachmentSource = nil
             availableSlashActions = []
             availableSkills = []
+            availableSkillIDs = []
             chatClient.updateSlashCatalog(commands: [], agents: [])
             chatClient.updateSkillCatalog([])
             guard chatClient.sessionLocationState == .ready else { return }
@@ -275,9 +277,10 @@ struct ChatView: View {
             ) {
                 chatClient.synchronizeCurrentSessionFromServer()
             }
+            let shouldForceCatalogRefresh = awayInterval >= ChatClient.foregroundReconcileGrace
             Task {
-                async let commandsLoad: Void = loadCommands(force: true)
-                async let skillsLoad: Void = loadSkills(force: true)
+                async let commandsLoad: Void = loadCommands(force: shouldForceCatalogRefresh)
+                async let skillsLoad: Void = loadSkills(force: shouldForceCatalogRefresh)
                 if chatClient.currentSession == nil {
                     async let permissionLoad = chatClient.recoverPendingPermission()
                     async let questionLoad = chatClient.recoverPendingQuestions()
@@ -1751,8 +1754,10 @@ struct ChatView: View {
         defer { if skillLoadToken == token { isLoadingSkills = false } }
         let skills = await workspaceService.loadSkills()
         guard !Task.isCancelled, context == catalogContextID, skillLoadToken == token else { return }
+        let skillIDs = skills.map(\.id)
         availableSkills = skills
-        chatClient.updateSkillCatalog(skills.map(\.id))
+        availableSkillIDs = skillIDs
+        chatClient.updateSkillCatalog(skillIDs)
     }
 
     private func applySkillMention(_ skill: WorkspaceSkillItem) {
@@ -2564,6 +2569,8 @@ private struct ResponseStatusSiriIndicator: View {
     let color: Color
     let isRetroChat: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var isAnimatedState: Bool {
         state == .generating || state == .stopping
     }
@@ -2573,29 +2580,29 @@ private struct ResponseStatusSiriIndicator: View {
     }
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            ZStack {
-                capsuleBackground
+        ZStack {
+            capsuleBackground
 
-                if isAnimatedState {
-                    animatedBars(time: timeline.date.timeIntervalSinceReferenceDate)
-                } else if showsTextLabel {
-                    Text(label)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(color)
-                        .contentTransition(.opacity)
-                } else {
-                    Image(systemName: icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(color)
-                        .contentTransition(.symbolEffect(.replace))
+            if isAnimatedState {
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { timeline in
+                    animatedBars(time: reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate)
                 }
+            } else if showsTextLabel {
+                Text(label)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(color)
+                    .contentTransition(.opacity)
+            } else {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(color)
+                    .contentTransition(.symbolEffect(.replace))
             }
-            .frame(width: showsTextLabel ? 74 : 62, height: 34)
-            .clipShape(Capsule(style: .continuous))
-            .shadow(color: .black.opacity(isRetroChat ? 0 : 0.1), radius: 12, y: 5)
-            .animation(.easeInOut(duration: 0.18), value: state)
         }
+        .frame(width: showsTextLabel ? 74 : 62, height: 34)
+        .clipShape(Capsule(style: .continuous))
+        .shadow(color: .black.opacity(isRetroChat ? 0 : 0.1), radius: 12, y: 5)
+        .animation(.easeInOut(duration: 0.18), value: state)
     }
 
     @ViewBuilder
@@ -2604,17 +2611,19 @@ private struct ResponseStatusSiriIndicator: View {
 
         ZStack {
             Capsule(style: .continuous)
-                .fill(isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface.opacity(0.82))
+                .fill(isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface.opacity(0.86))
 
             if !isRetroChat {
-                LinearGradient(
-                    colors: palette.map { $0.opacity(0.2) },
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .blur(radius: 6)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 5)
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: palette.map { $0.opacity(0.14) },
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .padding(.horizontal, 2)
+                    .padding(.vertical, 2)
             }
 
             Capsule(style: .continuous)
@@ -2631,7 +2640,6 @@ private struct ResponseStatusSiriIndicator: View {
                 Capsule(style: .continuous)
                     .fill(barGradient(index: index))
                     .frame(width: 4, height: barHeight(index: index, time: time))
-                    .shadow(color: indicatorPalette[index % indicatorPalette.count].opacity(isRetroChat ? 0 : 0.45), radius: 3)
             }
         }
         .frame(height: 24, alignment: .center)

@@ -53,7 +53,7 @@ struct GlowDotField: View {
     var body: some View {
         GeometryReader { proxy in
             let origin = proxy.frame(in: .global).origin
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: reduceMotion || !isVisible)) { timeline in
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || !isVisible)) { timeline in
                 let renderer = GlowDotFieldRenderer(
                     time: reduceMotion ? 0 : timeline.date.timeIntervalSince(startDate),
                     date: timeline.date,
@@ -324,12 +324,9 @@ private struct GlowDotFieldRenderer {
             }
         }
 
-        context.drawLayer { layer in
-            layer.addFilter(.blur(radius: 7))
-            for (index, path) in glows.enumerated() where !path.isEmpty {
-                let opacity = (Double(index) + 0.5) / Double(Self.glowBuckets) * glowOpacity
-                layer.fill(path, with: .color(color.opacity(opacity)))
-            }
+        for (index, path) in glows.enumerated() where !path.isEmpty {
+            let opacity = (Double(index) + 0.5) / Double(Self.glowBuckets) * glowOpacity * 0.42
+            context.fill(path, with: .color(color.opacity(opacity)))
         }
         for (index, path) in dots.enumerated() where !path.isEmpty {
             let opacity = (Double(index) + 0.5) / Double(Self.dotBuckets) * maxAlpha

@@ -146,6 +146,12 @@ struct ConnectedRootView: View {
         guard chatClient.isLoading else { return }
 
         while !Task.isCancelled, chatClient.isLoading {
+            // Yield first so sending a prompt (`POST .../prompt`) does not immediately
+            // contend with 6 redundant status/transcript recovery GETs at t = 0ms.
+            let interval: UInt64 = connection.sseClient?.state == .connected ? 3_000_000_000 : 1_000_000_000
+            try? await Task.sleep(nanoseconds: interval)
+            guard !Task.isCancelled, chatClient.isLoading else { return }
+
             let needsExternalTranscriptSync = chatClient.pendingAssistantMessage == nil
                 || connection.sseClient?.state != .connected
             async let statusRefresh = chatClient.refreshCurrentSessionStatus()
@@ -156,8 +162,6 @@ struct ConnectedRootView: View {
             if needsExternalTranscriptSync, !Task.isCancelled {
                 _ = await chatClient.loadMessages(syncModelSelection: false)
             }
-            let interval: UInt64 = connection.sseClient?.state == .connected ? 3_000_000_000 : 1_000_000_000
-            try? await Task.sleep(nanoseconds: interval)
         }
     }
 

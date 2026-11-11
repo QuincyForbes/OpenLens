@@ -27,9 +27,9 @@ final class HapticController {
 
     /// Fire a light impact once per turn (first streamed token).
     func playFirstResponseIfNeeded() {
-        guard AppPreferences.hapticsEnabled else { return }
         guard !hasPlayedFirstResponse else { return }
         hasPlayedFirstResponse = true
+        guard AppPreferences.hapticsEnabled else { return }
         lightImpact.impactOccurred()
     }
 

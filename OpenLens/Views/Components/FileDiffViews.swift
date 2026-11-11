@@ -326,45 +326,60 @@ private extension View {
 }
 
 private struct CodeListingView: View {
+    private static let initialLineLimit = 300
+    private static let revealStep = 400
+    private static let synchronousSplitUTF8Threshold = 16_384
+
     let text: String
     let tint: Color
     var wrapLines: Bool = false
 
-    var body: some View {
-        // Split in `body` rather than `init`: SwiftUI skips `body` when the
-        // inputs are unchanged, but `init` runs on every parent update.
-        let lines = Self.makeLines(from: text)
-        let codeWidth = CodeFont.width(forColumns: lines.map(\.utf16.count).max() ?? 0)
+    @State private var preparedLines: (lines: [String], maxColumns: Int)?
+    @State private var visibleLineLimit = Self.initialLineLimit
 
-        if wrapLines {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(lines.indices, id: \.self) { index in
-                    let line = lines[index]
-                    HStack(alignment: .top, spacing: 12) {
-                        Text("\(index + 1)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Color.appSecondary)
-                            .frame(width: 36, alignment: .trailing)
-
-                        Text(line.isEmpty ? " " : line)
-                            .font(.system(size: CodeFont.size, design: .monospaced))
-                            .foregroundStyle(Color.appPrimary)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(tint)
-                    )
-                }
-            }
+    init(text: String, tint: Color, wrapLines: Bool = false) {
+        self.text = text
+        self.tint = tint
+        self.wrapLines = wrapLines
+        if text.utf8.count <= Self.synchronousSplitUTF8Threshold {
+            self._preparedLines = State(initialValue: Self.prepare(text))
         } else {
-            ScrollView(.horizontal, showsIndicators: false) {
+            self._preparedLines = State(initialValue: nil)
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let preparedLines {
+                renderedLines(preparedLines.lines, maxColumns: preparedLines.maxColumns)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            }
+        }
+        .task(id: text) {
+            visibleLineLimit = Self.initialLineLimit
+            if text.utf8.count <= Self.synchronousSplitUTF8Threshold {
+                preparedLines = Self.prepare(text)
+            } else {
+                let source = text
+                preparedLines = await Task.detached(priority: .userInitiated) {
+                    Self.prepare(source)
+                }.value
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func renderedLines(_ lines: [String], maxColumns: Int) -> some View {
+        let shownCount = min(visibleLineLimit, lines.count)
+        let remainingCount = max(0, lines.count - shownCount)
+        let codeWidth = CodeFont.width(forColumns: maxColumns)
+
+        VStack(alignment: .leading, spacing: 8) {
+            if wrapLines {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(lines.indices, id: \.self) { index in
+                    ForEach(0..<shownCount, id: \.self) { index in
                         let line = lines[index]
                         HStack(alignment: .top, spacing: 12) {
                             Text("\(index + 1)")
@@ -375,8 +390,8 @@ private struct CodeListingView: View {
                             Text(line.isEmpty ? " " : line)
                                 .font(.system(size: CodeFont.size, design: .monospaced))
                                 .foregroundStyle(Color.appPrimary)
-                                .textSelection(.enabled)
-                                .unwrappedCodeLine(minWidth: codeWidth)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -386,13 +401,55 @@ private struct CodeListingView: View {
                         )
                     }
                 }
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(0..<shownCount, id: \.self) { index in
+                            let line = lines[index]
+                            HStack(alignment: .top, spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(Color.appSecondary)
+                                    .frame(width: 36, alignment: .trailing)
+
+                                Text(line.isEmpty ? " " : line)
+                                    .font(.system(size: CodeFont.size, design: .monospaced))
+                                    .foregroundStyle(Color.appPrimary)
+                                    .unwrappedCodeLine(minWidth: codeWidth)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(tint)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if remainingCount > 0 {
+                Button {
+                    visibleLineLimit = min(lines.count, visibleLineLimit + Self.revealStep)
+                } label: {
+                    Label(
+                        "Show \(min(Self.revealStep, remainingCount)) more lines (\(remainingCount) remaining)",
+                        systemImage: "chevron.down"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.appAccent)
+                    .padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
             }
         }
     }
 
-    private static func makeLines(from text: String) -> [String] {
+    private nonisolated static func prepare(_ text: String) -> (lines: [String], maxColumns: Int) {
         let splitLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        return splitLines.isEmpty ? [text] : splitLines
+        let lines = splitLines.isEmpty ? [text] : splitLines
+        let maxCols = lines.reduce(0) { max($0, $1.utf16.count) }
+        return (lines, maxCols)
     }
 }
 
@@ -445,64 +502,106 @@ struct UnifiedDiffView: View {
         } else {
             LazyVStack(alignment: .leading, spacing: 12) {
                 ForEach(hunks) { hunk in
-                    SurfaceCard(padding: 0) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            HStack(spacing: 8) {
-                                Text(hunk.header)
-                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(Color.appSecondary)
-                                    .lineLimit(1)
+                    UnifiedDiffHunkCard(
+                        hunk: hunk,
+                        filePath: file.path,
+                        wrapLines: wrapLines,
+                        onQuoteInChat: onQuoteInChat
+                    )
+                }
+            }
+        }
+    }
+}
 
-                                Spacer()
+private struct UnifiedDiffHunkCard: View {
+    private static let initialLineLimit = 300
+    private static let revealStep = 400
 
-                                if let onQuoteInChat {
-                                    Button {
-                                        onQuoteInChat(hunk.formattedChatQuote(filePath: file.path))
-                                    } label: {
-                                        Label("Quote", systemImage: "quote.bubble")
-                                            .font(.caption2.weight(.semibold))
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.mini)
-                                } else {
-                                    Button {
-                                        UIPasteboard.general.string = hunk.formattedChatQuote(filePath: file.path)
-                                    } label: {
-                                        Label("Copy", systemImage: "doc.on.doc")
-                                            .font(.caption2.weight(.semibold))
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.mini)
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
+    let hunk: UnifiedDiffHunk
+    let filePath: String
+    let wrapLines: Bool
+    let onQuoteInChat: ((String) -> Void)?
 
-                            SurfaceDivider()
+    @State private var visibleLineLimit = Self.initialLineLimit
 
-                            let codeWidth = CodeFont.width(forColumns: hunk.maxLineLength)
+    var body: some View {
+        let shownCount = min(visibleLineLimit, hunk.lines.count)
+        let remainingCount = max(0, hunk.lines.count - shownCount)
+        let visibleLines = hunk.lines.prefix(shownCount)
+        let codeWidth = CodeFont.width(forColumns: hunk.maxLineLength)
 
-                            if wrapLines {
-                                LazyVStack(alignment: .leading, spacing: 2) {
-                                    ForEach(hunk.lines) { line in
-                                        UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: true)
-                                    }
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 10)
-                            } else {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    LazyVStack(alignment: .leading, spacing: 2) {
-                                        ForEach(hunk.lines) { line in
-                                            UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: false)
-                                        }
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 10)
-                                }
-                            }
+        SurfaceCard(padding: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Text(hunk.header)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.appSecondary)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    if let onQuoteInChat {
+                        Button {
+                            onQuoteInChat(hunk.formattedChatQuote(filePath: filePath))
+                        } label: {
+                            Label("Quote", systemImage: "quote.bubble")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    } else {
+                        Button {
+                            UIPasteboard.general.string = hunk.formattedChatQuote(filePath: filePath)
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                SurfaceDivider()
+
+                if wrapLines {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(visibleLines) { line in
+                            UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: true)
                         }
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(visibleLines) { line in
+                                UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: false)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
+                    }
+                }
+
+                if remainingCount > 0 {
+                    SurfaceDivider()
+                    Button {
+                        visibleLineLimit = min(hunk.lines.count, visibleLineLimit + Self.revealStep)
+                    } label: {
+                        Label(
+                            "Show \(min(Self.revealStep, remainingCount)) more lines (\(remainingCount) remaining)",
+                            systemImage: "chevron.down"
+                        )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.appAccent)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -535,14 +634,12 @@ private struct UnifiedDiffLineRow: View {
                 Text(line.text.isEmpty ? " " : line.text)
                     .font(.system(size: CodeFont.size, design: .monospaced))
                     .foregroundStyle(Color.appPrimary)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Text(line.text.isEmpty ? " " : line.text)
                     .font(.system(size: CodeFont.size, design: .monospaced))
                     .foregroundStyle(Color.appPrimary)
-                    .textSelection(.enabled)
                     .unwrappedCodeLine(minWidth: codeWidth)
             }
         }
@@ -768,9 +865,17 @@ nonisolated enum UnifiedDiffBuilder {
         return head + middle + tail
     }
 
+    private static let maximumDenseDPMatrixCells = 250_000
+
     private static func buildOperationsWithTable(before: [String], after: [String]) -> [DiffOperation] {
         let beforeCount = before.count
         let afterCount = after.count
+
+        // Prevent O(N·M) multi-hundred-MB matrix allocations on large rewritten files
+        // by switching to Swift's O(N + M)-space Myers diff above 250k cells.
+        if beforeCount * afterCount > maximumDenseDPMatrixCells {
+            return buildOperationsWithMyersDifference(before: before, after: after)
+        }
 
         var table = Array(
             repeating: Array(repeating: 0, count: afterCount + 1),
@@ -818,6 +923,41 @@ nonisolated enum UnifiedDiffBuilder {
         while afterIndex < afterCount {
             operations.append(.added(after[afterIndex]))
             afterIndex += 1
+        }
+
+        return operations
+    }
+
+    private static func buildOperationsWithMyersDifference(before: [String], after: [String]) -> [DiffOperation] {
+        let difference = after.difference(from: before, by: ==)
+        var removedOffsets = Set<Int>()
+        var insertedOffsets = Set<Int>()
+        for change in difference {
+            switch change {
+            case let .remove(offset, _, _):
+                removedOffsets.insert(offset)
+            case let .insert(offset, _, _):
+                insertedOffsets.insert(offset)
+            }
+        }
+
+        var operations: [DiffOperation] = []
+        operations.reserveCapacity(before.count + insertedOffsets.count)
+        var beforeIndex = 0
+        var afterIndex = 0
+
+        while beforeIndex < before.count || afterIndex < after.count {
+            if beforeIndex < before.count, removedOffsets.contains(beforeIndex) {
+                operations.append(.removed(before[beforeIndex]))
+                beforeIndex += 1
+            } else if afterIndex < after.count, insertedOffsets.contains(afterIndex) {
+                operations.append(.added(after[afterIndex]))
+                afterIndex += 1
+            } else if beforeIndex < before.count, afterIndex < after.count {
+                operations.append(.equal(before[beforeIndex]))
+                beforeIndex += 1
+                afterIndex += 1
+            }
         }
 
         return operations

@@ -357,9 +357,7 @@ private struct StatusOrb: View {
             .overlay {
                 ZStack {
                     Circle()
-                        .stroke(Color.laPrimary.opacity(0.8), lineWidth: 2)
-                        .blur(radius: 4)
-                        .opacity(0.3)
+                        .stroke(Color.laPrimary.opacity(0.16), lineWidth: 5)
                     Circle()
                         .stroke(Color.laPrimary.opacity(0.35), lineWidth: 1)
                 }
@@ -662,12 +660,9 @@ private struct ActivityDotField: View {
             }
         }
 
-        context.drawLayer { layer in
-            layer.addFilter(.blur(radius: 6))
-            for (index, path) in glows.enumerated() where !path.isEmpty {
-                let opacity = (Double(index) + 0.5) / Double(glowBuckets) * glowOpacity
-                layer.fill(path, with: .color(Color.laPrimary.opacity(opacity)))
-            }
+        for (index, path) in glows.enumerated() where !path.isEmpty {
+            let opacity = (Double(index) + 0.5) / Double(glowBuckets) * glowOpacity * 0.42
+            context.fill(path, with: .color(Color.laPrimary.opacity(opacity)))
         }
         for (index, path) in dots.enumerated() where !path.isEmpty {
             let opacity = (Double(index) + 0.5) / Double(dotBuckets) * maxAlpha

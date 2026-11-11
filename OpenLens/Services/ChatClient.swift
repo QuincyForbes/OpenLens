@@ -1049,15 +1049,68 @@ final class ChatClient: SSEEventHandlerDelegate {
         from messages: [ChatMessage],
         pending: ChatMessage?
     ) -> [BackgroundWatcherItem] {
-        var completedShellIDs = Set<String>()
-        for message in messages {
-            for id in extractCompletedShellIDs(from: message.content) {
-                completedShellIDs.insert(id)
+        var allMessages = messages
+        if let pending, !allMessages.contains(where: { $0.id == pending.id }) {
+            allMessages.append(pending)
+        }
+
+        // First collect lightweight candidate shell launches and active subagents
+        // from bounded segment metadata. In 99.9% of turns no background shell was
+        // launched, so we avoid scanning full message bodies altogether.
+        enum Candidate {
+            case shell(id: String, title: String)
+            case subagent(BackgroundWatcherItem)
+        }
+        var candidates: [Candidate] = []
+        var hasCandidateShell = false
+
+        for message in allMessages where message.role == .assistant {
+            for segment in message.assistantSegments {
+                switch segment.kind {
+                case .tool(let step):
+                    if let output = step.outputPreview,
+                       let shellID = extractBackgroundShellID(from: output) {
+                        let cleanedTitle = step.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                        candidates.append(
+                            .shell(
+                                id: shellID,
+                                title: cleanedTitle.isEmpty ? "Background shell task" : cleanedTitle
+                            )
+                        )
+                        hasCandidateShell = true
+                    }
+                case .subagent(let step):
+                    if step.isActive, !message.isStreaming {
+                        candidates.append(
+                            .subagent(
+                                BackgroundWatcherItem(
+                                    id: step.id,
+                                    kind: .subagent,
+                                    title: step.title,
+                                    detail: step.agentName
+                                )
+                            )
+                        )
+                    }
+                default:
+                    break
+                }
             }
-            for part in message.parts {
-                if let text = part.text {
-                    for id in extractCompletedShellIDs(from: text) {
-                        completedShellIDs.insert(id)
+        }
+
+        guard !candidates.isEmpty else { return [] }
+
+        var completedShellIDs = Set<String>()
+        if hasCandidateShell {
+            for message in messages {
+                for id in extractCompletedShellIDs(from: message.content) {
+                    completedShellIDs.insert(id)
+                }
+                for part in message.parts where !part.isRenderableText {
+                    if let text = part.text {
+                        for id in extractCompletedShellIDs(from: text) {
+                            completedShellIDs.insert(id)
+                        }
                     }
                 }
             }
@@ -1065,42 +1118,22 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         var watchers: [BackgroundWatcherItem] = []
         var seenIDs = Set<String>()
-        var allMessages = messages
-        if let pending, !allMessages.contains(where: { $0.id == pending.id }) {
-            allMessages.append(pending)
-        }
-
-        for message in allMessages where message.role == .assistant {
-            for segment in message.assistantSegments {
-                switch segment.kind {
-                case .tool(let step):
-                    if let output = step.outputPreview,
-                       let shellID = extractBackgroundShellID(from: output),
-                       !completedShellIDs.contains(shellID),
-                       seenIDs.insert(shellID).inserted {
-                        let cleanedTitle = step.label.trimmingCharacters(in: .whitespacesAndNewlines)
-                        watchers.append(
-                            BackgroundWatcherItem(
-                                id: shellID,
-                                kind: .shell,
-                                title: cleanedTitle.isEmpty ? "Background shell task" : cleanedTitle,
-                                detail: shellID
-                            )
+        for candidate in candidates {
+            switch candidate {
+            case let .shell(shellID, title):
+                if !completedShellIDs.contains(shellID), seenIDs.insert(shellID).inserted {
+                    watchers.append(
+                        BackgroundWatcherItem(
+                            id: shellID,
+                            kind: .shell,
+                            title: title,
+                            detail: shellID
                         )
-                    }
-                case .subagent(let step):
-                    if step.isActive, !message.isStreaming, seenIDs.insert(step.id).inserted {
-                        watchers.append(
-                            BackgroundWatcherItem(
-                                id: step.id,
-                                kind: .subagent,
-                                title: step.title,
-                                detail: step.agentName
-                            )
-                        )
-                    }
-                default:
-                    break
+                    )
+                }
+            case let .subagent(item):
+                if seenIDs.insert(item.id).inserted {
+                    watchers.append(item)
                 }
             }
         }
@@ -2320,16 +2353,23 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         // Read the inbox before the transcript: an entry delivered in between
         // then appears in both and is shown once, rather than in neither.
+        async let todosTask: Void = loadTodos()
         var inboxRecovered = false
         do {
             inboxRecovered = await recoverSessionInbox() == .current
-            guard isCurrent() else { return false }
+            guard isCurrent() else {
+                _ = await todosTask
+                return false
+            }
             let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 16
             let rawTranscript = try await messagesService!.loadTranscript(
                 sessionID: session.id,
                 limit: fetchLimit
             )
-            guard isCurrent() else { return false }
+            guard isCurrent() else {
+                _ = await todosTask
+                return false
+            }
             let transcript = mergeTranscriptWithLoadedHistory(rawTranscript)
             let loaded = transcript.messages
             resolveCompactionFromTranscript(transcript, sessionID: session.id)
@@ -2381,16 +2421,16 @@ final class ChatClient: SSEEventHandlerDelegate {
                 self.scrollAnchor &+= 1
             }
         } catch is CancellationError {
+            _ = await todosTask
             return false
         } catch {
+            _ = await todosTask
             guard isCurrent() else { return false }
             self.errorMessage = "Failed to load messages: \(error.localizedDescription)"
             return false
         }
 
-        async let statusTask = refreshCurrentSessionStatus()
-        async let todosTask: Void = loadTodos()
-        let statusRecovered = await statusTask
+        let statusRecovered = await refreshCurrentSessionStatus()
         await todosTask
         return inboxRecovered && statusRecovered && !Task.isCancelled && currentSession?.id == session.id
     }
@@ -2454,11 +2494,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     nonisolated static func sameParts(_ lhs: [OCPart], _ rhs: [OCPart]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        guard let left = try? encoder.encode(lhs), let right = try? encoder.encode(rhs) else { return false }
-        return left == right
+        lhs == rhs
     }
 
     nonisolated static func messagesBeforeRevert(
@@ -3104,7 +3140,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         for attempt in 0..<2 {
             do {
-                let files = try await messagesService.loadTurnFileChanges(
+                let summaries = try await messagesService.loadTurnFileChangeSummaries(
                     sessionID: sessionID,
                     userMessageID: userMessageID
                 )
@@ -3114,11 +3150,10 @@ final class ChatClient: SSEEventHandlerDelegate {
                     return
                 }
 
-                let summaries = files.map(TurnFileChangeSummary.init(file:))
                 message.setTurnFileChanges(summaries)
                 cachedTurnDiffSummariesByMessageID[message.id] = summaries
                 resolvedTurnDiffAssistantIDs.insert(message.id)
-                if !files.isEmpty {
+                if !summaries.isEmpty {
                     timelineVersion &+= 1
                     contentVersion &+= 1
                 }
@@ -3279,9 +3314,16 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         }
 
-        // Load config first — we need filter lists before selecting a model
-        let configResult = await providersService!.loadConfig()
-        guard isCurrent() else { return }
+        // Fetch config and providers concurrently — both endpoints are independent,
+        // and we apply config filter lists before resolving model selections below.
+        async let configTask = providersService!.loadConfig()
+        async let providersTask = providersService!.loadProviders()
+
+        let configResult = await configTask
+        guard isCurrent() else {
+            _ = try? await providersTask
+            return
+        }
         self.enabledProviders = configResult.enabledProviders
         self.disabledProviders = configResult.disabledProviders
 
@@ -3298,7 +3340,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         configReportedDefault = configDefault
 
         do {
-            let result = try await providersService!.loadProviders()
+            let result = try await providersTask
             guard isCurrent() else { return }
             self.providers = result.providers
             self.connectedProviderIDs = result.connectedProviderIDs

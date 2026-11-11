@@ -209,11 +209,29 @@ final class MessagesService {
             throw OpenCodeError.notConnected
         }
 
-        return try await client.getSessionDiff(sessionID: sessionID, messageID: userMessageID)
-            .map(ReviewFileChange.init(diff:))
-            .sorted { lhs, rhs in
-                lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
-            }
+        let diffs = try await client.getSessionDiff(sessionID: sessionID, messageID: userMessageID)
+        return await Task.detached(priority: .utility) {
+            diffs
+                .map(ReviewFileChange.init(diff:))
+                .sorted { lhs, rhs in
+                    lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+                }
+        }.value
+    }
+
+    func loadTurnFileChangeSummaries(sessionID: String, userMessageID: String) async throws -> [TurnFileChangeSummary] {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+
+        let diffs = try await client.getSessionDiff(sessionID: sessionID, messageID: userMessageID)
+        return await Task.detached(priority: .utility) {
+            diffs
+                .map(TurnFileChangeSummary.init(diff:))
+                .sorted { lhs, rhs in
+                    lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+                }
+        }.value
     }
 
     // MARK: - Undo

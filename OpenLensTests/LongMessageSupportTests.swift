@@ -184,6 +184,64 @@ struct LongMessageSupportTests {
         #expect(!ChatNotificationService.containsReminderRequest(body))
     }
 
+    @Test func structuralSamePartsComparesNestedToolPayloadsWithoutJSONSerialization() {
+        let base = OCPart(
+            id: "part_1",
+            sessionID: "ses_1",
+            messageID: "msg_1",
+            type: .tool,
+            metadata: ["nested": AnyCodable(["attempt": 1, "tags": ["fast", "safe"]])],
+            callID: "call_1",
+            tool: "bash",
+            state: OCToolState(status: .completed, input: AnyCodable(["cmd": "ls"]), output: "ok")
+        )
+        let identical = OCPart(
+            id: "part_1",
+            sessionID: "ses_1",
+            messageID: "msg_1",
+            type: .tool,
+            metadata: ["nested": AnyCodable(["attempt": 1, "tags": ["fast", "safe"]])],
+            callID: "call_1",
+            tool: "bash",
+            state: OCToolState(status: .completed, input: AnyCodable(["cmd": "ls"]), output: "ok")
+        )
+        let changed = OCPart(
+            id: "part_1",
+            sessionID: "ses_1",
+            messageID: "msg_1",
+            type: .tool,
+            metadata: ["nested": AnyCodable(["attempt": 2, "tags": ["fast", "safe"]])],
+            callID: "call_1",
+            tool: "bash",
+            state: OCToolState(status: .completed, input: AnyCodable(["cmd": "ls"]), output: "ok")
+        )
+
+        #expect(ChatClient.sameParts([base], [identical]))
+        #expect(!ChatClient.sameParts([base], [changed]))
+    }
+
+    @Test func largeFileDiffUsesMyersFallbackWithoutMatrixExplosion() {
+        let before = (1...650).map { "func line\($0)() { print(\($0)) }" }.joined(separator: "\n")
+        var afterArray = (1...650).map { "func line\($0)() { print(\($0)) }" }
+        afterArray[10] = "func line11() { print(\"updated\") }"
+        afterArray[620] = "func line621() { print(\"updatedTail\") }"
+        let after = afterArray.joined(separator: "\n")
+
+        let file = ReviewFileChange(
+            path: "Large.swift",
+            status: "M",
+            additions: 2,
+            deletions: 2,
+            beforeText: before,
+            afterText: after
+        )
+        let hunks = UnifiedDiffBuilder.makeHunks(file: file)
+
+        #expect(hunks.count == 2)
+        #expect(hunks.flatMap(\.lines).contains { $0.kind == .added && $0.text.contains("updated") })
+        #expect(hunks.flatMap(\.lines).contains { $0.kind == .added && $0.text.contains("updatedTail") })
+    }
+
     private func makeChat() -> ChatClient {
         let connection = ConnectionManager()
         return ChatClient(

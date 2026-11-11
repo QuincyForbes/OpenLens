@@ -296,13 +296,20 @@ final class SavedConnectionsStore {
     /// Updates model selection for a specific connection.
     func updateModelSelection(connectionID: String, providerID: String, modelID: String, variant: String?) {
         guard let index = connections.firstIndex(where: { $0.id == connectionID }) else { return }
-        connections[index].selectedProviderID = providerID
-        connections[index].selectedModelID = modelID
-        connections[index].selectedVariant = variant
-        connections[index].recentModelSelections = Self.updatedRecentModelSelections(
+        let updatedRecent = Self.updatedRecentModelSelections(
             existing: connections[index].recentModelSelections ?? [],
             selected: SavedModelSelection(providerID: providerID, modelID: modelID)
         )
+        guard connections[index].selectedProviderID != providerID
+            || connections[index].selectedModelID != modelID
+            || connections[index].selectedVariant != variant
+            || connections[index].recentModelSelections != updatedRecent else {
+            return
+        }
+        connections[index].selectedProviderID = providerID
+        connections[index].selectedModelID = modelID
+        connections[index].selectedVariant = variant
+        connections[index].recentModelSelections = updatedRecent
         persist()
     }
 
@@ -310,16 +317,22 @@ final class SavedConnectionsStore {
     /// connection's saved selection.
     func recordRecentModelSelection(connectionID: String, providerID: String, modelID: String) {
         guard let index = connections.firstIndex(where: { $0.id == connectionID }) else { return }
-        connections[index].recentModelSelections = Self.updatedRecentModelSelections(
+        let updatedRecent = Self.updatedRecentModelSelections(
             existing: connections[index].recentModelSelections ?? [],
             selected: SavedModelSelection(providerID: providerID, modelID: modelID)
         )
+        guard connections[index].recentModelSelections != updatedRecent else { return }
+        connections[index].recentModelSelections = updatedRecent
         persist()
     }
 
     /// Updates the default model for a specific connection.
     func updateDefaultModelSelection(connectionID: String, providerID: String, modelID: String) {
         guard let index = connections.firstIndex(where: { $0.id == connectionID }) else { return }
+        guard connections[index].defaultProviderID != providerID
+            || connections[index].defaultModelID != modelID else {
+            return
+        }
         connections[index].defaultProviderID = providerID
         connections[index].defaultModelID = modelID
         persist()

@@ -427,9 +427,7 @@ final class WorkspaceService {
                 return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
         guard connection.client === client, catalogClient === client else { return [] }
-        if !sorted.isEmpty {
-            cachedSlashActionsByDirectory[cacheKey] = sorted
-        }
+        cachedSlashActionsByDirectory[cacheKey] = sorted
         return sorted
     }
 
@@ -442,7 +440,7 @@ final class WorkspaceService {
         resetCatalogCache(using: client)
 
         let contextDirectory = await client.currentContextDirectory() ?? "nil"
-        if let cached = cachedSkillsByDirectory[contextDirectory], !cached.isEmpty {
+        if let cached = cachedSkillsByDirectory[contextDirectory] {
             return cached
         }
         do {
@@ -456,9 +454,7 @@ final class WorkspaceService {
                 }
                 .sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
             guard connection.client === client, catalogClient === client else { return [] }
-            if !loaded.isEmpty {
-                cachedSkillsByDirectory[contextDirectory] = loaded
-            }
+            cachedSkillsByDirectory[contextDirectory] = loaded
             return loaded
         } catch {
             Logger.api.error("WorkspaceService failed to load skills for context directory \(contextDirectory, privacy: .public): \(error.localizedDescription, privacy: .public)")

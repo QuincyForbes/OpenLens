@@ -173,8 +173,12 @@ struct SessionsListView: View {
 
     /// Chats that pass the repository, status and search filters, in catalog order.
     private var filteredSessions: [OCSession] {
+        filteredSessions(from: repositorySessions)
+    }
+
+    private func filteredSessions(from scopedSessions: [OCSession]) -> [OCSession] {
         let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        return repositorySessions.filter { session in
+        return scopedSessions.filter { session in
             let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
             switch sessionFilter {
             case .all:
@@ -196,6 +200,22 @@ struct SessionsListView: View {
             }
             return true
         }
+    }
+
+    private func filterCounts(in scopedSessions: [OCSession]) -> SessionFilterCounts {
+        var counts = SessionFilterCounts()
+        for session in scopedSessions {
+            let isBusy = SessionListOrganization.isWorking(sessionStatuses[session.id])
+            if isBusy {
+                counts.running += 1
+            } else if session.hasUnreadResult {
+                counts.unread += 1
+            }
+            if attentionSessionIDs.contains(session.id) {
+                counts.attention += 1
+            }
+        }
+        return counts
     }
 
     private var groupedSessions: [SessionProjectGroup] {
@@ -307,7 +327,8 @@ struct SessionsListView: View {
             var lastAttentionRefresh = Date()
             var iteration = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                let sseHealthy = connection.sseClient?.state == .connected
+                try? await Task.sleep(for: .seconds(sseHealthy ? 6 : 2))
                 guard !Task.isCancelled else { return }
                 iteration += 1
                 // Desktop viewing can change idle rows without an active-entry
@@ -315,8 +336,8 @@ struct SessionsListView: View {
                 let refreshAttention = Date().timeIntervalSince(lastAttentionRefresh) >= 30
                 await loadSessionStatuses(refreshAttention: refreshAttention)
                 if refreshAttention { lastAttentionRefresh = Date() }
-                // Pending permissions, questions and forms change rarely; three
-                // small inbox reads every ~6s keep the "Needs You" pill honest.
+                // Pending permissions, questions and forms change rarely; back
+                // off inbox reads while SSE is live.
                 if iteration % 3 == 0 {
                     await refreshAttentionSessions()
                 }
@@ -398,15 +419,24 @@ struct SessionsListView: View {
 
     private var sessionList: some View {
         let repositories = self.repositories
+        let scopedSessions = self.repositorySessions
+        let visibleMatches = filteredSessions(from: scopedSessions)
         // Rows only name their repository when the timeline mixes several of them.
         let showsRepositoryOnRows = layout != .repository && selectedRepositoryID == nil && repositories.count > 1
         return ScrollView {
             LazyVStack(spacing: isSidebar ? 12 : 18) {
-                listControls(repositories: repositories)
+                listControls(repositories: repositories, scopedSessions: scopedSessions)
 
                 switch layout {
                 case .focus, .recent:
-                    let sections = timelineSections
+                    let sections = layout == .focus
+                        ? SessionListOrganization.focus(
+                            from: visibleMatches,
+                            statuses: sessionStatuses,
+                            attentionIDs: attentionSessionIDs,
+                            pinnedIDs: sessionsService.pinnedSessionIDs
+                        )
+                        : SessionListOrganization.timeline(from: visibleMatches, statuses: sessionStatuses)
                     if sections.isEmpty {
                         noMatchingSessionsView
                     }
@@ -414,12 +444,18 @@ struct SessionsListView: View {
                         timelineSection(section, showsRepository: showsRepositoryOnRows)
                     }
                 case .repository:
-                    let groups = groupedSessions
+                    let groups = SessionListOrganization.groups(
+                        from: visibleMatches,
+                        statuses: sessionStatuses,
+                        sortOrder: sortOrder,
+                        repositoryIndex: repositoryIndex
+                    )
+                    let alwaysVisibleIDs = alwaysVisibleSessionIDs
                     if groups.isEmpty {
                         noMatchingSessionsView
                     }
                     ForEach(groups) { group in
-                        projectSection(group)
+                        projectSection(group, alwaysVisibleIDs: alwaysVisibleIDs)
                     }
                 }
             }
@@ -446,7 +482,10 @@ struct SessionsListView: View {
         }
     }
 
-    private func listControls(repositories: [SessionProjectGroup]) -> some View {
+    private func listControls(
+        repositories: [SessionProjectGroup],
+        scopedSessions: [OCSession]
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if isSidebar {
                 TextField("Search sessions or repositories", text: $searchQuery)
@@ -462,9 +501,9 @@ struct SessionsListView: View {
             .accessibilityIdentifier("sessions.layout")
 
             organizationBar(repositories: repositories)
-            sessionFilterBar
+            sessionFilterBar(scopedSessions: scopedSessions)
 
-            if let nextWaiting = repositorySessions.first(where: { attentionSessionIDs.contains($0.id) }) {
+            if let nextWaiting = scopedSessions.first(where: { attentionSessionIDs.contains($0.id) }) {
                 Button {
                     openedSessionIDs.insert(nextWaiting.id)
                     onSelect(nextWaiting)
@@ -569,8 +608,8 @@ struct SessionsListView: View {
         .contentShape(Rectangle())
     }
 
-    private var sessionFilterBar: some View {
-        let counts = filterCounts
+    private func sessionFilterBar(scopedSessions: [OCSession]) -> some View {
+        let counts = filterCounts(in: scopedSessions)
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(SessionFilter.allCases) { filter in
@@ -619,7 +658,7 @@ struct SessionsListView: View {
 
                 if counts.unread > 0 {
                     Button {
-                        markSessionsAsRead(repositorySessions)
+                        markSessionsAsRead(scopedSessions)
                     } label: {
                         HStack(spacing: 5) {
                             if isMarkingAllRead {
@@ -647,9 +686,12 @@ struct SessionsListView: View {
         }
     }
 
-    private func projectSection(_ group: SessionProjectGroup) -> some View {
+    private func projectSection(
+        _ group: SessionProjectGroup,
+        alwaysVisibleIDs: Set<String>
+    ) -> some View {
         let isExpanded = isSearching || expandedProjectIDs.contains(group.id)
-        let collapsedSessions = group.visibleSessions(keeping: alwaysVisibleSessionIDs)
+        let collapsedSessions = group.visibleSessions(keeping: alwaysVisibleIDs)
         let hiddenSessionCount = group.sessions.count - collapsedSessions.count
         let displayedSessions = isExpanded ? group.sessions : collapsedSessions
         let workingCount = group.sessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }.count

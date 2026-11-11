@@ -165,12 +165,15 @@ struct ModelPickerView: View {
             loadingState
         } else if groupedModels.isEmpty {
             emptyState
-        } else if filteredModels.isEmpty {
-            noSearchResultsState
-        } else if isRetroChat {
-            retroModelList
         } else {
-            standardModelList
+            let filter = computeFilter(for: searchQuery)
+            if filter.matchingIDs.isEmpty {
+                noSearchResultsState
+            } else if isRetroChat {
+                retroModelList(filter: filter)
+            } else {
+                standardModelList(filter: filter)
+            }
         }
     }
 
@@ -219,7 +222,7 @@ struct ModelPickerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var standardModelList: some View {
+    private func standardModelList(filter: FilterResult) -> some View {
         List {
             if activeConfigurationAction == nil,
                searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -292,23 +295,23 @@ struct ModelPickerView: View {
                 }
             }
 
-            if !filteredFavoriteModels.isEmpty {
+            if !filter.favorites.isEmpty {
                 Section("Favorites") {
-                    ForEach(filteredFavoriteModels) { model in
+                    ForEach(filter.favorites) { model in
                         modelRow(model, showsProviderBadge: true)
                     }
                 }
             }
 
-            if !filteredRecentModels.isEmpty {
+            if !filter.recent.isEmpty {
                 Section(AppText.recentModels) {
-                    ForEach(filteredRecentModels) { model in
+                    ForEach(filter.recent) { model in
                         modelRow(model, showsProviderBadge: true)
                     }
                 }
             }
 
-            ForEach(filteredGroupedModels, id: \.provider) { group in
+            ForEach(filter.grouped, id: \.provider) { group in
                 Section(group.provider) {
                     ForEach(group.models) { model in
                         modelRow(model)
@@ -321,7 +324,7 @@ struct ModelPickerView: View {
         .background(Color.appBackground)
     }
 
-    private var retroModelList: some View {
+    private func retroModelList(filter: FilterResult) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 if activeConfigurationAction == nil {
@@ -335,15 +338,15 @@ struct ModelPickerView: View {
                     providerFilterBar
                 }
 
-                if !filteredFavoriteModels.isEmpty {
-                    retroModelSection("Favorites", models: filteredFavoriteModels, showsProviderBadge: true)
+                if !filter.favorites.isEmpty {
+                    retroModelSection("Favorites", models: filter.favorites, showsProviderBadge: true)
                 }
 
-                if !filteredRecentModels.isEmpty {
-                    retroModelSection(AppText.recentModels, models: filteredRecentModels, showsProviderBadge: true)
+                if !filter.recent.isEmpty {
+                    retroModelSection(AppText.recentModels, models: filter.recent, showsProviderBadge: true)
                 }
 
-                ForEach(filteredGroupedModels, id: \.provider) { group in
+                ForEach(filter.grouped, id: \.provider) { group in
                     retroModelSection(group.provider, models: group.models)
                 }
             }
@@ -717,10 +720,6 @@ struct ModelPickerView: View {
         var grouped: [(provider: String, models: [ChatClient.SelectableModel])]
     }
 
-    private var filterResult: FilterResult {
-        return computeFilter(for: searchQuery)
-    }
-
     private func computeFilter(for query: String) -> FilterResult {
         let queryMatching = Self.models(matching: query, from: allModels)
         let providerScoped = queryMatching.filter { model in
@@ -764,23 +763,6 @@ struct ModelPickerView: View {
         return result
     }
 
-
-    private var filteredModels: [ChatClient.SelectableModel] {
-        let ids = filterResult.matchingIDs
-        return allModels.filter { ids.contains($0.id) }
-    }
-
-    private var filteredFavoriteModels: [ChatClient.SelectableModel] {
-        filterResult.favorites
-    }
-
-    private var filteredRecentModels: [ChatClient.SelectableModel] {
-        filterResult.recent
-    }
-
-    private var filteredGroupedModels: [(provider: String, models: [ChatClient.SelectableModel])] {
-        filterResult.grouped
-    }
 
     static func models(
         matching query: String,

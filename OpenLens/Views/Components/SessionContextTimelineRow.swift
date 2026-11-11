@@ -26,29 +26,43 @@ struct SessionContextTimelineRow: View {
                 label
             } else {
                 DisclosureGroup(isExpanded: $isExpanded) {
+                    let previewInfo = Self.inlineDetailsPreview(entry.details)
                     // Same rule as message bubbles: per-Text selection fights
                     // scrolling, so copying goes through a menu and a sheet.
-                    LinkedPlainText(text: entry.details, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                        .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
-                        .foregroundStyle(ink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 6)
-                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .contextMenu {
-                            Button {
-                                UIPasteboard.general.string = entry.details
-                            } label: {
-                                Label(AppText.copyMessage, systemImage: "doc.on.doc")
-                            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        LinkedPlainText(text: previewInfo.text, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                            .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
+                            .foregroundStyle(ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if previewInfo.isTruncated {
                             Button {
                                 selectableDetails = SelectableDetails(text: entry.details)
                             } label: {
-                                Label("Select Text", systemImage: "text.cursor")
+                                Label("Read full output", systemImage: "arrow.up.left.and.arrow.down.right")
+                                    .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.semibold))
+                                    .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
                             }
+                            .buttonStyle(.plain)
                         }
-                        .sheet(item: $selectableDetails) { item in
-                            SelectableTextSheet(text: item.text)
+                    }
+                    .padding(.top, 6)
+                    .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .contextMenu {
+                        Button {
+                            UIPasteboard.general.string = entry.details
+                        } label: {
+                            Label(AppText.copyMessage, systemImage: "doc.on.doc")
                         }
+                        Button {
+                            selectableDetails = SelectableDetails(text: entry.details)
+                        } label: {
+                            Label("Select Text", systemImage: "text.cursor")
+                        }
+                    }
+                    .sheet(item: $selectableDetails) { item in
+                        SelectableTextSheet(text: item.text)
+                    }
                 } label: {
                     label
                 }
@@ -121,5 +135,20 @@ struct SessionContextTimelineRow: View {
             case nil: "info.circle"
             }
         }
+    }
+
+    private static let maximumInlineDetailCharacters = 2_000
+
+    private static func inlineDetailsPreview(_ text: String) -> (text: String, isTruncated: Bool) {
+        guard text.utf8.count > maximumInlineDetailCharacters,
+              let cut = text.index(
+                  text.startIndex,
+                  offsetBy: maximumInlineDetailCharacters,
+                  limitedBy: text.endIndex
+              ),
+              cut < text.endIndex else {
+            return (text, false)
+        }
+        return (String(text[..<cut]) + "…", true)
     }
 }

@@ -226,6 +226,10 @@ struct MarkdownContentView: View {
     private static let linkDetector = try? NSDataDetector(
         types: NSTextCheckingResult.CheckingType.link.rawValue
     )
+    private static let linkDetectorLock = NSLock()
+    private static let domainCandidateRegex = try? NSRegularExpression(
+        pattern: #"[A-Za-z0-9-]\.[A-Za-z]{2,}(/|\b)"#
+    )
 
     /// Cheap pre-check before the data detector: a scheme, `www.`, or a
     /// domain-looking token such as `github.com/foo` or `example.dev`.
@@ -233,7 +237,9 @@ struct MarkdownContentView: View {
         if text.contains("://") || text.contains("www.") || text.contains("mailto:") {
             return true
         }
-        return text.range(of: #"[A-Za-z0-9-]\.[A-Za-z]{2,}(/|\b)"#, options: .regularExpression) != nil
+        guard text.contains("."), let domainCandidateRegex else { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return domainCandidateRegex.firstMatch(in: text, options: [], range: range) != nil
     }
 
     /// Plain prose (no Markdown) with bare URLs made tappable, or nil when the
@@ -251,13 +257,17 @@ struct MarkdownContentView: View {
     /// Bare URLs in prose become tappable. Markdown links already carry a
     /// `.link` attribute and only get styled. The bubble's `foregroundStyle`
     /// would otherwise paint links the same as body text, so the run itself
-    /// carries the color and underline. Runs on `parserQueue`, never main.
+    /// carries the color and underline. Synchronized because both `parserQueue`
+    /// and `MainActor` (`linkedPlainText`) invoke link detection.
     private static func applyingDetectedLinks(to attributed: AttributedString, linkColor: Color?) -> AttributedString {
         var result = attributed
         if let linkDetector {
             let plain = String(result.characters)
             if containsLinkCandidate(plain) {
-                let matches = linkDetector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain))
+                let nsRange = NSRange(plain.startIndex..., in: plain)
+                let matches = linkDetectorLock.withLock {
+                    linkDetector.matches(in: plain, range: nsRange)
+                }
                 for match in matches {
                     guard let url = match.url,
                           let range = Range(match.range, in: result),

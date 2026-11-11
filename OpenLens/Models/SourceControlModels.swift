@@ -1,6 +1,6 @@
 import Foundation
 
-struct ReviewFilePatchHunk: Hashable, Sendable {
+nonisolated struct ReviewFilePatchHunk: Hashable, Sendable {
     let oldStart: Int
     let oldLines: Int
     let newStart: Int
@@ -97,7 +97,7 @@ struct ReviewFilePatchHunk: Hashable, Sendable {
     }
 }
 
-struct ReviewFileChange: Identifiable, Hashable, Sendable {
+nonisolated struct ReviewFileChange: Identifiable, Hashable, Sendable {
     let path: String
     let status: String
     let additions: Int
@@ -135,12 +135,13 @@ struct ReviewFileChange: Identifiable, Hashable, Sendable {
         } else {
             patchHunks = ReviewFilePatchHunk.parseUnifiedDiff(diff.unifiedPatchText)
         }
+        let counts = diff.resolvedLineCounts(using: patchHunks)
 
         self.init(
             path: normalizedPath?.nilIfBlank ?? "Unknown file",
             status: diff.resolvedStatus,
-            additions: diff.resolvedAdditions,
-            deletions: diff.resolvedDeletions,
+            additions: counts.additions,
+            deletions: counts.deletions,
             beforeText: diff.before?.isEmpty == false ? diff.before : nil,
             afterText: diff.after?.isEmpty == false ? diff.after : nil,
             patchHunks: patchHunks
@@ -206,7 +207,7 @@ struct ReviewFileChange: Identifiable, Hashable, Sendable {
 ///
 /// Full before/after contents are deliberately loaded on demand so a long
 /// transcript does not retain every historical file body in memory.
-struct TurnFileChangeSummary: Identifiable, Hashable, Sendable {
+nonisolated struct TurnFileChangeSummary: Identifiable, Hashable, Sendable {
     let path: String
     let status: String
     let additions: Int
@@ -232,6 +233,18 @@ struct TurnFileChangeSummary: Identifiable, Hashable, Sendable {
             status: file.status,
             additions: file.additions,
             deletions: file.deletions
+        )
+    }
+
+    init(diff: OCFileDiff) {
+        let normalizedPath = diff.resolvedPath?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let counts = diff.resolvedLineCounts(using: nil)
+        self.init(
+            path: normalizedPath?.nilIfBlank ?? "Unknown file",
+            status: diff.resolvedStatus,
+            additions: counts.additions,
+            deletions: counts.deletions
         )
     }
 }

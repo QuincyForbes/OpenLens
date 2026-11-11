@@ -56,8 +56,9 @@ nonisolated enum SkillMention {
         from text: String,
         skillIDs: some Sequence<String>
     ) -> (text: String, skillIDs: [String]) {
+        guard text.contains("@") else { return (text, []) }
         let catalog = catalog(of: skillIDs)
-        guard !catalog.isEmpty, text.contains("@") else { return (text, []) }
+        guard !catalog.isEmpty else { return (text, []) }
 
         var remaining = ""
         var ids: [String] = []
@@ -105,8 +106,9 @@ nonisolated enum SkillMention {
         in text: String,
         skillIDs: some Sequence<String>
     ) -> [(id: String, range: Range<String.Index>)] {
+        guard text.contains("@") else { return [] }
         let catalog = catalog(of: skillIDs)
-        guard !catalog.isEmpty, text.contains("@") else { return [] }
+        guard !catalog.isEmpty else { return [] }
 
         var matches: [(id: String, range: Range<String.Index>)] = []
         var index = text.startIndex

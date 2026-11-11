@@ -428,7 +428,7 @@ nonisolated struct OCMessage: Codable, Identifiable, Sendable {
     case assistant
 }
 
- struct OCTokenUsage: Codable, Sendable {
+nonisolated struct OCTokenUsage: Codable, Equatable, Sendable {
     let input: Int?
     let output: Int?
     let reasoning: Int?
@@ -451,7 +451,7 @@ nonisolated struct OCMessage: Codable, Identifiable, Sendable {
     }
 }
 
- struct OCCacheTokens: Codable, Sendable {
+nonisolated struct OCCacheTokens: Codable, Equatable, Sendable {
     let read: Int?
     let write: Int?
 }
@@ -525,7 +525,7 @@ nonisolated struct OCMessageWithParts: Codable, Identifiable, Sendable {
     }
 }
 
- enum OCPartType: String, Codable, Sendable {
+nonisolated enum OCPartType: String, Codable, Equatable, Sendable {
     case text
     case reasoning
     case tool
@@ -547,7 +547,7 @@ nonisolated struct OCMessageWithParts: Codable, Identifiable, Sendable {
     }
 }
 
-nonisolated struct OCPart: Codable, Identifiable, Sendable {
+nonisolated struct OCPart: Codable, Equatable, Identifiable, Sendable {
     let id: String
     let sessionID: String
     let messageID: String
@@ -696,7 +696,7 @@ nonisolated struct OCToolFile: Codable, Hashable, Sendable {
     }
 }
 
-nonisolated struct OCToolState: Codable, Sendable {
+nonisolated struct OCToolState: Codable, Equatable, Sendable {
     /// One `Tool.Content` item. Unknown or malformed items decode as nil so
     /// they can't hide the rest of the result.
     private struct ContentItem: Decodable {
@@ -866,7 +866,7 @@ nonisolated enum OCToolStatus: String, Codable, Sendable {
     }
 }
 
-nonisolated struct OCToolTime: Codable, Sendable {
+nonisolated struct OCToolTime: Codable, Equatable, Sendable {
     let start: Double?
     let end: Double?
 }
@@ -2335,10 +2335,10 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
         } else {
             id = (try? container.decode(String.self, forKey: .id)) ?? ""
         }
-        contextEntry = try? SessionContextEntry(from: decoder)
         // An unknown non-chat entry must not fail the page because it carries
         // fields whose future shapes differ from today's chat schema.
         guard type == "user" || type == "assistant" else {
+            contextEntry = try? SessionContextEntry(from: decoder)
             time = nil
             text = nil
             files = []
@@ -2351,6 +2351,7 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
             error = nil
             return
         }
+        contextEntry = nil
         time = try? container.decodeIfPresent(OCMessageTime.self, forKey: .time)
         text = try container.decodeIfPresent(String.self, forKey: .text)
         files = (try? container.decodeIfPresent([OptionalFile].self, forKey: .files))?
@@ -2671,18 +2672,26 @@ nonisolated struct OCFileDiff: Codable, Sendable {
     }
 
     var resolvedAdditions: Int {
-        additions ?? derivedLineCounts.additions
+        additions ?? derivedLineCounts(using: nil).additions
     }
 
     var resolvedDeletions: Int {
-        deletions ?? derivedLineCounts.deletions
+        deletions ?? derivedLineCounts(using: nil).deletions
+    }
+
+    func resolvedLineCounts(using precomputedHunks: [ReviewFilePatchHunk]? = nil) -> (additions: Int, deletions: Int) {
+        if let additions, let deletions {
+            return (additions, deletions)
+        }
+        let derived = derivedLineCounts(using: precomputedHunks)
+        return (additions ?? derived.additions, deletions ?? derived.deletions)
     }
 
     var unifiedPatchText: String? {
         diff?.nilIfBlank ?? patchText?.nilIfBlank
     }
 
-    private var derivedLineCounts: (additions: Int, deletions: Int) {
+    private func derivedLineCounts(using precomputedHunks: [ReviewFilePatchHunk]?) -> (additions: Int, deletions: Int) {
         if let patch {
             return patch.hunks.reduce(into: (additions: 0, deletions: 0)) { counts, hunk in
                 for line in hunk.lines {
@@ -2695,7 +2704,7 @@ nonisolated struct OCFileDiff: Codable, Sendable {
             }
         }
 
-        let parsedHunks = ReviewFilePatchHunk.parseUnifiedDiff(unifiedPatchText)
+        let parsedHunks = precomputedHunks ?? ReviewFilePatchHunk.parseUnifiedDiff(unifiedPatchText)
         if !parsedHunks.isEmpty {
             return parsedHunks.reduce(into: (additions: 0, deletions: 0)) { counts, hunk in
                 for line in hunk.lines {
@@ -3085,8 +3094,47 @@ nonisolated struct OCTodo: Identifiable, Codable, Sendable {
 
 // MARK: - AnyCodable (utility for dynamic JSON)
 
-nonisolated struct AnyCodable: Codable {
+nonisolated struct AnyCodable: Codable, Equatable {
     let value: Any
+
+    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
+        valuesEqual(lhs.value, rhs.value)
+    }
+
+    private static func valuesEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+        switch (lhs, rhs) {
+        case (is NSNull, is NSNull):
+            return true
+        case let (l as Bool, r as Bool):
+            return l == r
+        case let (l as Int, r as Int):
+            return l == r
+        case let (l as Double, r as Double):
+            return l == r
+        case let (l as Int, r as Double):
+            return Double(l) == r
+        case let (l as Double, r as Int):
+            return l == Double(r)
+        case let (l as String, r as String):
+            return l == r
+        case let (l as [Any], r as [Any]):
+            guard l.count == r.count else { return false }
+            for (leftItem, rightItem) in zip(l, r) where !valuesEqual(leftItem, rightItem) {
+                return false
+            }
+            return true
+        case let (l as [String: Any], r as [String: Any]):
+            guard l.count == r.count else { return false }
+            for (key, leftValue) in l {
+                guard let rightValue = r[key], valuesEqual(leftValue, rightValue) else {
+                    return false
+                }
+            }
+            return true
+        default:
+            return false
+        }
+    }
 
     init(_ value: Any) {
         self.value = value

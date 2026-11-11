@@ -402,12 +402,16 @@ final class MeridianUsageService {
         return data
     }
 
-    nonisolated private static func makeSession() -> URLSession {
+    nonisolated private static let sharedSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.timeoutIntervalForRequest = 6
         config.timeoutIntervalForResource = 10
         return URLSession(configuration: config)
+    }()
+
+    nonisolated private static func makeSession() -> URLSession {
+        sharedSession
     }
 
     nonisolated static let fixtureSnapshot = MeridianUsageSnapshot(
