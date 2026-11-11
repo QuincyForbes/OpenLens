@@ -57,29 +57,64 @@ private struct MacHoverHighlightModifier: ViewModifier {
 }
 
 #if targetEnvironment(macCatalyst)
-/// Configures native macOS window chrome and minimum split-view dimensions.
+/// Configures native macOS window chrome and minimum split-view dimensions once per scene.
 struct MacWindowSceneConfigurator: UIViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
-        view.isUserInteractionEnabled = false
-        DispatchQueue.main.async {
-            Self.configureIfNeeded(from: view)
+        let view = WindowAttachView { host in
+            context.coordinator.configureIfNeeded(from: host)
         }
+        view.isUserInteractionEnabled = false
         return view
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            Self.configureIfNeeded(from: uiView)
+        context.coordinator.configureIfNeeded(from: uiView)
+    }
+
+    private final class WindowAttachView: UIView {
+        var onAttach: ((UIView) -> Void)?
+
+        init(onAttach: @escaping (UIView) -> Void) {
+            self.onAttach = onAttach
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window != nil {
+                onAttach?(self)
+            }
         }
     }
 
-    private static func configureIfNeeded(from view: UIView) {
-        guard let windowScene = view.window?.windowScene else { return }
-        windowScene.sizeRestrictions?.minimumSize = CGSize(width: 860, height: 580)
-        if let titlebar = windowScene.titlebar {
-            titlebar.toolbarStyle = .unified
-            titlebar.titleVisibility = .hidden
+    final class Coordinator {
+        private weak var configuredScene: UIWindowScene?
+
+        func configureIfNeeded(from view: UIView) {
+            guard let windowScene = view.window?.windowScene,
+                  configuredScene !== windowScene else {
+                return
+            }
+            configuredScene = windowScene
+            if let restrictions = windowScene.sizeRestrictions {
+                let maxSize = restrictions.maximumSize
+                let minW = maxSize.width > 0 ? min(860, maxSize.width) : 860
+                let minH = maxSize.height > 0 ? min(580, maxSize.height) : 580
+                restrictions.minimumSize = CGSize(width: minW, height: minH)
+            }
+            if let titlebar = windowScene.titlebar {
+                titlebar.toolbarStyle = .unified
+                titlebar.titleVisibility = .hidden
+            }
         }
     }
 }
@@ -152,16 +187,21 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
         }
 
         func installIfNeeded(near anchorView: UIView) {
-            let config = UIPasteConfiguration(
-                acceptableTypeIdentifiers: ComposerItemImporter.acceptableTypeIdentifiers
-            )
+            if let tv = attachedTextView, tv.window != nil, tv.pasteDelegate === self {
+                return
+            }
+            if let tf = attachedTextField, tf.window != nil, tf.pasteDelegate === self {
+                return
+            }
             var ancestor: UIView? = anchorView.superview
             var depth = 0
             while let container = ancestor, depth < 5 {
                 if let textView = Self.findDescendant(ofType: UITextView.self, in: container) {
                     if attachedTextView !== textView {
                         uninstall()
-                        textView.pasteConfiguration = config
+                        textView.pasteConfiguration = UIPasteConfiguration(
+                            acceptableTypeIdentifiers: ComposerItemImporter.acceptableTypeIdentifiers
+                        )
                         textView.pasteDelegate = self
                         attachedTextView = textView
                     }
@@ -170,7 +210,9 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
                 if let textField = Self.findDescendant(ofType: UITextField.self, in: container) {
                     if attachedTextField !== textField {
                         uninstall()
-                        textField.pasteConfiguration = config
+                        textField.pasteConfiguration = UIPasteConfiguration(
+                            acceptableTypeIdentifiers: ComposerItemImporter.acceptableTypeIdentifiers
+                        )
                         textField.pasteDelegate = self
                         attachedTextField = textField
                     }

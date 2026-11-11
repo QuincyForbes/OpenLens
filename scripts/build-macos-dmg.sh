@@ -43,6 +43,21 @@ ditto "$APP_PATH" "$STAGING_DIR/OpenLens.app"
 # launch OpenLens.app directly without amfid rejecting an unsigned Mach-O binary.
 echo "[build-macos-dmg] Ad-hoc signing OpenLens.app..."
 codesign --force --deep --sign - "$STAGING_DIR/OpenLens.app"
+
+echo "[build-macos-dmg] Smoke-testing OpenLens.app startup on macOS..."
+"$STAGING_DIR/OpenLens.app/Contents/MacOS/OpenLens" &
+SMOKE_PID=$!
+sleep 3
+if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
+  SMOKE_EXIT=0
+  wait "$SMOKE_PID" || SMOKE_EXIT=$?
+  echo "[build-macos-dmg] ERROR: OpenLens.app crashed or exited during launch smoke test (exit code $SMOKE_EXIT)!" >&2
+  exit 1
+fi
+kill "$SMOKE_PID" 2>/dev/null || true
+wait "$SMOKE_PID" 2>/dev/null || true
+echo "[build-macos-dmg] Startup smoke test passed!"
+
 ln -s /Applications "$STAGING_DIR/Applications"
 
 echo "[build-macos-dmg] Packaging DMG -> $OUTPUT_DMG"

@@ -11,9 +11,105 @@ permissions:
   contents: write
 
 jobs:
-  build-ipa:
-    # The arm64 macOS pool has been failing to allocate runners. This image
-    # includes Xcode 26 and iOS 26 simulators on the Intel runner pool.
+  build-macos:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Using Xcode: $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build, Smoke-Test & Package macOS DMG (Universal Mac Catalyst)
+        run: |
+          mkdir -p ./build
+          tr -d '\r' < ./scripts/build-macos-dmg.sh > ./build/build-macos-dmg.lf.sh
+          bash ./build/build-macos-dmg.lf.sh
+
+      - name: Upload macOS DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenLens-macOS-dmg
+          path: OpenLens-macOS.dmg
+          if-no-files-found: error
+
+  build-ios:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Using Xcode: $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build OpenLens (Release iOS)
+        run: |
+          xcodebuild \
+            -project OpenLens.xcodeproj \
+            -scheme OpenLens \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA & Extract Release Metadata
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/OpenLens.app"
+          test -d "$APP_PATH"
+          rm -rf build/ipa Payload OpenLens.ipa build/release-meta.env
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/OpenLens.app
+          (cd build/ipa && ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/OpenLens.ipa")
+          ls -lh "$GITHUB_WORKSPACE/OpenLens.ipa"
+
+          PLIST="$APP_PATH/Info.plist"
+          MARKETING_VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$PLIST")
+          BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$PLIST")
+          printf "MARKETING_VERSION=%s\nBUILD_NUMBER=%s\n" "$MARKETING_VERSION" "$BUILD_NUMBER" > build/release-meta.env
+          cat build/release-meta.env
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenLens-ipa
+          path: OpenLens.ipa
+          if-no-files-found: error
+
+      - name: Upload Release Metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-meta
+          path: build/release-meta.env
+          if-no-files-found: error
+
+  test-ios:
     runs-on: macos-15-intel
     steps:
       - name: Checkout
@@ -67,61 +163,47 @@ jobs:
           name: session-layout-screenshots
           path: build/screenshots/
 
-      - name: Build OpenLens (Release iOS)
-        run: |
-          xcodebuild \
-            -project OpenLens.xcodeproj \
-            -scheme OpenLens \
-            -configuration Release \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath build/DerivedData \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+  publish-release:
+    needs:
+      - build-macos
+      - build-ios
+      - test-ios
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Package IPA
-        run: |
-          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/OpenLens.app"
-          test -d "$APP_PATH"
-          rm -rf build/ipa Payload OpenLens.ipa
-          mkdir -p build/ipa/Payload
-          cp -R "$APP_PATH" build/ipa/Payload/OpenLens.app
-          (cd build/ipa && ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/OpenLens.ipa")
-          ls -lh "$GITHUB_WORKSPACE/OpenLens.ipa"
-
-      - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
+      - name: Download IPA Artifact
+        uses: actions/download-artifact@v4
         with:
           name: OpenLens-ipa
-          path: OpenLens.ipa
-          if-no-files-found: error
+          path: .
 
-      - name: Build & Package macOS DMG (Universal Mac Catalyst)
-        run: |
-          mkdir -p ./build
-          tr -d '\r' < ./scripts/build-macos-dmg.sh > ./build/build-macos-dmg.lf.sh
-          bash ./build/build-macos-dmg.lf.sh
-
-      - name: Upload macOS DMG Artifact
-        uses: actions/upload-artifact@v4
+      - name: Download macOS DMG Artifact
+        uses: actions/download-artifact@v4
         with:
           name: OpenLens-macOS-dmg
-          path: OpenLens-macOS.dmg
-          if-no-files-found: error
+          path: .
+
+      - name: Download Release Metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-meta
+          path: .
 
       - name: Publish GitHub Release
-        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PLIST="build/DerivedData/Build/Products/Release-iphoneos/OpenLens.app/Info.plist"
-          MARKETING_VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$PLIST")
-          BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$PLIST")
+          set -euo pipefail
+          source ./release-meta.env
+          test -f OpenLens.ipa
+          test -f OpenLens-macOS.dmg
           TAG="v${MARKETING_VERSION}.${BUILD_NUMBER}-perf"
           SUBJECT=$(git log -1 --pretty=%s)
           TITLE="OpenLens v${MARKETING_VERSION} (${BUILD_NUMBER}) — ${SUBJECT}"
-          NOTES="Automated release from commit ${GITHUB_SHA} (Actions run ${GITHUB_RUN_ID}). Full hosted iOS simulator test suite, iOS Release IPA, and Universal macOS DMG (Apple Silicon + Intel) passed. Note: OpenLens.ipa is unsigned (sign before iOS install); on macOS, drag OpenLens.app to Applications (if Gatekeeper prompts on first launch, right-click Open or run: xattr -cr /Applications/OpenLens.app)."
+          NOTES="Automated release from commit ${GITHUB_SHA} (Actions run ${GITHUB_RUN_ID}). Full hosted iOS simulator test suite, iOS Release IPA, and Universal macOS DMG (Apple Silicon + Intel, launch-smoke-tested) passed. Note: OpenLens.ipa is unsigned (sign before iOS install); on macOS, drag OpenLens.app to Applications (if Gatekeeper prompts on first launch, right-click Open or run: xattr -cr /Applications/OpenLens.app)."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" OpenLens.ipa OpenLens-macOS.dmg --clobber

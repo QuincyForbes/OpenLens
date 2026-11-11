@@ -319,6 +319,11 @@ struct ChatView: View {
                 isOnScreen = true
                 displayedResponseState = chatClient.responseState
                 if ScreenshotFixtures.opensActiveContext { showContextStatus = true }
+                #if targetEnvironment(macCatalyst)
+                if (initialSession != nil || chatClient.currentSession != nil), !chatClient.isOfflinePreviewMode {
+                    isInputFocused = true
+                }
+                #endif
             }
             .onDisappear {
                 isOnScreen = false

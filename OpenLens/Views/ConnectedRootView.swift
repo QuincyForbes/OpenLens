@@ -73,6 +73,9 @@ struct ConnectedRootView: View {
             }
         }
         .tint(Color.appPrimary)
+        .background {
+            DesktopKeyboardShortcutsResponder(chatClient: chatClient)
+        }
         .sheet(item: permissionSheetBinding) { permission in
             PermissionRequestSheet(
                 permission: permission,
@@ -609,5 +612,75 @@ private struct ChatDetailPlaceholderView: View {
                 }
             }
         }
+    }
+}
+
+/// Registers hardware keyboard shortcuts via the responder chain (`UIViewController.keyCommands`)
+/// rather than `Scene.commands` (`UIMenuBuilder`), avoiding UIKit menu-identifier crashes on
+/// Mac Catalyst when no `Settings.bundle` is present.
+private struct DesktopKeyboardShortcutsResponder: View {
+    let chatClient: ChatClient
+
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        ZStack {
+            Button("") { router.requestNewSession() }
+                .keyboardShortcut("n", modifiers: .command)
+
+            Button("") { router.requestSessionSwitcher() }
+                .keyboardShortcut("k", modifiers: .command)
+
+            Button("") { router.requestFocusSessionSearch() }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+
+            Button("") { router.selectedTab = .settings }
+                .keyboardShortcut(",", modifiers: .command)
+
+            Button("") { router.selectedTab = .chat }
+                .keyboardShortcut("1", modifiers: .command)
+
+            Button("") { router.selectedTab = .review }
+                .keyboardShortcut("2", modifiers: .command)
+
+            Button("") { router.selectedTab = .workspace }
+                .keyboardShortcut("3", modifiers: .command)
+
+            Button("") { router.selectedTab = .settings }
+                .keyboardShortcut("4", modifiers: .command)
+
+            Button("") { router.requestToggleSidebar() }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+
+            if chatClient.currentSession != nil {
+                Button("") { router.requestChooseModel() }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+
+                Button("") { router.requestPasteClipboard() }
+                    .keyboardShortcut("v", modifiers: [.command, .option])
+
+                Button("") { Task { await chatClient.refreshCurrentSessionFromServer() } }
+                    .keyboardShortcut("r", modifiers: .command)
+            }
+
+            if chatClient.canAttachFiles {
+                Button("") { router.requestAttachFile() }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+            }
+
+            if chatClient.hasDisplayedMessages {
+                Button("") { router.requestJumpToLatest() }
+                    .keyboardShortcut(.downArrow, modifiers: [.command, .shift])
+            }
+
+            if chatClient.isLoading {
+                Button("") { chatClient.abort() }
+                    .keyboardShortcut(".", modifiers: .command)
+            }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
