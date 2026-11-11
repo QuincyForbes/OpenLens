@@ -1,9 +1,11 @@
+#if canImport(ActivityKit) && !targetEnvironment(macCatalyst)
 import ActivityKit
+#endif
 import Foundation
 
 /// ActivityAttributes for the coding agent Live Activity.
 /// This file must be compiled into both the main app target and the widget extension target.
-nonisolated struct OpenLensActivityAttributes: ActivityAttributes {
+nonisolated struct OpenLensActivityAttributes: Codable, Hashable, Sendable {
     /// Session the turn belongs to; tapping the activity opens it.
     var sessionID: String?
     /// Project directory v1 replies are routed to.
@@ -66,6 +68,10 @@ nonisolated struct OpenLensActivityAttributes: ActivityAttributes {
         }
     }
 }
+
+#if canImport(ActivityKit) && !targetEnvironment(macCatalyst)
+nonisolated extension OpenLensActivityAttributes: ActivityAttributes {}
+#endif
 
 // MARK: - Session Links
 

@@ -615,6 +615,9 @@ struct OpenLensApp: App {
                 Text(AppText.switchMessage)
             }
         }
+        #if targetEnvironment(macCatalyst)
+        .defaultSize(width: 1120, height: 780)
+        #endif
     }
 
     // MARK: - Preview Modes

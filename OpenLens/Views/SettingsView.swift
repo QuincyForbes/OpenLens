@@ -272,6 +272,7 @@ struct SettingsView: View {
                     )
                 }
 
+                #if !targetEnvironment(macCatalyst)
                 if debugFeaturesEnabled {
                     Button {
                         liveActivity.previewLiveActivity()
@@ -284,6 +285,7 @@ struct SettingsView: View {
                         Label(AppText.settingsLiveActivityDismissTitle, systemImage: "xmark.circle")
                     }
                 }
+                #endif
             }
             .listRowBackground(Color.appSurface)
             #endif

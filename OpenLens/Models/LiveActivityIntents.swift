@@ -1,3 +1,4 @@
+#if canImport(ActivityKit) && !targetEnvironment(macCatalyst)
 import ActivityKit
 import AppIntents
 import Foundation
@@ -99,3 +100,4 @@ private enum LiveActivityReplySender {
         await activity.update(ActivityContent(state: state, staleDate: nil))
     }
 }
+#endif

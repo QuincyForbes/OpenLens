@@ -33,9 +33,11 @@ struct QRCodeCameraView: View {
 
             if cameraAccess == .authorized {
                 Color.black
+                #if !targetEnvironment(macCatalyst)
                 if cameraIsActive {
                     CameraPreview(onCodeFound: handleCode)
                 }
+                #endif
 
                 if showsViewfinder {
                     QRViewfinderCorners()
@@ -110,6 +112,9 @@ struct QRCodeCameraView: View {
     }
 
     private func updateCameraAccess() async {
+        #if targetEnvironment(macCatalyst)
+        cameraAccess = .unavailable
+        #else
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
@@ -131,6 +136,7 @@ struct QRCodeCameraView: View {
         @unknown default:
             cameraAccess = .unavailable
         }
+        #endif
     }
 
     private static func hasVideoCaptureDevice() async -> Bool {
@@ -181,6 +187,7 @@ private struct QRViewfinderCorners: Shape {
 
 // MARK: - AVFoundation Camera Preview
 
+#if !targetEnvironment(macCatalyst)
 private struct CameraPreview: UIViewRepresentable {
     let onCodeFound: (String) -> Void
 
@@ -282,3 +289,4 @@ private struct CameraPreview: UIViewRepresentable {
         }
     }
 }
+#endif

@@ -189,6 +189,57 @@ targets:
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
         TARGETED_DEVICE_FAMILY: 1,2
 
+  OpenLensMac:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      - path: OpenLens
+        excludes:
+          - "**/*.entitlements"
+          - "**/*.md"
+          - Assets.xcassets
+          - Models/LiveActivityIntents.swift
+      - path: OpenLens/Assets.xcassets
+        buildPhase: resources
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_ENTITLEMENTS: ""
+        CODE_SIGN_STYLE: "$(OPENLENS_CODE_SIGN_STYLE)"
+        CURRENT_PROJECT_VERSION: 36
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_PREVIEWS: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Info.plist
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSSupportsLiveActivities: NO
+        INFOPLIST_KEY_OpenLensAppGroup: $(OPENLENS_APP_GROUP)
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+          - "@executable_path/Frameworks"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        MARKETING_VERSION: 2.1
+        PRODUCT_BUNDLE_IDENTIFIER: "$(OPENLENS_APP_BUNDLE_ID).mac"
+        PRODUCT_NAME: OpenLens
+        REGISTER_APP_GROUPS: NO
+        STRING_CATALOG_GENERATE_SYMBOLS: YES
+        SUPPORTED_PLATFORMS: macosx iphoneos iphonesimulator
+        SUPPORTS_MACCATALYST: YES
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        TARGETED_DEVICE_FAMILY: 2,6
+
   OpenLensTests:
     type: bundle.unit-test
     platform: iOS
@@ -260,6 +311,19 @@ schemes:
     profile:
       config: Release
       executable: OpenLens
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  OpenLensMac:
+    build:
+      targets:
+        OpenLensMac: all
+    run:
+      config: Debug
+    profile:
+      config: Release
     analyze:
       config: Debug
     archive:

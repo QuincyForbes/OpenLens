@@ -3037,11 +3037,8 @@ final class ChatClient: SSEEventHandlerDelegate {
               !ignoredAssistantMessageIDs.contains(tail.id) else {
             return
         }
-        var remaining = messages
-        let inFlight = remaining.removeLast()
-        inFlight.isStreaming = true
-        messages = remaining
-        pendingAssistantMessage = inFlight
+        tail.isStreaming = true
+        pendingAssistantMessage = tail
     }
 
     private func reconcileCurrentSessionStatus(_ status: OCSessionStatus?) {

@@ -35,7 +35,9 @@ nonisolated final class DirectOpenCodeTransport: OpenCodeTransport, @unchecked S
         configuration.timeoutIntervalForResource = 300
         configuration.waitsForConnectivity = false
         configuration.httpMaximumConnectionsPerHost = 8
+        #if !targetEnvironment(macCatalyst)
         configuration.multipathServiceType = .handover
+        #endif
         configuration.httpAdditionalHeaders = ["Accept-Encoding": "br, gzip, deflate"]
         return URLSession(configuration: configuration)
     }()
@@ -107,7 +109,9 @@ nonisolated private final class DirectOpenCodeEventStream: NSObject, OpenCodeEve
             configuration.urlCache = nil
             configuration.timeoutIntervalForRequest = 75
             configuration.timeoutIntervalForResource = .infinity
+            #if !targetEnvironment(macCatalyst)
             configuration.multipathServiceType = .handover
+            #endif
 
             let delegateQueue = OperationQueue()
             delegateQueue.underlyingQueue = deliveryQueue

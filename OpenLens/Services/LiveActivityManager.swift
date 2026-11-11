@@ -1,3 +1,4 @@
+#if canImport(ActivityKit) && !targetEnvironment(macCatalyst)
 import ActivityKit
 import Foundation
 import os
@@ -194,3 +195,17 @@ final class LiveActivityManager: LiveActivityProviding {
         }
     }
 }
+#else
+import Foundation
+
+@MainActor
+final class LiveActivityManager: LiveActivityProviding {
+    init() {}
+    var isActive: Bool { false }
+    func startActivity(sessionID: String?, directory: String?) {}
+    func update(pendingUserResponse: OpenLensActivityAttributes.PendingUserResponse?) {}
+    func endActivity(phase: OpenLensActivityAttributes.Phase) {}
+    func dismissImmediately() {}
+    func previewLiveActivity() {}
+}
+#endif

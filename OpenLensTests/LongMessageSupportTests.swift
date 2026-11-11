@@ -347,7 +347,7 @@ struct LongMessageSupportTests {
         #expect(chat.isLoading)
         #expect(chat.pendingAssistantMessage?.id == "msg_assistant")
         #expect(chat.pendingAssistantMessage?.isStreaming == true)
-        #expect(chat.messages.isEmpty)
+        #expect(chat.messages.count == 1)
         #expect(chat.displayedMessages.count == 1)
     }
 
