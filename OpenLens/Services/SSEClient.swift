@@ -8,6 +8,13 @@ func isTerminalSSEHTTPStatus(_ statusCode: Int) -> Bool {
 /// Metadata from `message.updated` decoded before it reaches MainActor. These
 /// updates are usually small, but OpenCode is free to attach a large summary
 /// or model payload, so their JSON work belongs with the SSE reducer too.
+nonisolated enum GlobalSessionActivityEvent: Sendable, Equatable {
+    case busy(sessionID: String, isRetry: Bool)
+    case ended(sessionID: String)
+    case updated(sessionID: String)
+    case deleted(sessionID: String)
+}
+
 nonisolated struct SSEMessageUpdate {
     let sessionID: String
     let messageID: String
@@ -796,6 +803,10 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
     /// receives bytes. Keep-alives sent as SSE comments never become events,
     /// so liveness must be derived from the transport, not from parsed records.
     var onLiveness: (() -> Void)?
+
+    /// Called on the main queue whenever any session on the server starts, finishes,
+    /// updates, or is deleted — across all workspace directories.
+    var onGlobalSessionActivity: ((GlobalSessionActivityEvent) -> Void)?
 
     // MARK: - Private state (protected by `queue`)
 
@@ -2499,7 +2510,15 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
             if let encoded = value as? String {
                 value = try JSONSerialization.jsonObject(with: Data(encoded.utf8))
             }
-            if let envelope = value as? [String: Any], envelope["type"] != nil, envelope["data"] != nil {
+            if let envelope = value as? [String: Any],
+               let rawType = envelope["type"] as? String,
+               envelope["data"] != nil {
+                if let activity = Self.extractGlobalSessionActivity(
+                    type: rawType,
+                    payload: envelope["data"] as? [String: Any]
+                ) {
+                    emitGlobalSessionActivity(activity)
+                }
                 return try v2EventAdapter.event(envelope, directory: contextDirectory)
             }
             if let eventName, !eventName.isEmpty, var payload = value as? [String: Any] {
@@ -2509,14 +2528,86 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
                    let nestedPayload = try? JSONSerialization.jsonObject(with: nestedData) as? [String: Any] {
                     payload = nestedPayload
                 }
+                if let activity = Self.extractGlobalSessionActivity(type: eventName, payload: payload) {
+                    emitGlobalSessionActivity(activity)
+                }
                 return OCEvent(type: eventName, properties: AnyCodable(payload))
             }
         }
         if let legacyEvent = try? JSONDecoder().decode(OCEvent.self, from: data) {
+            if let activity = Self.extractGlobalSessionActivity(
+                type: legacyEvent.type,
+                payload: legacyEvent.properties?.value as? [String: Any]
+            ) {
+                emitGlobalSessionActivity(activity)
+            }
             return legacyEvent
         }
 
         throw OpenCodeError.invalidPayload("Unsupported SSE event payload.")
+    }
+
+    private func emitGlobalSessionActivity(_ activity: GlobalSessionActivityEvent) {
+        guard onGlobalSessionActivity != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onGlobalSessionActivity?(activity)
+        }
+    }
+
+    private static func extractGlobalSessionActivity(
+        type: String,
+        payload: [String: Any]?
+    ) -> GlobalSessionActivityEvent? {
+        let sessionID: String? = {
+            if let direct = payload?["sessionID"] as? String, StreamDisplayValue.fitsIdentifier(direct) {
+                return direct
+            }
+            if let info = payload?["info"] as? [String: Any],
+               let nested = info["id"] as? String,
+               StreamDisplayValue.fitsIdentifier(nested) {
+                return nested
+            }
+            if let directID = payload?["id"] as? String,
+               type.hasPrefix("session."),
+               StreamDisplayValue.fitsIdentifier(directID) {
+                return directID
+            }
+            return nil
+        }()
+        guard let sessionID else { return nil }
+
+        switch type {
+        case "session.execution.started":
+            return .busy(sessionID: sessionID, isRetry: false)
+        case "session.status":
+            let statusType = ((payload?["status"] as? [String: Any])?["type"] as? String)?.lowercased()
+                ?? (payload?["type"] as? String)?.lowercased()
+            switch statusType {
+            case "busy":
+                return .busy(sessionID: sessionID, isRetry: false)
+            case "retry":
+                return .busy(sessionID: sessionID, isRetry: true)
+            case "idle":
+                return .ended(sessionID: sessionID)
+            default:
+                return nil
+            }
+        case "session.idle",
+             "session.execution.succeeded",
+             "session.execution.failed",
+             "session.execution.interrupted":
+            return .ended(sessionID: sessionID)
+        case "session.created",
+             "session.renamed",
+             "session.updated",
+             "session.moved",
+             "session.viewed":
+            return .updated(sessionID: sessionID)
+        case "session.deleted":
+            return .deleted(sessionID: sessionID)
+        default:
+            return nil
+        }
     }
 
     private func extractEventField(from line: String) -> String? {

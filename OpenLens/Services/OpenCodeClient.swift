@@ -12,6 +12,7 @@ actor OpenCodeClient {
     private var authHeader: String?
     private var contextDirectory: String?
     private var contextRevision: UInt = 0
+    private var knownV1Worktrees: Set<String> = []
     private(set) var capabilities: OpenCodeServerCapabilities?
 
     init(
@@ -31,7 +32,9 @@ actor OpenCodeClient {
         contextRevision &+= 1
         self.baseURL = baseURL
         self.authHeader = authHeader
-        self.contextDirectory = contextDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let normalized = contextDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        self.contextDirectory = normalized
+        self.knownV1Worktrees = normalized.map { [$0] } ?? []
         self.capabilities = nil
     }
 
@@ -40,6 +43,9 @@ actor OpenCodeClient {
         let previousDirectory = contextDirectory
         contextRevision &+= 1
         let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        if let normalizedDirectory {
+            knownV1Worktrees.insert(normalizedDirectory)
+        }
         Logger.api.debug("OpenCode client context directory changed from \(self.contextDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         self.contextDirectory = normalizedDirectory
         return previousDirectory
@@ -297,15 +303,63 @@ actor OpenCodeClient {
                 includesLocation: false
             )
             return Dictionary(
-                uniqueKeysWithValues: response.data.keys.map {
+                response.data.keys.map {
                     (
                         $0,
                         OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil)
                     )
-                }
+                },
+                uniquingKeysWith: { _, latest in latest }
             )
         }
-        return try await get("/session/status")
+
+        // V1 `/session/status` is scoped to `x-opencode-directory`. When only
+        // one directory is known, keep the single-request path; when multiple
+        // project worktrees exist, merge active statuses across all of them so
+        // switching folders never forgets a running agent in another repository.
+        var candidateDirectories: [String] = []
+        var seen = Set<String>()
+        for dir in ([contextDirectory].compactMap { $0 } + Array(knownV1Worktrees)) {
+            if seen.insert(dir).inserted {
+                candidateDirectories.append(dir)
+            }
+        }
+        guard candidateDirectories.count > 1 else {
+            return try await get("/session/status")
+        }
+
+        return try await withThrowingTaskGroup(of: (Bool, [String: OCSessionStatus]).self) { group in
+            for (index, directory) in candidateDirectories.enumerated() {
+                let isPrimary = index == 0
+                group.addTask {
+                    do {
+                        let statuses = try await self.getSessionStatus(inDirectory: directory)
+                        return (true, statuses)
+                    } catch {
+                        if isPrimary { throw error }
+                        return (false, [:])
+                    }
+                }
+            }
+            var merged: [String: OCSessionStatus] = [:]
+            for try await (_, directoryStatuses) in group {
+                for (sessionID, status) in directoryStatuses {
+                    if let existing = merged[sessionID], existing.type != .idle, status.type == .idle {
+                        continue
+                    }
+                    merged[sessionID] = status
+                }
+            }
+            return merged
+        }
+    }
+
+    private func getSessionStatus(inDirectory directory: String) async throws -> [String: OCSessionStatus] {
+        var request = makeRequest(path: "/session/status", method: "GET")
+        request.setValue(directory, forHTTPHeaderField: "x-opencode-directory")
+        let (data, response) = try await transport.data(for: request)
+        try validateResponse(response, data: data)
+        return try decode(data)
     }
 
     func abortSession(id: String) async throws -> Bool {
@@ -1025,7 +1079,13 @@ actor OpenCodeClient {
             return try await getV2("/api/project")
         }
 
-        return try await get("/project")
+        let projects: [OCProject] = try await get("/project")
+        for worktree in projects.compactMap(\.worktree) {
+            if let clean = worktree.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
+                knownV1Worktrees.insert(clean)
+            }
+        }
+        return projects
     }
 
     /// Fetches both path and project metadata in a single `/api/location` request on v2,

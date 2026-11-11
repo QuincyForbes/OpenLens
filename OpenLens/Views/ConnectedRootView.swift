@@ -189,6 +189,7 @@ struct ConnectedRootView: View {
         case .chat:
             SessionsListView(
                 initialState: initialSessions,
+                selectedSessionID: router.selectedChatSessionID,
                 onSelect: selectChatSession,
                 onDelete: handleDeletedSession,
                 newSessionModel: { await chatClient.newSessionModelPreference() }

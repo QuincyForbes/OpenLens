@@ -18,6 +18,7 @@ struct ChatHeaderToolbar: ToolbarContent {
     var onSyncSession: (() -> Void)? = nil
     var onScrollToBottom: (() -> Void)? = nil
     var onSwitchSession: (() -> Void)? = nil
+    var otherActiveSessionCount: Int = 0
 
     private var statusColor: Color {
         if visualMode.isRetro {
@@ -68,22 +69,42 @@ struct ChatHeaderToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             VStack(alignment: .center, spacing: 0) {
-                if let onSwitchSession {
-                    Button(action: onSwitchSession) {
-                        HStack(spacing: 5) {
-                            sessionTitleLabel
-                            Image(systemName: "chevron.down")
-                                .font(.caption2.weight(.bold))
+                    if let onSwitchSession {
+                        Button(action: onSwitchSession) {
+                            HStack(spacing: 5) {
+                                sessionTitleLabel
+                                if otherActiveSessionCount > 0 {
+                                    HStack(spacing: 3) {
+                                        Circle()
+                                            .fill(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                            .frame(width: 5, height: 5)
+                                        Text("\(otherActiveSessionCount) active")
+                                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                                            .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        (isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent).opacity(0.14),
+                                        in: Capsule()
+                                    )
+                                }
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2.weight(.bold))
+                            }
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                         }
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(
+                            otherActiveSessionCount > 0
+                                ? "Switch session, \(resolvedSessionTitle), \(otherActiveSessionCount) other active"
+                                : "Switch session, \(resolvedSessionTitle)"
+                        )
+                        .accessibilityIdentifier("chat.switchSession")
+                    } else {
+                        sessionTitleLabel
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Switch session, \(resolvedSessionTitle)")
-                    .accessibilityIdentifier("chat.switchSession")
-                } else {
-                    sessionTitleLabel
-                }
 
                 HStack(spacing: 4) {
                     Circle()

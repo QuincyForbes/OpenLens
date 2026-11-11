@@ -9,14 +9,22 @@ struct SessionSwitcherSheet: View {
 
     @Environment(\.sessionsService) private var sessionsService
     @Environment(\.dismiss) private var dismiss
-    @State private var initialState: SessionsListView.InitialState?
+    @State private var fetchedState: SessionsListView.InitialState?
+
+    private var resolvedInitialState: SessionsListView.InitialState? {
+        if let fetchedState {
+            return fetchedState
+        }
+        let cached = sessionsService.cachedSessions
+        return cached.isEmpty ? nil : .loaded(cached)
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if let initialState {
+                if let resolvedInitialState {
                     SessionsListView(
-                        initialState: initialState,
+                        initialState: resolvedInitialState,
                         selectedSessionID: selectedSessionID,
                         onSelect: onSelect, onDelete: onDelete,
                         newSessionModel: newSessionModel
@@ -33,15 +41,17 @@ struct SessionSwitcherSheet: View {
             }
         }
         .task {
-            guard initialState == nil else { return }
+            guard fetchedState == nil else { return }
             do {
                 let sessions = try await sessionsService.listAllSessions()
                 try Task.checkCancellation()
-                initialState = .loaded(sessions)
+                fetchedState = .loaded(sessions)
             } catch is CancellationError {
                 return
             } catch {
-                initialState = .error(error.localizedDescription)
+                if sessionsService.cachedSessions.isEmpty {
+                    fetchedState = .error(error.localizedDescription)
+                }
             }
         }
     }

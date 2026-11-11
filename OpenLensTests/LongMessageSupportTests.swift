@@ -289,6 +289,68 @@ struct LongMessageSupportTests {
         }
     }
 
+    @Test func sessionsServiceRetainsRunningAgentAcrossSwitchesUntilGlobalEndEvent() {
+        let api = OpenCodeClient(baseURL: URL(string: "https://example.com")!)
+        let connection = ConnectionManager(
+            testClient: api,
+            capabilities: .v1(OCHealthResponse(healthy: true, version: "1.2.0"))
+        )
+        let service = SessionsService(connection: connection)
+        let sessionA = OCSession(id: "ses_a", title: "Repo A", time: .init(created: 1, updated: 2))
+
+        service.setClientObservedActive(true, for: "ses_a", sessionSnapshot: sessionA)
+        #expect(service.effectiveStatuses["ses_a"]?.type == .busy)
+        #expect(service.activeSessionCount(excluding: nil) == 1)
+        #expect(service.activeSessionCount(excluding: "ses_a") == 0)
+
+        // Switching away to another session keeps `ses_a` active in the shared status map.
+        service.promoteToBackgroundRunning(sessionID: "ses_a", sessionSnapshot: sessionA)
+        #expect(service.effectiveStatuses["ses_a"]?.type == .busy)
+        #expect(service.activeSessionCount(excluding: "ses_b") == 1)
+
+        // Global SSE completion clears active status and queues canonical outcome refresh.
+        service.handleGlobalSessionActivity(.ended(sessionID: "ses_a"))
+        #expect(service.effectiveStatuses["ses_a"] == nil)
+        #expect(service.consumePendingCanonicalRefreshIDs() == ["ses_a"])
+    }
+
+    @Test func busySessionStatusReattachesUnfinishedAssistantTailForLiveStreaming() {
+        let chat = makeChat()
+        let session = OCSession(id: "ses_live", title: "Live Session", time: .init(created: 1, updated: 2))
+        chat.prepareForOpeningSession(session)
+
+        let part = OCPart(
+            id: "part_text",
+            sessionID: "ses_live",
+            messageID: "msg_assistant",
+            type: .text,
+            text: "Initial partial "
+        )
+        let unfinishedAssistant = ChatMessage(
+            id: "msg_assistant",
+            role: .assistant,
+            content: "Initial partial ",
+            parts: [part],
+            isStreaming: false,
+            finish: nil
+        )
+        chat.replaceTranscript(
+            SessionTranscript(
+                messages: [unfinishedAssistant],
+                contextEntries: [],
+                entryOrder: ["msg_assistant"]
+            )
+        )
+
+        chat.applyCurrentSessionStatus(OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil))
+
+        #expect(chat.isLoading)
+        #expect(chat.pendingAssistantMessage?.id == "msg_assistant")
+        #expect(chat.pendingAssistantMessage?.isStreaming == true)
+        #expect(chat.messages.isEmpty)
+        #expect(chat.displayedMessages.count == 1)
+    }
+
     private func makeChat() -> ChatClient {
         let connection = ConnectionManager()
         return ChatClient(

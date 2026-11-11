@@ -30,7 +30,39 @@ final class SessionsService {
     private weak var projectsClient: OpenCodeClient?
     private var catalogProjects: [OCProject] = []
     private var catalogGeneration: UInt = 0
+    private var liveStateClientID: ObjectIdentifier?
+    private var storedCachedSessions: [OCSession] = []
+    private var storedServerStatuses: [String: OCSessionStatus] = [:]
+    private var clientObservedActiveSessionIDs: Set<String> = []
+    private var pendingCanonicalRefreshIDs: Set<String> = []
+    private var inFlightSessionRefreshIDs: Set<String> = []
     private var pinsByServer: [String: [String]] = UserDefaults.standard.dictionary(forKey: "sessions.pinsByServer") as? [String: [String]] ?? [:]
+
+    var cachedSessions: [OCSession] {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
+        return storedCachedSessions
+    }
+
+    var effectiveStatuses: [String: OCSessionStatus] {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else {
+            return ScreenshotFixtures.isEnabled ? ScreenshotFixtures.sessionStatuses : [:]
+        }
+        var merged = storedServerStatuses
+        for activeID in clientObservedActiveSessionIDs {
+            if merged[activeID] == nil || merged[activeID]?.type == .idle {
+                merged[activeID] = OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil)
+            }
+        }
+        return merged
+    }
+
+    func activeSessionCount(excluding excludedSessionID: String? = nil) -> Int {
+        effectiveStatuses.reduce(into: 0) { count, entry in
+            guard entry.key != excludedSessionID,
+                  SessionListOrganization.isWorking(entry.value) else { return }
+            count += 1
+        }
+    }
 
     var repositoryProjects: [OCProject] {
         let catalog = connection.client != nil && projectsClient === connection.client ? catalogProjects : []
@@ -77,6 +109,118 @@ final class SessionsService {
 
     init(connection: ConnectionManager) {
         self.connection = connection
+        connection.onGlobalSessionActivity = { [weak self] event in
+            self?.handleGlobalSessionActivity(event)
+        }
+    }
+
+    private func ensureLiveStateScope() -> OpenCodeClient? {
+        guard let client = connection.client else { return nil }
+        let id = ObjectIdentifier(client)
+        if liveStateClientID != id {
+            liveStateClientID = id
+            storedCachedSessions = []
+            storedServerStatuses = [:]
+            clientObservedActiveSessionIDs = []
+            pendingCanonicalRefreshIDs = []
+            inFlightSessionRefreshIDs = []
+        }
+        return client
+    }
+
+    func consumePendingCanonicalRefreshIDs() -> Set<String> {
+        guard ensureLiveStateScope() != nil else { return [] }
+        let ids = pendingCanonicalRefreshIDs
+        pendingCanonicalRefreshIDs.removeAll()
+        return ids
+    }
+
+    /// Keeps a session marked busy in the shared server status map when the user
+    /// navigates away from an actively running chat before the server finishes.
+    func promoteToBackgroundRunning(sessionID: String?, sessionSnapshot: OCSession? = nil) {
+        guard let sessionID, !sessionID.isEmpty, ensureLiveStateScope() != nil else { return }
+        if let sessionSnapshot, sessionSnapshot.id == sessionID {
+            upsertCachedSession(sessionSnapshot)
+        }
+        clientObservedActiveSessionIDs.remove(sessionID)
+        if storedServerStatuses[sessionID] == nil || storedServerStatuses[sessionID]?.type == .idle {
+            storedServerStatuses[sessionID] = OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil)
+        }
+    }
+
+    /// Keeps shared session activity accurate from direct `ChatClient` observation
+    /// (such as sending a prompt, streaming, active subagents, or background shells).
+    func setClientObservedActive(_ isActive: Bool, for sessionID: String?, sessionSnapshot: OCSession? = nil) {
+        guard let sessionID, !sessionID.isEmpty, ensureLiveStateScope() != nil else { return }
+        if let sessionSnapshot, sessionSnapshot.id == sessionID {
+            upsertCachedSession(sessionSnapshot)
+        }
+        if isActive {
+            clientObservedActiveSessionIDs.insert(sessionID)
+        } else {
+            let wasObservedActive = clientObservedActiveSessionIDs.remove(sessionID) != nil
+            if wasObservedActive {
+                pendingCanonicalRefreshIDs.insert(sessionID)
+                refreshSingleCanonicalSessionInBackground(id: sessionID)
+            }
+        }
+    }
+
+    func handleGlobalSessionActivity(_ event: GlobalSessionActivityEvent) {
+        guard ensureLiveStateScope() != nil else { return }
+        switch event {
+        case let .busy(sessionID, isRetry):
+            storedServerStatuses[sessionID] = OCSessionStatus(
+                type: isRetry ? .retry : .busy,
+                attempt: nil,
+                message: nil,
+                next: nil
+            )
+            if !storedCachedSessions.contains(where: { $0.id == sessionID }) {
+                refreshSingleCanonicalSessionInBackground(id: sessionID)
+            }
+        case let .ended(sessionID):
+            storedServerStatuses.removeValue(forKey: sessionID)
+            clientObservedActiveSessionIDs.remove(sessionID)
+            pendingCanonicalRefreshIDs.insert(sessionID)
+            refreshSingleCanonicalSessionInBackground(id: sessionID)
+        case let .updated(sessionID):
+            refreshSingleCanonicalSessionInBackground(id: sessionID)
+        case let .deleted(sessionID):
+            storedServerStatuses.removeValue(forKey: sessionID)
+            clientObservedActiveSessionIDs.remove(sessionID)
+            pendingCanonicalRefreshIDs.remove(sessionID)
+            storedCachedSessions.removeAll { $0.id == sessionID }
+        }
+    }
+
+    private func upsertCachedSession(_ session: OCSession) {
+        guard ensureLiveStateScope() != nil else { return }
+        // Ignore child subagent sessions in the root session catalog.
+        guard session.parentID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return }
+        let resolved = applyingConfirmedViewedMarkers(to: [resolvingProjectDirectory(for: session)]).first ?? session
+        if let index = storedCachedSessions.firstIndex(where: { $0.id == resolved.id }) {
+            storedCachedSessions[index] = resolved
+        } else {
+            storedCachedSessions.insert(resolved, at: 0)
+        }
+        storedCachedSessions = visibleSessions(from: storedCachedSessions)
+    }
+
+    private func refreshSingleCanonicalSessionInBackground(id sessionID: String) {
+        guard let client = ensureLiveStateScope(),
+              inFlightSessionRefreshIDs.insert(sessionID).inserted else { return }
+        Task { [weak self] in
+            defer { self?.inFlightSessionRefreshIDs.remove(sessionID) }
+            guard let self,
+                  let fresh = try? await self.getSession(id: sessionID),
+                  !Task.isCancelled,
+                  self.connection.client === client else {
+                return
+            }
+            self.recordViewedMarker(fresh, client: client)
+            self.upsertCachedSession(fresh)
+        }
     }
 
     // MARK: - List
@@ -149,7 +293,13 @@ final class SessionsService {
             catalogProjects = projects
             projectsClient = client
         }
-        return visibleSessions(from: Self.applyingProjectDirectories(sessions, projects: projects ?? repositoryProjects))
+        let resolved = visibleSessions(
+            from: Self.applyingProjectDirectories(sessions, projects: projects ?? repositoryProjects)
+        )
+        if generation == catalogGeneration, ensureLiveStateScope() === client {
+            storedCachedSessions = applyingConfirmedViewedMarkers(to: resolved)
+        }
+        return resolved
     }
 
     func getSession(id: String) async throws -> OCSession {
@@ -201,7 +351,9 @@ final class SessionsService {
         }
 
         let session = try await client.createSession(title: title, model: model)
-        return resolvingProjectDirectory(for: session)
+        let resolved = resolvingProjectDirectory(for: session)
+        upsertCachedSession(resolved)
+        return resolved
     }
 
     // MARK: - Delete
@@ -217,7 +369,14 @@ final class SessionsService {
         }
 
         let _ = try await client.deleteSession(id: session.id)
-        if connection.client === client, pinnedSessionIDs.contains(session.id) { togglePin(session.id) }
+        if connection.client === client {
+            if pinnedSessionIDs.contains(session.id) { togglePin(session.id) }
+            if ensureLiveStateScope() === client {
+                storedCachedSessions.removeAll { $0.id == session.id }
+                storedServerStatuses.removeValue(forKey: session.id)
+                clientObservedActiveSessionIDs.remove(session.id)
+            }
+        }
     }
 
     // MARK: - Update Title
@@ -246,7 +405,11 @@ final class SessionsService {
         }
 
         let updatedSession = try await client.updateSession(id: session.id, title: newTitle)
-        return resolvingProjectDirectory(for: updatedSession)
+        let resolved = resolvingProjectDirectory(for: updatedSession)
+        if connection.client === client {
+            upsertCachedSession(resolved)
+        }
+        return resolved
     }
 
     // MARK: - Ensure Session
@@ -475,7 +638,11 @@ final class SessionsService {
         guard let client = connection.client else {
             throw OpenCodeError.notConnected
         }
-        return try await client.getSessionStatus()
+        let statuses = try await client.getSessionStatus()
+        if connection.client === client, ensureLiveStateScope() === client {
+            storedServerStatuses = statuses
+        }
+        return statuses
     }
 
     /// Recover terminal and opened-session results independently of the catalog.
@@ -498,6 +665,10 @@ final class SessionsService {
         }
         guard connection.serverCapabilities?.protocolVersion == .v2
                 || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else {
+            if ensureLiveStateScope() != nil {
+                storedServerStatuses = statuses
+                storedCachedSessions = visibleSessions(from: sessions)
+            }
             return SessionExecutionSnapshot(sessions: sessions, statuses: statuses)
         }
         let activeIDs = Set(statuses.filter { $0.value.type != .idle }.map(\.key))
@@ -515,6 +686,10 @@ final class SessionsService {
             if let fresh = freshSessions[session.id] { return fresh }
             failures.insert(session.id)
             return session.withoutExecutionOutcome()
+        }
+        if ensureLiveStateScope() != nil {
+            storedServerStatuses = statuses
+            storedCachedSessions = applyingConfirmedViewedMarkers(to: visibleSessions(from: refreshed))
         }
         return SessionExecutionSnapshot(sessions: refreshed, statuses: statuses, failedOutcomeSessionIDs: failures)
     }

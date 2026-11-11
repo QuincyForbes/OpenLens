@@ -179,7 +179,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     private(set) var composerPastedSnippets: [ComposerPastedSnippet] = []
     private(set) var composerAttachments: [PromptAttachment] = []
     private(set) var isPreparingComposerImage = false
-    var isLoading: Bool = false
+    var isLoading: Bool = false {
+        didSet {
+            if isLoading != oldValue {
+                syncObservedActivityToSessionsService()
+            }
+        }
+    }
     /// True while a follow-up is being admitted to the server-side turn queue.
     var isQueueingPrompt: Bool = false
     /// Follow-ups that were admitted behind the active turn but have not been
@@ -199,7 +205,23 @@ final class ChatClient: SSEEventHandlerDelegate {
         let detail: String?
     }
 
-    private(set) var activeBackgroundWatchers: [BackgroundWatcherItem] = []
+    private(set) var activeBackgroundWatchers: [BackgroundWatcherItem] = [] {
+        didSet {
+            if activeBackgroundWatchers != oldValue {
+                syncObservedActivityToSessionsService()
+            }
+        }
+    }
+
+    private func syncObservedActivityToSessionsService() {
+        guard !isOfflinePreviewMode, !isDemoMode, !isRecordedReplayMode else { return }
+        let hasActiveWork = isLoading || !activeBackgroundWatchers.isEmpty
+        sessionsService?.setClientObservedActive(
+            hasActiveWork,
+            for: currentSession?.id,
+            sessionSnapshot: currentSession
+        )
+    }
     private(set) var notifyWhenDoneSessionIDs: Set<String> = []
     @ObservationIgnored private var hadActiveBackgroundWatchersInSession: Set<String> = []
 
@@ -2009,6 +2031,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     func prepareForOpeningSession(_ session: OCSession) {
         resetCachesForConnectionIfNeeded()
         guard !isDemoMode, !isRecordedReplayMode, currentSession?.id != session.id else { return }
+        if (isLoading || !activeBackgroundWatchers.isEmpty), let previous = currentSession {
+            sessionsService?.promoteToBackgroundRunning(sessionID: previous.id, sessionSnapshot: previous)
+        }
         if isLoading, currentSession?.id != nil {
             liveActivityTracker?.dismiss()
         }
@@ -2842,6 +2867,14 @@ final class ChatClient: SSEEventHandlerDelegate {
         } catch {
             guard currentSession?.id == sessionID, generation == streamSynchronizationGeneration,
                   revision == connection?.projectContextRevision else { return false }
+            if !isLoading,
+               let tail = messages.last,
+               tail.role == .assistant,
+               tail.hasRunningTools,
+               !shouldIgnoreBusyStatus(sessionID: sessionID) {
+                beginExternalResponse()
+                reattachInFlightAssistantMessageIfNeeded()
+            }
             errorMessage = "Failed to refresh session status: \(error.localizedDescription)"
             return false
         }
@@ -2981,7 +3014,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// A short trip to another app keeps the socket alive, so the chat is still
     /// current; anything longer may have been suspended by iOS and must reconcile.
     /// A stream already out of sync or disconnected always reconciles.
-    nonisolated static let foregroundReconcileGrace: TimeInterval = 10
+    nonisolated static let foregroundReconcileGrace: TimeInterval = 5
 
     nonisolated static func shouldReconcileOnForeground(
         awayInterval: TimeInterval,
@@ -2990,6 +3023,25 @@ final class ChatClient: SSEEventHandlerDelegate {
     ) -> Bool {
         guard isConnected, isStreamSynchronized else { return true }
         return awayInterval >= foregroundReconcileGrace
+    }
+
+    /// Promotes an unfinished REST-loaded assistant tail message into `pendingAssistantMessage`
+    /// with `isStreaming = true` so live SSE deltas and tool updates continue seamlessly
+    /// when opening or returning to an already-running session.
+    private func reattachInFlightAssistantMessageIfNeeded() {
+        guard isLoading,
+              pendingAssistantMessage == nil,
+              let tail = messages.last,
+              tail.role == .assistant,
+              (tail.finish == nil || tail.finish?.isEmpty == true || tail.hasRunningTools),
+              !ignoredAssistantMessageIDs.contains(tail.id) else {
+            return
+        }
+        var remaining = messages
+        let inFlight = remaining.removeLast()
+        inFlight.isStreaming = true
+        messages = remaining
+        pendingAssistantMessage = inFlight
     }
 
     private func reconcileCurrentSessionStatus(_ status: OCSessionStatus?) {
@@ -3042,6 +3094,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             if !isLoading || responseState == .idle || responseState == .failed {
                 beginExternalResponse()
             }
+            reattachInFlightAssistantMessageIfNeeded()
         }
     }
 

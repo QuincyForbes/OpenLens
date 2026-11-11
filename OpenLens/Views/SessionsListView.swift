@@ -50,6 +50,7 @@ struct SessionsListView: View {
     @State private var openedSessionIDs: Set<String> = []
     @State private var failedOutcomeSessionIDs: Set<String> = []
     @State private var outcomeRefreshGeneration = 0
+    @State private var attentionRefreshGeneration = 0
 
     @State private var newSessionRequest: NewSessionRequest?
     @State private var sessionToDelete: OCSession?
@@ -306,6 +307,16 @@ struct SessionsListView: View {
         .onChange(of: sessionsService.confirmedViewedMarkers, initial: true) { _, _ in
             sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
         }
+        .onChange(of: sessionsService.effectiveStatuses, initial: true) { _, updatedStatuses in
+            guard !updatedStatuses.isEmpty || !sessionStatuses.isEmpty else { return }
+            if updatedStatuses != sessionStatuses {
+                sessionStatuses = updatedStatuses
+            }
+        }
+        .onChange(of: sessionsService.cachedSessions) { _, updatedCached in
+            guard !updatedCached.isEmpty else { return }
+            mergeCachedSessionsFromService(updatedCached)
+        }
         .onChange(of: sessions, initial: true) { _, _ in
             rebuildRepositoryIndex()
         }
@@ -320,26 +331,31 @@ struct SessionsListView: View {
                 await loadSessionStatuses(refreshInactive: true)
                 await refreshAttentionSessions()
             } else {
-                await loadSessions()
+                await loadSessions(silentlyWhenPopulated: true)
             }
-            guard connection.serverCapabilities?.protocolVersion == .v2
-                    || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else { return }
+            let supportsAttentionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
+                || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes)
             var lastAttentionRefresh = Date()
+            var lastSilentCatalogSync = Date()
             var iteration = 0
             while !Task.isCancelled {
                 let sseHealthy = connection.sseClient?.state == .connected
-                try? await Task.sleep(for: .seconds(sseHealthy ? 6 : 2))
+                try? await Task.sleep(for: .seconds(sseHealthy ? 3 : 2))
                 guard !Task.isCancelled else { return }
                 iteration += 1
                 // Desktop viewing can change idle rows without an active-entry
                 // transition. Reconcile attention periodically while visible.
-                let refreshAttention = Date().timeIntervalSince(lastAttentionRefresh) >= 30
+                let refreshAttention = supportsAttentionOutcomes && Date().timeIntervalSince(lastAttentionRefresh) >= 30
                 await loadSessionStatuses(refreshAttention: refreshAttention)
                 if refreshAttention { lastAttentionRefresh = Date() }
                 // Pending permissions, questions and forms change rarely; back
                 // off inbox reads while SSE is live.
-                if iteration % 3 == 0 {
+                if supportsAttentionOutcomes, iteration % 3 == 0 {
                     await refreshAttentionSessions()
+                }
+                if !ScreenshotFixtures.isEnabled, Date().timeIntervalSince(lastSilentCatalogSync) >= 30 {
+                    lastSilentCatalogSync = Date()
+                    await refreshCatalogSilently()
                 }
             }
         }
@@ -502,6 +518,51 @@ struct SessionsListView: View {
 
             organizationBar(repositories: repositories)
             sessionFilterBar(scopedSessions: scopedSessions)
+
+            let runningSessions = scopedSessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }
+            if !runningSessions.isEmpty, (layout != .focus || sessionFilter != .all) {
+                Button {
+                    if runningSessions.count == 1, let onlyActive = runningSessions.first {
+                        openedSessionIDs.insert(onlyActive.id)
+                        onSelect(onlyActive)
+                    } else {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            sessionFilter = sessionFilter == .running ? .all : .running
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color.appAccent)
+                            .frame(width: 8, height: 8)
+                            .symbolEffect(.pulse)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(runningSessions.count == 1 ? "1 agent active now" : "\(runningSessions.count) agents active now")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.appPrimary)
+                            if let primary = runningSessions.first {
+                                Text(primary.title.isEmpty ? AppText.titleUntitled : primary.title)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appSecondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                        Text(runningSessions.count == 1 ? "Open" : (sessionFilter == .running ? "Show all" : "Show running"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.appAccent)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.appAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("sessions.activeAgentsBanner")
+            }
 
             if let nextWaiting = scopedSessions.first(where: { attentionSessionIDs.contains($0.id) }) {
                 Button {
@@ -906,8 +967,14 @@ struct SessionsListView: View {
                         repositoryChip(for: session)
                     }
                     if isBusy {
-                        Label(statusType == .retry ? "Retrying" : "Working", systemImage: "circle.dotted")
-                            .foregroundStyle(Color.appAccent)
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.appAccent)
+                                .frame(width: 6, height: 6)
+                            Text(statusType == .retry ? "Retrying" : "Working")
+                                .fontWeight(.semibold)
+                        }
+                        .foregroundStyle(Color.appAccent)
                     }
                     Text(formattedDate(session.updatedAt))
                         .foregroundStyle(Color.appSecondary)
@@ -953,9 +1020,17 @@ struct SessionsListView: View {
         .padding(.vertical, compactSessionRows ? 8 : 12)
         .padding(.horizontal, isSidebar ? 10 : 14)
         .background(
-            isSelected ? Color.appTertiary : Color.clear,
+            isSelected
+                ? Color.appTertiary
+                : (isBusy ? Color.appAccent.opacity(0.06) : Color.clear),
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
+        .overlay {
+            if isBusy && !isSelected {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
+            }
+        }
         .contentShape(Rectangle())
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
@@ -1021,12 +1096,15 @@ struct SessionsListView: View {
 
     // MARK: - Side Effects (Service calls)
 
-    private func loadSessions() async {
+    private func loadSessions(silentlyWhenPopulated: Bool = false) async {
         guard !Task.isCancelled, !isLoading else { return }
         let client = connection.client
         outcomeRefreshGeneration &+= 1
         let generation = outcomeRefreshGeneration
-        viewState = .loading
+        let runSilently = silentlyWhenPopulated && !sessions.isEmpty
+        if !runSilently {
+            viewState = .loading
+        }
         refreshWarning = nil
         defer {
             if generation == outcomeRefreshGeneration, case .loading = viewState {
@@ -1036,7 +1114,8 @@ struct SessionsListView: View {
         do {
             let result = try await sessionsService.listAllSessions()
             guard !Task.isCancelled, generation == outcomeRefreshGeneration, connection.client === client else { return }
-            let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs)
+            let pendingServiceIDs = sessionsService.consumePendingCanonicalRefreshIDs()
+            let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs).union(pendingServiceIDs)
             let snapshot = await sessionsService.refreshSessionOutcomes(
                 in: result, previousStatuses: sessionStatuses, openedSessionIDs: requestedIDs
             )
@@ -1050,7 +1129,59 @@ struct SessionsListView: View {
             return
         } catch {
             guard !Task.isCancelled, generation == outcomeRefreshGeneration else { return }
-            viewState = .error(error.localizedDescription)
+            if runSilently {
+                await loadSessionStatuses()
+            } else {
+                viewState = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func refreshCatalogSilently() async {
+        guard !Task.isCancelled, !isLoading else { return }
+        let client = connection.client
+        guard let result = try? await sessionsService.listAllSessions(),
+              !Task.isCancelled,
+              connection.client === client else {
+            return
+        }
+        mergeCachedSessionsFromService(result)
+        lastCatalogRefresh = .now
+    }
+
+    private func mergeCachedSessionsFromService(_ incoming: [OCSession]) {
+        guard !incoming.isEmpty else { return }
+        let existingOutcomesByID = Dictionary(
+            sessions.map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        let merged = incoming.map { fresh -> OCSession in
+            guard fresh.outcome == nil,
+                  let previous = existingOutcomesByID[fresh.id],
+                  previous.outcome != nil,
+                  (fresh.completedResultMarker ?? 0) <= (previous.completedResultMarker ?? 0) else {
+                return fresh
+            }
+            return OCSession(
+                id: fresh.id,
+                projectID: fresh.projectID ?? previous.projectID,
+                directory: fresh.directory ?? previous.directory,
+                parentID: fresh.parentID,
+                title: fresh.title,
+                version: fresh.version,
+                time: fresh.time.idle == nil ? previous.time : fresh.time,
+                share: fresh.share,
+                revert: fresh.revert,
+                agent: fresh.agent,
+                model: fresh.model,
+                outcome: previous.outcome
+            )
+        }
+        let updated = SessionListOrganization.uniqueSessions(
+            sessionsService.applyingConfirmedViewedMarkers(to: merged)
+        )
+        if updated != sessions {
+            sessions = updated
         }
     }
 
@@ -1058,7 +1189,8 @@ struct SessionsListView: View {
         guard !sessions.isEmpty, !Task.isCancelled, !isLoading else { return }
         outcomeRefreshGeneration &+= 1
         let generation = outcomeRefreshGeneration
-        let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs)
+        let pendingServiceIDs = sessionsService.consumePendingCanonicalRefreshIDs()
+        let requestedIDs = openedSessionIDs.union(failedOutcomeSessionIDs).union(pendingServiceIDs)
         let snapshot = await sessionsService.refreshSessionOutcomes(
             in: sessions, previousStatuses: sessionStatuses, openedSessionIDs: requestedIDs, refreshInactive: refreshInactive
         )
@@ -1073,15 +1205,16 @@ struct SessionsListView: View {
 
     private func refreshAttentionSessions(force: Bool = false) async {
         guard !Task.isCancelled else { return }
-        let generation = outcomeRefreshGeneration
+        attentionRefreshGeneration &+= 1
+        let generation = attentionRefreshGeneration
         let client = connection.client
         guard let snapshot = try? await inboxService.loadInbox(maxAge: force ? 0 : 5), !Task.isCancelled else {
-            if force, !Task.isCancelled, generation == outcomeRefreshGeneration, connection.client === client {
+            if force, !Task.isCancelled, generation == attentionRefreshGeneration, connection.client === client {
                 refreshWarning = "Sessions updated, but pending requests could not be refreshed."
             }
             return
         }
-        guard generation == outcomeRefreshGeneration, connection.client === client else { return }
+        guard generation == attentionRefreshGeneration, connection.client === client else { return }
         var ids = Set<String>()
         ids.formUnion(snapshot.permissions.compactMap(\.sessionID))
         ids.formUnion(snapshot.questions.map(\.sessionID))
@@ -1110,8 +1243,14 @@ struct SessionsListView: View {
         if updatedSessions != sessions {
             sessions = updatedSessions
         }
-        if snapshot.statuses != sessionStatuses {
-            sessionStatuses = snapshot.statuses
+        var mergedStatuses = snapshot.statuses
+        for (id, liveStatus) in sessionsService.effectiveStatuses where SessionListOrganization.isWorking(liveStatus) {
+            if mergedStatuses[id] == nil || mergedStatuses[id]?.type == .idle {
+                mergedStatuses[id] = liveStatus
+            }
+        }
+        if mergedStatuses != sessionStatuses {
+            sessionStatuses = mergedStatuses
         }
         if snapshot.failedOutcomeSessionIDs != failedOutcomeSessionIDs {
             failedOutcomeSessionIDs = snapshot.failedOutcomeSessionIDs
@@ -1140,7 +1279,10 @@ struct SessionsListView: View {
         Task {
             defer { isMarkingAllRead = false }
             let result = await sessionsService.markAllRead(in: subset, statuses: sessionStatuses)
-            let updatedByID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.id, $0) })
+            let updatedByID = Dictionary(
+                result.sessions.map { ($0.id, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
             sessions = sessions.map { updatedByID[$0.id] ?? $0 }
             sessions = sessionsService.applyingConfirmedViewedMarkers(to: sessions)
             if result.failedCount > 0 {

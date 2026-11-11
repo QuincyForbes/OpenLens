@@ -60,6 +60,7 @@ final class ConnectionManager: ConnectionProviding {
     private static let pathChangeDebounce: Duration = .seconds(1)
 
     @ObservationIgnored private let localNetworkAccessProbe: any LocalNetworkAccessProbing
+    @ObservationIgnored var onGlobalSessionActivity: ((GlobalSessionActivityEvent) -> Void)?
 
     /// If no heartbeat arrives within this interval, the connection is considered stale.
     /// OpenCode server typically sends heartbeats every ~15-30s; 60s catches zombie sockets quickly.
@@ -284,6 +285,10 @@ final class ConnectionManager: ConnectionProviding {
     }
 
     private func configureSSECallbacks(_ sse: SSEClient) {
+        sse.onGlobalSessionActivity = { [weak self, weak sse] event in
+            guard let self, let sse, self.sseClient === sse else { return }
+            self.onGlobalSessionActivity?(event)
+        }
         sse.onStateChange = { [weak self, weak sse] sseState in
             guard let self, let sse, self.sseClient === sse else { return }
             switch sseState {

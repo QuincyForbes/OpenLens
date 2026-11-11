@@ -210,7 +210,10 @@ struct ChatView: View {
                 } : nil,
                 onSwitchSession: (!chatClient.isOfflinePreviewMode && router != nil) ? {
                     showSessionSwitcher = true
-                } : nil
+                } : nil,
+                otherActiveSessionCount: chatClient.isOfflinePreviewMode
+                    ? 0
+                    : sessionsService.activeSessionCount(excluding: headerSession?.id)
             )
         }
         .onAppear {
@@ -276,6 +279,10 @@ struct ChatView: View {
                 isStreamSynchronized: chatClient.isStreamSynchronized
             ) {
                 chatClient.synchronizeCurrentSessionFromServer()
+            } else if chatClient.isLoading {
+                Task {
+                    await chatClient.refreshCurrentSessionStatus()
+                }
             }
             let shouldForceCatalogRefresh = awayInterval >= ChatClient.foregroundReconcileGrace
             Task {
