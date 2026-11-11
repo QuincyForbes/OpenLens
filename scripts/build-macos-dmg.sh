@@ -43,20 +43,27 @@ ditto "$APP_PATH" "$STAGING_DIR/OpenLens.app"
 # launch OpenLens.app directly without amfid rejecting an unsigned Mach-O binary.
 echo "[build-macos-dmg] Ad-hoc signing OpenLens.app..."
 codesign --force --deep --sign - "$STAGING_DIR/OpenLens.app"
+codesign --verify --deep --strict "$STAGING_DIR/OpenLens.app"
+lipo -info "$STAGING_DIR/OpenLens.app/Contents/MacOS/OpenLens"
 
-echo "[build-macos-dmg] Smoke-testing OpenLens.app startup on macOS..."
-"$STAGING_DIR/OpenLens.app/Contents/MacOS/OpenLens" &
-SMOKE_PID=$!
-sleep 3
-if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
-  SMOKE_EXIT=0
-  wait "$SMOKE_PID" || SMOKE_EXIT=$?
-  echo "[build-macos-dmg] ERROR: OpenLens.app crashed or exited during launch smoke test (exit code $SMOKE_EXIT)!" >&2
-  exit 1
+HOST_MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
+if [[ "${HOST_MACOS_MAJOR:-0}" -ge 26 ]]; then
+  echo "[build-macos-dmg] Smoke-testing OpenLens.app startup on macOS $(sw_vers -productVersion)..."
+  "$STAGING_DIR/OpenLens.app/Contents/MacOS/OpenLens" &
+  SMOKE_PID=$!
+  sleep 3
+  if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
+    SMOKE_EXIT=0
+    wait "$SMOKE_PID" || SMOKE_EXIT=$?
+    echo "[build-macos-dmg] ERROR: OpenLens.app crashed or exited during launch smoke test (exit code $SMOKE_EXIT)!" >&2
+    exit 1
+  fi
+  kill "$SMOKE_PID" 2>/dev/null || true
+  wait "$SMOKE_PID" 2>/dev/null || true
+  echo "[build-macos-dmg] Startup smoke test passed!"
+else
+  echo "[build-macos-dmg] Host macOS $(sw_vers -productVersion) < deployment target 26.0; verified universal binary & ad-hoc signature."
 fi
-kill "$SMOKE_PID" 2>/dev/null || true
-wait "$SMOKE_PID" 2>/dev/null || true
-echo "[build-macos-dmg] Startup smoke test passed!"
 
 ln -s /Applications "$STAGING_DIR/Applications"
 
