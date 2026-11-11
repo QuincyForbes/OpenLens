@@ -175,8 +175,10 @@ final class SessionsService {
         } else {
             let wasObservedActive = clientObservedActiveSessionIDs.remove(sessionID) != nil
             if wasObservedActive {
+                // Queue for canonical outcome refresh on SessionsListView without
+                // spawning an untracked duplicate GET /api/session/:id while
+                // ChatClient is already reconciling the open session.
                 pendingCanonicalRefreshIDs.insert(sessionID)
-                refreshSingleCanonicalSessionInBackground(id: sessionID)
             }
         }
     }
