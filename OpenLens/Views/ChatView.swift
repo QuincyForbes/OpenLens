@@ -111,7 +111,23 @@ struct ChatView: View {
 
     var body: some View {
         let currentContextUsage = chatClient.contextUsageSummary
+        withCommandObservers(
+            withStateObservers(
+                withInteractionSheets(
+                    withAuxiliarySheets(
+                        withLifecycleHooks(
+                            withChromeAndComposer(
+                                chatMainStack,
+                                currentContextUsage: currentContextUsage
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    }
 
+    private var chatMainStack: some View {
         VStack(spacing: 0) {
             ChatMessagesListView(
                 chatClient: chatClient,
@@ -121,59 +137,11 @@ struct ChatView: View {
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
 
             if let attention = pendingAttention {
-                Button(action: attention.open) {
-                    HStack(spacing: 8) {
-                        Image(systemName: attention.icon)
-                            .font(.system(size: 13))
-                            .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
-                        Text(attention.title)
-                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
-                            .foregroundStyle(primaryTextColor)
-                            .lineLimit(1)
-                        Spacer()
-                        Text("Review")
-                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .semibold))
-                            .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background((isRetroChat ? RetroChatStyle.danger : Color.appWarning).opacity(0.10))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(attention.title). Tap to review.")
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                pendingAttentionBanner(attention)
             }
 
             if let error = chatClient.presentedError {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(isRetroChat ? RetroChatStyle.danger : .orange)
-                        .font(.system(size: 13))
-                    Text(error.message)
-                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13))
-                        .foregroundStyle(secondaryTextColor)
-                    Spacer()
-                    Button(error.canRetry ? AppText.tryAgain : AppText.dismiss) {
-                        switch error {
-                        case .location:
-                            chatClient.synchronizeCurrentSessionFromServer()
-                        case .viewing:
-                            chatClient.retryViewingDisplayedResult()
-                        case .operation:
-                            chatClient.dismissError()
-                        }
-                    }
-                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
-                    .foregroundStyle(primaryTextColor)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface)
-                .overlay(alignment: .top) {
-                    (isRetroChat ? RetroChatStyle.ink : Color.appSeparator)
-                        .frame(height: isRetroChat ? 2 : 0.5)
-                }
+                presentedErrorBanner(error)
             }
         }
         .background {
@@ -185,363 +153,423 @@ struct ChatView: View {
                 .padding(.top, 8)
         }
         .overlay {
-            if isDropTargeted, !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.appBackground.opacity(0.84))
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(
-                            Color.appAccent,
-                            style: StrokeStyle(lineWidth: 2, dash: [8, 6])
-                        )
-                    VStack(spacing: 10) {
-                        Image(systemName: "arrow.down.doc.fill")
-                            .font(.system(size: 32, weight: .semibold))
-                            .foregroundStyle(Color.appAccent)
-                        Text("Drop images or text files to attach")
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.appPrimary)
-                        Text("PNG, JPEG, GIF, WebP, HEIC, Markdown, JSON, and source code")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color.appSecondary)
-                    }
-                    .padding(24)
-                }
-                .padding(16)
-                .allowsHitTesting(false)
-                .transition(.opacity)
-            }
+            dropZoneOverlay
         }
-        .onDrop(of: ComposerItemImporter.supportedContentTypes, isTargeted: $isDropTargeted) { providers in
-            guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return false }
-            handleImportedProviders(providers, includePlainText: true)
-            return true
-        }
-        #if targetEnvironment(macCatalyst)
-        .onPasteCommand(of: ComposerItemImporter.supportedContentTypes) { providers in
-            guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return }
-            handleImportedProviders(providers, includePlainText: true)
-        }
-        #endif
-        .safeAreaInset(edge: .bottom) {
-            if chatClient.showsComposer {
-                chatComposerInset(contextUsage: currentContextUsage)
-                    .background {
-                        composerInsetBackground
-                            .ignoresSafeArea(edges: .bottom)
-                    }
-            }
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ChatHeaderToolbar(
-                projectName: chatClient.sessionLocationState == .ready
-                    ? (headerSession?.workspaceDisplayName ?? connection.projectName)
-                    : connection.projectName,
-                branch: connection.branch,
-                connectionState: connection.state,
-                sessionTitle: headerSession?.title,
-                showsRecordingControls: chatClient.isRecordingStream || (debugFeaturesEnabled && chatClient.supportsStreamRecording),
-                isRecordingStream: chatClient.isRecordingStream,
-                visualMode: visualMode,
-                onToggleRecording: {
-                    if chatClient.isRecordingStream {
-                        chatClient.stopStreamRecording()
-                    } else {
-                        chatClient.startStreamRecording()
-                    }
-                },
-                onShowInsights: chatClient.currentSession != nil ? {
-                    showSessionInsights = true
-                } : nil,
-                onShowSessionReview: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
-                    showSessionReview = true
-                } : nil,
-                onShowMeridianUsage: {
-                    showMeridianUsage = true
-                },
-                onShowContext: (chatClient.showsActiveContext || currentContextUsage != nil) ? {
-                    showContextStatus = true
-                } : nil,
-                onRenameSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
-                    renameSessionDraft = chatClient.currentSession?.title ?? ""
-                    showRenameSessionAlert = true
-                } : nil,
-                onSyncSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
-                    Task { await chatClient.refreshCurrentSessionFromServer() }
-                } : nil,
-                onScrollToBottom: chatClient.hasDisplayedMessages ? {
-                    jumpToLatestRequest &+= 1
-                } : nil,
-                onSwitchSession: (!chatClient.isOfflinePreviewMode && router != nil) ? {
-                    showSessionSwitcher = true
-                } : nil,
-                otherActiveSessionCount: chatClient.isOfflinePreviewMode
-                    ? 0
-                    : sessionsService.activeSessionCount(excluding: headerSession?.id)
-            )
-        }
-        .onAppear {
-            isOnScreen = true
-            displayedResponseState = chatClient.responseState
-            if ScreenshotFixtures.opensActiveContext { showContextStatus = true }
-        }
-        .onDisappear {
-            isOnScreen = false
-            chatClient.stopViewingResults()
-        }
-        // Initial load: ensure session is loaded when view appears
-        .task {
-            chatClient.setupSSEHandlers()
-            if initialSession == nil {
-                await chatClient.ensureSession()
-                async let permissionLoad = chatClient.recoverPendingPermission()
-                async let questionLoad = chatClient.recoverPendingQuestions()
-                async let formLoad = chatClient.recoverPendingForms()
-                _ = await (permissionLoad, questionLoad, formLoad)
-            }
-        }
-        .task(id: catalogContextID) {
-            clearSelectedSlashAction()
-            attachedSkills = []
-            attachmentSource = nil
-            availableSlashActions = []
-            availableSkills = []
-            availableSkillIDs = []
-            chatClient.updateSlashCatalog(commands: [], agents: [])
-            chatClient.updateSkillCatalog([])
-            guard chatClient.sessionLocationState == .ready else { return }
-            async let commandsLoad: Void = loadCommands(force: true)
-            async let skillsLoad: Void = loadSkills(force: true)
-            _ = await (commandsLoad, skillsLoad)
-        }
-        // Watch completion/visibility inputs, not the viewed marker this
-        // acknowledgement writes. The service merges confirmed markers into
-        // its displayed snapshot; feeding them back here can hit SwiftUI's
-        // per-frame mutation limit and suppress the next visible completion.
-        .onChange(of: resultViewingContext, initial: true) { _, _ in
-            chatClient.updateDisplayedResult(
-                chatClient.isStreamSynchronized ? chatClient.currentSession : nil,
-                isForeground: scenePhase == .active && isOnScreen
-            )
-        }
+    }
 
-        // Foreground recovery: stream events may have been missed while iOS
-        // suspended the app, so reconcile session and transcript before the
-        // incremental stream is considered current again.
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active {
-                if backgroundedAt == nil { backgroundedAt = .now }
-                return
+    private func pendingAttentionBanner(_ attention: PendingAttention) -> some View {
+        Button(action: attention.open) {
+            HStack(spacing: 8) {
+                Image(systemName: attention.icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
+                Text(attention.title)
+                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
+                    .foregroundStyle(primaryTextColor)
+                    .lineLimit(1)
+                Spacer()
+                Text("Review")
+                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .semibold))
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appWarning)
             }
-            let awayInterval = backgroundedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
-            backgroundedAt = nil
-            connection.reconnectIfNeeded()
-            chatClient.setupSSEHandlers()
-            if ChatClient.shouldReconcileOnForeground(
-                awayInterval: awayInterval,
-                isConnected: connection.isConnected,
-                isStreamSynchronized: chatClient.isStreamSynchronized
-            ) {
-                chatClient.synchronizeCurrentSessionFromServer()
-            } else if chatClient.isLoading {
-                Task {
-                    await chatClient.refreshCurrentSessionStatus()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background((isRetroChat ? RetroChatStyle.danger : Color.appWarning).opacity(0.10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(attention.title). Tap to review.")
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func presentedErrorBanner(_ error: ChatClient.PresentedError) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(isRetroChat ? RetroChatStyle.danger : .orange)
+                .font(.system(size: 13))
+            Text(error.message)
+                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13))
+                .foregroundStyle(secondaryTextColor)
+            Spacer()
+            Button(error.canRetry ? AppText.tryAgain : AppText.dismiss) {
+                switch error {
+                case .location:
+                    chatClient.synchronizeCurrentSessionFromServer()
+                case .viewing:
+                    chatClient.retryViewingDisplayedResult()
+                case .operation:
+                    chatClient.dismissError()
                 }
             }
-            let shouldForceCatalogRefresh = awayInterval >= ChatClient.foregroundReconcileGrace
-            Task {
-                async let commandsLoad: Void = loadCommands(force: shouldForceCatalogRefresh)
-                async let skillsLoad: Void = loadSkills(force: shouldForceCatalogRefresh)
-                if chatClient.currentSession == nil {
+            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
+            .foregroundStyle(primaryTextColor)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface)
+        .overlay(alignment: .top) {
+            (isRetroChat ? RetroChatStyle.ink : Color.appSeparator)
+                .frame(height: isRetroChat ? 2 : 0.5)
+        }
+    }
+
+    @ViewBuilder
+    private var dropZoneOverlay: some View {
+        if isDropTargeted, !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.appBackground.opacity(0.84))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(
+                        Color.appAccent,
+                        style: StrokeStyle(lineWidth: 2, dash: [8, 6])
+                    )
+                VStack(spacing: 10) {
+                    Image(systemName: "arrow.down.doc.fill")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundStyle(Color.appAccent)
+                    Text("Drop images or text files to attach")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.appPrimary)
+                    Text("PNG, JPEG, GIF, WebP, HEIC, Markdown, JSON, and source code")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.appSecondary)
+                }
+                .padding(24)
+            }
+            .padding(16)
+            .allowsHitTesting(false)
+            .transition(.opacity)
+        }
+    }
+
+    private func withChromeAndComposer<Content: View>(
+        _ content: Content,
+        currentContextUsage: ChatClient.ContextUsageSummary?
+    ) -> some View {
+        content
+            .onDrop(of: ComposerItemImporter.supportedContentTypes, isTargeted: $isDropTargeted) { providers in
+                guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return false }
+                handleImportedProviders(providers, includePlainText: true)
+                return true
+            }
+            #if targetEnvironment(macCatalyst)
+            .onPasteCommand(of: ComposerItemImporter.supportedContentTypes) { providers in
+                guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return }
+                handleImportedProviders(providers, includePlainText: true)
+            }
+            #endif
+            .safeAreaInset(edge: .bottom) {
+                if chatClient.showsComposer {
+                    chatComposerInset(contextUsage: currentContextUsage)
+                        .background {
+                            composerInsetBackground
+                                .ignoresSafeArea(edges: .bottom)
+                        }
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ChatHeaderToolbar(
+                    projectName: chatClient.sessionLocationState == .ready
+                        ? (headerSession?.workspaceDisplayName ?? connection.projectName)
+                        : connection.projectName,
+                    branch: connection.branch,
+                    connectionState: connection.state,
+                    sessionTitle: headerSession?.title,
+                    showsRecordingControls: chatClient.isRecordingStream || (debugFeaturesEnabled && chatClient.supportsStreamRecording),
+                    isRecordingStream: chatClient.isRecordingStream,
+                    visualMode: visualMode,
+                    onToggleRecording: {
+                        if chatClient.isRecordingStream {
+                            chatClient.stopStreamRecording()
+                        } else {
+                            chatClient.startStreamRecording()
+                        }
+                    },
+                    onShowInsights: chatClient.currentSession != nil ? {
+                        showSessionInsights = true
+                    } : nil,
+                    onShowSessionReview: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
+                        showSessionReview = true
+                    } : nil,
+                    onShowMeridianUsage: {
+                        showMeridianUsage = true
+                    },
+                    onShowContext: (chatClient.showsActiveContext || currentContextUsage != nil) ? {
+                        showContextStatus = true
+                    } : nil,
+                    onRenameSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
+                        renameSessionDraft = chatClient.currentSession?.title ?? ""
+                        showRenameSessionAlert = true
+                    } : nil,
+                    onSyncSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
+                        Task { await chatClient.refreshCurrentSessionFromServer() }
+                    } : nil,
+                    onScrollToBottom: chatClient.hasDisplayedMessages ? {
+                        jumpToLatestRequest &+= 1
+                    } : nil,
+                    onSwitchSession: (!chatClient.isOfflinePreviewMode && router != nil) ? {
+                        showSessionSwitcher = true
+                    } : nil,
+                    otherActiveSessionCount: chatClient.isOfflinePreviewMode
+                        ? 0
+                        : sessionsService.activeSessionCount(excluding: headerSession?.id)
+                )
+            }
+    }
+
+    private func withLifecycleHooks<Content: View>(_ content: Content) -> some View {
+        content
+            .onAppear {
+                isOnScreen = true
+                displayedResponseState = chatClient.responseState
+                if ScreenshotFixtures.opensActiveContext { showContextStatus = true }
+            }
+            .onDisappear {
+                isOnScreen = false
+                chatClient.stopViewingResults()
+            }
+            .task {
+                chatClient.setupSSEHandlers()
+                if initialSession == nil {
+                    await chatClient.ensureSession()
                     async let permissionLoad = chatClient.recoverPendingPermission()
                     async let questionLoad = chatClient.recoverPendingQuestions()
                     async let formLoad = chatClient.recoverPendingForms()
                     _ = await (permissionLoad, questionLoad, formLoad)
                 }
+            }
+            .task(id: catalogContextID) {
+                clearSelectedSlashAction()
+                attachedSkills = []
+                attachmentSource = nil
+                availableSlashActions = []
+                availableSkills = []
+                availableSkillIDs = []
+                chatClient.updateSlashCatalog(commands: [], agents: [])
+                chatClient.updateSkillCatalog([])
+                guard chatClient.sessionLocationState == .ready else { return }
+                async let commandsLoad: Void = loadCommands(force: true)
+                async let skillsLoad: Void = loadSkills(force: true)
                 _ = await (commandsLoad, skillsLoad)
             }
-        }
+            .onChange(of: resultViewingContext, initial: true) { _, _ in
+                chatClient.updateDisplayedResult(
+                    chatClient.isStreamSynchronized ? chatClient.currentSession : nil,
+                    isForeground: scenePhase == .active && isOnScreen
+                )
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                handleScenePhaseChange(newPhase)
+            }
+    }
 
-        // MARK: - Sheets
+    private func handleScenePhaseChange(_ newPhase: ScenePhase) {
+        if newPhase != .active {
+            if backgroundedAt == nil { backgroundedAt = .now }
+            return
+        }
+        let awayInterval = backgroundedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
+        backgroundedAt = nil
+        connection.reconnectIfNeeded()
+        chatClient.setupSSEHandlers()
+        if ChatClient.shouldReconcileOnForeground(
+            awayInterval: awayInterval,
+            isConnected: connection.isConnected,
+            isStreamSynchronized: chatClient.isStreamSynchronized
+        ) {
+            chatClient.synchronizeCurrentSessionFromServer()
+        } else if chatClient.isLoading {
+            Task {
+                await chatClient.refreshCurrentSessionStatus()
+            }
+        }
+        let shouldForceCatalogRefresh = awayInterval >= ChatClient.foregroundReconcileGrace
+        Task {
+            async let commandsLoad: Void = loadCommands(force: shouldForceCatalogRefresh)
+            async let skillsLoad: Void = loadSkills(force: shouldForceCatalogRefresh)
+            if chatClient.currentSession == nil {
+                async let permissionLoad = chatClient.recoverPendingPermission()
+                async let questionLoad = chatClient.recoverPendingQuestions()
+                async let formLoad = chatClient.recoverPendingForms()
+                _ = await (permissionLoad, questionLoad, formLoad)
+            }
+            _ = await (commandsLoad, skillsLoad)
+        }
+    }
 
-        .sheet(isPresented: $showSessionSwitcher, onDismiss: {
-            guard let session = sessionToOpen else { return }
-            sessionToOpen = nil
-            chatClient.prepareForOpeningSession(session)
-            router?.selectChatSession(session)
-        }) {
-            SessionSwitcherSheet(
-                selectedSessionID: chatClient.currentSession?.id,
-                onSelect: { session in
-                    sessionToOpen = session
-                    showSessionSwitcher = false
-                },
-                onDelete: { session in
-                    router?.clearChatSession(ifMatching: session.id)
-                    chatClient.unloadSession(ifMatching: session.id)
-                },
-                newSessionModel: { await chatClient.newSessionModelPreference() }
-            )
-        }
-        .sheet(isPresented: $chatClient.showActivityCard) {
-            activityCardSheet
-        }
-        .sheet(isPresented: $showModelPicker) {
-            modelPickerSheet
-        }
-        .sheet(isPresented: $showSessionInsights) {
-            NavigationStack {
-                InsightsRootView(chatClient: chatClient, sessionID: chatClient.currentSession?.id)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button(AppText.done) {
-                                showSessionInsights = false
+    private func withAuxiliarySheets<Content: View>(_ content: Content) -> some View {
+        content
+            .sheet(isPresented: $showSessionSwitcher, onDismiss: {
+                guard let session = sessionToOpen else { return }
+                sessionToOpen = nil
+                chatClient.prepareForOpeningSession(session)
+                router?.selectChatSession(session)
+            }) {
+                SessionSwitcherSheet(
+                    selectedSessionID: chatClient.currentSession?.id,
+                    onSelect: { session in
+                        sessionToOpen = session
+                        showSessionSwitcher = false
+                    },
+                    onDelete: { session in
+                        router?.clearChatSession(ifMatching: session.id)
+                        chatClient.unloadSession(ifMatching: session.id)
+                    },
+                    newSessionModel: { await chatClient.newSessionModelPreference() }
+                )
+            }
+            .sheet(isPresented: $chatClient.showActivityCard) {
+                activityCardSheet
+            }
+            .sheet(isPresented: $showModelPicker) {
+                modelPickerSheet
+            }
+            .sheet(isPresented: $showSessionInsights) {
+                NavigationStack {
+                    InsightsRootView(chatClient: chatClient, sessionID: chatClient.currentSession?.id)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button(AppText.done) { showSessionInsights = false }
                             }
                         }
-                    }
+                }
+                .presentationDetents([.medium, .large])
+                .adaptiveSheetDragIndicator()
+                .presentationBackground(Color.appBackground)
             }
-            .presentationDetents([.medium, .large])
-            .adaptiveSheetDragIndicator()
-            .presentationBackground(Color.appBackground)
-        }
-        .sheet(isPresented: $showSessionReview) {
-            NavigationStack {
-                ReviewRootView(chatClient: chatClient)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button(AppText.done) {
-                                showSessionReview = false
+            .sheet(isPresented: $showSessionReview) {
+                NavigationStack {
+                    ReviewRootView(chatClient: chatClient)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                Button(AppText.done) { showSessionReview = false }
                             }
                         }
-                    }
+                }
+                .presentationDetents([.medium, .large])
+                .adaptiveSheetDragIndicator()
+                .presentationBackground(Color.appBackground)
             }
-            .presentationDetents([.medium, .large])
-            .adaptiveSheetDragIndicator()
-            .presentationBackground(Color.appBackground)
-        }
-        .sheet(isPresented: $showMeridianUsage) {
-            NavigationStack {
-                MeridianUsageView()
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button(AppText.done) {
-                                showMeridianUsage = false
+            .sheet(isPresented: $showMeridianUsage) {
+                NavigationStack {
+                    MeridianUsageView()
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button(AppText.done) { showMeridianUsage = false }
                             }
                         }
-                    }
+                }
+                .presentationDetents([.medium, .large])
+                .adaptiveSheetDragIndicator()
+                .presentationBackground(Color.appBackground)
             }
-            .presentationDetents([.medium, .large])
-            .adaptiveSheetDragIndicator()
-            .presentationBackground(Color.appBackground)
-        }
-        .alert("Rename Session", isPresented: $showRenameSessionAlert) {
-            TextField("Session title", text: $renameSessionDraft)
-            Button("Save") {
-                let trimmed = renameSessionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty, let session = chatClient.currentSession, trimmed != session.title else { return }
-                Task {
-                    if let updated = try? await sessionsService.updateTitle(session: session, newTitle: trimmed),
-                       chatClient.currentSession?.id == session.id {
-                        chatClient.currentSession = updated
+    }
+
+    private func withInteractionSheets<Content: View>(_ content: Content) -> some View {
+        content
+            .alert("Rename Session", isPresented: $showRenameSessionAlert) {
+                TextField("Session title", text: $renameSessionDraft)
+                Button("Save") {
+                    let trimmed = renameSessionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, let session = chatClient.currentSession, trimmed != session.title else { return }
+                    Task {
+                        if let updated = try? await sessionsService.updateTitle(session: session, newTitle: trimmed),
+                           chatClient.currentSession?.id == session.id {
+                            chatClient.currentSession = updated
+                        }
                     }
                 }
+                Button(AppText.cancel, role: .cancel) {}
             }
-            Button(AppText.cancel, role: .cancel) {}
-        }
-        .sheet(isPresented: $showContextStatus) {
-            if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
-                SessionActiveContextView(chatClient: chatClient)
-            } else if let contextUsage = chatClient.contextUsageSummary {
-                ChatContextStatusSheet(summary: contextUsage, visualMode: visualMode)
-                    #if targetEnvironment(macCatalyst)
-                    .frame(minWidth: 420, minHeight: 240)
-                    #else
-                    .presentationDetents([.fraction(0.34), .medium])
-                    #endif
-                    .adaptiveSheetDragIndicator()
+            .sheet(isPresented: $showContextStatus) {
+                if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
+                    SessionActiveContextView(chatClient: chatClient)
+                } else if let contextUsage = chatClient.contextUsageSummary {
+                    ChatContextStatusSheet(summary: contextUsage, visualMode: visualMode)
+                        #if targetEnvironment(macCatalyst)
+                        .frame(minWidth: 420, minHeight: 240)
+                        #else
+                        .presentationDetents([.fraction(0.34), .medium])
+                        #endif
+                        .adaptiveSheetDragIndicator()
+                }
             }
-        }
-        .sheet(isPresented: $chatClient.showQuestionSheet) {
-            // Swipe-dismiss only hides the sheet. The question stays pending and
-            // the review banner lets the person come back; rejecting is explicit.
-            if let question = chatClient.pendingQuestion {
-                QuestionView(
-                    request: question,
-                    onSubmit: { answers in
-                        chatClient.respondToQuestion(answers: answers)
-                    },
-                    onDismiss: {
-                        chatClient.rejectQuestion()
-                    },
-                    onDefer: {
-                        chatClient.showQuestionSheet = false
-                    }
-                )
-                .presentationDetents([.medium, .large])
-                .id(question.id)
+            .sheet(isPresented: $chatClient.showQuestionSheet) {
+                if let question = chatClient.pendingQuestion {
+                    QuestionView(
+                        request: question,
+                        onSubmit: { answers in chatClient.respondToQuestion(answers: answers) },
+                        onDismiss: { chatClient.rejectQuestion() },
+                        onDefer: { chatClient.showQuestionSheet = false }
+                    )
+                    .presentationDetents([.medium, .large])
+                    .id(question.id)
+                }
             }
-        }
-        .sheet(isPresented: $chatClient.showFormSheet) {
-            if let form = chatClient.pendingForm {
-                FormView(
-                    form: form,
-                    onSubmit: { answer in
-                        chatClient.respondToForm(answer: answer)
-                    },
-                    onCancel: {
-                        chatClient.cancelForm()
-                    },
-                    isSubmitting: chatClient.isResolvingForm,
-                    onDefer: {
-                        chatClient.showFormSheet = false
-                    }
-                )
-                .presentationDetents(ScreenshotFixtures.showsConditionalForm ? [.large] : [.medium, .large])
-                .interactiveDismissDisabled(chatClient.isResolvingForm)
-                .id(form.identity)
+            .sheet(isPresented: $chatClient.showFormSheet) {
+                if let form = chatClient.pendingForm {
+                    FormView(
+                        form: form,
+                        onSubmit: { answer in chatClient.respondToForm(answer: answer) },
+                        onCancel: { chatClient.cancelForm() },
+                        isSubmitting: chatClient.isResolvingForm,
+                        onDefer: { chatClient.showFormSheet = false }
+                    )
+                    .presentationDetents(ScreenshotFixtures.showsConditionalForm ? [.large] : [.medium, .large])
+                    .interactiveDismissDisabled(chatClient.isResolvingForm)
+                    .id(form.identity)
+                }
             }
-        }
-        .onChange(of: chatClient.inputText) { _, newValue in
-            handleComposerTextChange(newValue)
-        }
-        .onChange(of: chatClient.responseState) { _, newState in
-            updateDisplayedResponseState(newState)
-        }
-        .onChange(of: isInputFocused) { _, focused in
-            setComposerExpanded(focused)
-        }
-        .onChange(of: chatClient.currentSession?.id) { _, _ in
-            clearSelectedSlashAction()
-            #if targetEnvironment(macCatalyst)
-            if chatClient.currentSession != nil, !chatClient.isOfflinePreviewMode {
-                isInputFocused = true
+    }
+
+    private func withStateObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onChange(of: chatClient.inputText) { _, newValue in
+                handleComposerTextChange(newValue)
             }
-            #endif
-        }
-        .onChange(of: connection.selectedProjectDirectory) { _, _ in
-            clearSelectedSlashAction()
-        }
-        .onChange(of: router?.switchSessionCommandCount) { oldValue, newValue in
-            guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
-            showSessionSwitcher = true
-        }
-        .onChange(of: router?.chooseModelCommandCount) { oldValue, newValue in
-            guard oldValue != nil, newValue != nil, isOnScreen, chatClient.currentSession != nil else { return }
-            showModelPicker = true
-        }
-        .onChange(of: router?.attachFileCommandCount) { oldValue, newValue in
-            guard oldValue != nil, newValue != nil, isOnScreen, chatClient.canAttachFiles else { return }
-            attachmentSource = .files
-        }
-        .onChange(of: router?.pasteClipboardCommandCount) { oldValue, newValue in
-            guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
-            pasteFromGeneralPasteboard()
-        }
-        .onChange(of: router?.jumpToLatestCommandCount) { oldValue, newValue in
-            guard oldValue != nil, newValue != nil, isOnScreen, chatClient.hasDisplayedMessages else { return }
-            jumpToLatestRequest &+= 1
-        }
+            .onChange(of: chatClient.responseState) { _, newState in
+                updateDisplayedResponseState(newState)
+            }
+            .onChange(of: isInputFocused) { _, focused in
+                setComposerExpanded(focused)
+            }
+            .onChange(of: chatClient.currentSession?.id) { _, _ in
+                clearSelectedSlashAction()
+                #if targetEnvironment(macCatalyst)
+                if chatClient.currentSession != nil, !chatClient.isOfflinePreviewMode {
+                    isInputFocused = true
+                }
+                #endif
+            }
+            .onChange(of: connection.selectedProjectDirectory) { _, _ in
+                clearSelectedSlashAction()
+            }
+    }
+
+    private func withCommandObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onChange(of: router?.switchSessionCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
+                showSessionSwitcher = true
+            }
+            .onChange(of: router?.chooseModelCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, chatClient.currentSession != nil else { return }
+                showModelPicker = true
+            }
+            .onChange(of: router?.attachFileCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, chatClient.canAttachFiles else { return }
+                attachmentSource = .files
+            }
+            .onChange(of: router?.pasteClipboardCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
+                pasteFromGeneralPasteboard()
+            }
+            .onChange(of: router?.jumpToLatestCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, chatClient.hasDisplayedMessages else { return }
+                jumpToLatestRequest &+= 1
+            }
     }
 
     private var visualMode: ChatVisualMode {

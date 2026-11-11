@@ -2243,8 +2243,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         guard !Task.isCancelled, sessionLoadToken == token,
               connection?.client === loadingClient, currentSession?.id == session.id else { return }
         restoredWorkspaceRevision = connection?.projectContextRevision
+        let loadedCanonicalSession: OCSession? = usesV2SessionAPI ? session : nil
         async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
-        async let messagesTask = loadMessages(knownCanonicalSession: usesV2SessionAPI ? session : nil)
+        async let messagesTask = loadMessages(knownCanonicalSession: loadedCanonicalSession)
         async let permissionTask = recoverPendingPermission()
         async let questionTask = recoverPendingQuestions()
         async let formTask = recoverPendingForms()
