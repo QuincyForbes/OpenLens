@@ -79,7 +79,7 @@ struct ChatHeaderToolbar: ToolbarContent {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Switch session, \(sessionTitle ?? "OpenCode")")
+                    .accessibilityLabel("Switch session, \(resolvedSessionTitle)")
                     .accessibilityIdentifier("chat.switchSession")
                 } else {
                     sessionTitleLabel
@@ -141,7 +141,8 @@ struct ChatHeaderToolbar: ToolbarContent {
                 .accessibilityLabel(recordingLabel)
                 .accessibilityHint(statusText)
             }
-        } else if onShowInsights != nil || onShowContext != nil || onRenameSession != nil || onSyncSession != nil {
+        }
+        if onShowInsights != nil || onShowContext != nil || onRenameSession != nil || onSyncSession != nil {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let onSwitchSession {
@@ -195,8 +196,13 @@ struct ChatHeaderToolbar: ToolbarContent {
         }
     }
 
+    private var resolvedSessionTitle: String {
+        guard let sessionTitle else { return "OpenCode" }
+        return sessionTitle.nilIfBlank ?? AppText.titleUntitled
+    }
+
     private var sessionTitleLabel: some View {
-        Text(sessionTitle ?? "OpenCode")
+        Text(resolvedSessionTitle)
             .font(isRetroChat ? RetroChatStyle.headerFont : .headline)
             .foregroundStyle(isRetroChat ? RetroChatStyle.ink : .primary)
             .lineLimit(1)

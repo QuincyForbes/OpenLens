@@ -282,7 +282,16 @@ struct FormView: View {
         for field in form.fields {
             switch field.kind {
             case .string:
-                strings[field.key] = field.stringDefault ?? ""
+                let defaultString = field.stringDefault ?? ""
+                if !field.options.isEmpty,
+                   field.custom,
+                   !defaultString.isEmpty,
+                   !field.options.contains(defaultString) {
+                    customSelections[field.key] = defaultString
+                    strings[field.key] = ""
+                } else {
+                    strings[field.key] = defaultString
+                }
             case .number, .integer:
                 numbers[field.key] = field.numberDefault.map { value in
                     field.kind == .integer && value.rounded() == value
@@ -324,11 +333,27 @@ struct FormView: View {
     }
 
     private func stringBinding(for key: String) -> Binding<String> {
-        Binding(get: { strings[key, default: ""] }, set: { strings[key] = $0 })
+        Binding(
+            get: { strings[key, default: ""] },
+            set: { newValue in
+                strings[key] = newValue
+                if !newValue.isEmpty {
+                    customSelections[key] = ""
+                }
+            }
+        )
     }
 
     private func customStringBinding(for key: String) -> Binding<String> {
-        Binding(get: { customSelections[key, default: ""] }, set: { customSelections[key] = $0 })
+        Binding(
+            get: { customSelections[key, default: ""] },
+            set: { newValue in
+                customSelections[key] = newValue
+                if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    strings[key] = ""
+                }
+            }
+        )
     }
 
     private func numberBinding(for key: String) -> Binding<String> {

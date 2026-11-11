@@ -52,6 +52,7 @@ nonisolated struct PromptTextFileAttachment: Identifiable, Hashable, Sendable {
     let name: String
     /// The exact bytes sent, so a retry resends identical content.
     let data: Data
+    let dataURI: String
 
     init(id: String = UUID().uuidString, data: Data, name: String) throws {
         guard !data.contains(0), String(data: data, encoding: .utf8) != nil else {
@@ -60,6 +61,7 @@ nonisolated struct PromptTextFileAttachment: Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.data = data
+        self.dataURI = "data:\(Self.mime);charset=utf-8;base64,\(data.base64EncodedString())"
     }
 
     var text: String { String(decoding: data, as: UTF8.self) }
@@ -80,10 +82,6 @@ nonisolated struct PromptTextFileAttachment: Identifiable, Hashable, Sendable {
             throw PromptAttachmentError.unreadableFile(name: name)
         }
         return try PromptTextFileAttachment(data: data, name: name)
-    }
-
-    var dataURI: String {
-        "data:\(Self.mime);charset=utf-8;base64,\(data.base64EncodedString())"
     }
 
     var promptFile: OCV2PromptFile {

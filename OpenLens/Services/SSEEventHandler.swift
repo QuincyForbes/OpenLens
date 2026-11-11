@@ -514,7 +514,7 @@ final class SSEEventHandler {
                     text: delta.text,
                     chunks: delta.textChunks
                 )
-                updateReasoningActivity(text: delta.text, delegate: delegate)
+                appendReasoningActivity(delta: delta.text, delegate: delegate)
                 return
 
             case .text:
@@ -578,8 +578,16 @@ final class SSEEventHandler {
     private func updateReasoningActivity(text: String, delegate: SSEEventHandlerDelegate) {
         // The activity card is only a transient status surface; keeping a
         // bounded preview avoids copying/layouting a growing reasoning transcript.
+        guard !text.isEmpty || delegate.currentActivity?.thinkingText.isEmpty != false else { return }
         let preview = String(text.prefix(280))
         delegate.currentActivity?.thinkingText = preview
+    }
+
+    private func appendReasoningActivity(delta: String, delegate: SSEEventHandlerDelegate) {
+        guard !delta.isEmpty, let current = delegate.currentActivity?.thinkingText else { return }
+        guard current.count < 280 else { return }
+        let remaining = 280 - current.count
+        delegate.currentActivity?.thinkingText = current + String(delta.prefix(remaining))
     }
 
     private func handlePartRemoved(_ event: OCEvent) {

@@ -398,7 +398,7 @@ nonisolated enum SSEInboundEvent {
             let alreadySanitizedTool: Bool
             if let preparedPart = properties["preparedPart"] as? OCPart {
                 part = preparedPart
-                alreadySanitizedTool = preparedPart.type == .tool
+                alreadySanitizedTool = preparedPart.type == .tool && !PreparedQuestionToolPayload.isQuestionTool(preparedPart)
             } else {
                 guard let partDictionary = properties["part"] as? [String: Any],
                       let partData = try? JSONSerialization.data(withJSONObject: partDictionary),
@@ -948,6 +948,13 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         super.init()
     }
 
+    deinit {
+        reconnectWorkItem?.cancel()
+        eventStream?.cancel()
+        task?.cancel()
+        session?.invalidateAndCancel()
+    }
+
     func updateConnection(
         baseURL: URL,
         authHeader: String?,
@@ -1069,6 +1076,7 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         stateDeliveryGate.invalidateForExplicitDisconnect()
         queue.async { [self] in
             shouldReconnect = false
+            isConsumerBackpressured = false
             reconnectWorkItem?.cancel()
             reconnectWorkItem = nil
             cleanupConnection()
@@ -1160,7 +1168,6 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         pendingTransportCompletion = nil
         activeEventStreamID = nil
         if discardPendingMainEvents {
-            isConsumerBackpressured = false
             clearDeferredInboundDeliveries()
             invalidateMainMailbox()
         }
@@ -1483,8 +1490,12 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         Logger.sse.error("Cancelling SSE stream after \(reason, privacy: .public)")
         reportSynchronizationGap(.overflow)
         resetFramingBuffer()
+        let hadCustomEventStream = eventStream != nil
         eventStream?.cancel()
         task?.cancel()
+        if hadCustomEventStream {
+            completeTransport(error: nil)
+        }
     }
 
     private func finishPendingTransportCompletionIfPossible() {
@@ -2491,30 +2502,21 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
             if let envelope = value as? [String: Any], envelope["type"] != nil, envelope["data"] != nil {
                 return try v2EventAdapter.event(envelope, directory: contextDirectory)
             }
+            if let eventName, !eventName.isEmpty, var payload = value as? [String: Any] {
+                if payload.count == 1,
+                   let encodedPayload = payload["data"] as? String,
+                   let nestedData = encodedPayload.data(using: .utf8),
+                   let nestedPayload = try? JSONSerialization.jsonObject(with: nestedData) as? [String: Any] {
+                    payload = nestedPayload
+                }
+                return OCEvent(type: eventName, properties: AnyCodable(payload))
+            }
         }
         if let legacyEvent = try? JSONDecoder().decode(OCEvent.self, from: data) {
             return legacyEvent
         }
 
-        guard protocolVersion == .v2,
-              let eventName,
-              !eventName.isEmpty,
-              var payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            throw OpenCodeError.invalidPayload("Unsupported SSE event payload.")
-        }
-
-        // Some v2 fixtures/servers serialize the stream data member as a JSON
-        // string. Decode that nested object without changing the public event
-        // model used by the existing chat pipeline.
-        if payload.count == 1,
-           let encodedPayload = payload["data"] as? String,
-           let nestedData = encodedPayload.data(using: .utf8),
-           let nestedPayload = try? JSONSerialization.jsonObject(with: nestedData) as? [String: Any] {
-            payload = nestedPayload
-        }
-
-        return OCEvent(type: eventName, properties: AnyCodable(payload))
+        throw OpenCodeError.invalidPayload("Unsupported SSE event payload.")
     }
 
     private func extractEventField(from line: String) -> String? {

@@ -878,13 +878,12 @@ struct WorkspaceRootView: View {
     }
 
     private func insertIntoChat(_ text: String) {
-        let trimmed = chatClient.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            chatClient.inputText = text
+        chatClient.appendQuotedDiff(text)
+        if let session = chatClient.currentSession {
+            router.selectChatSession(session)
         } else {
-            chatClient.inputText += "\n\(text)"
+            router.selectedTab = .chat
         }
-        router.selectedTab = .chat
     }
 
     private func applySnapshot(_ loadedSnapshot: WorkspaceSnapshot) {
@@ -1028,7 +1027,11 @@ private struct WorkspaceFileDiffSheet: View {
     }
 
     private func loadDetail() async {
-        guard !summaryFile.hasReadableDiff else { return }
+        file = summaryFile
+        guard !summaryFile.hasReadableDiff else {
+            isLoading = false
+            return
+        }
         isLoading = true
         file = await workspaceService.loadWorkingTreeFile(summary: summaryFile)
         isLoading = false
@@ -1186,9 +1189,10 @@ private struct WorkspaceActivityHeatmap: View {
 
     private func makeCells(from activityDays: [WorkspaceActivityDay], calendar: Calendar) -> [[Int]] {
         let firstWeekStart = firstWeekStart(calendar: calendar)
-        let countsByDate = Dictionary(uniqueKeysWithValues: activityDays.map {
-            (calendar.startOfDay(for: $0.date), $0.turnCount)
-        })
+        let countsByDate = Dictionary(
+            activityDays.map { (calendar.startOfDay(for: $0.date), $0.turnCount) },
+            uniquingKeysWith: +
+        )
         let maxCount = countsByDate.values.max() ?? 0
 
         return (0..<weekCount).map { weekIndex in

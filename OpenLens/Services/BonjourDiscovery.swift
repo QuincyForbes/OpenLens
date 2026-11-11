@@ -178,8 +178,17 @@ final class BonjourDiscovery {
                 }
                 connection.cancel()
 
-            case .failed, .cancelled, .waiting:
-                // Cancel the connection to prevent leaks in non-ready states
+            case .waiting(let error):
+                if Self.isLocalNetworkPolicyDenied(error) {
+                    connection.cancel()
+                    Task { @MainActor [weak self] in
+                        self?.localNetworkAccessRequired = true
+                        self?.resolvingConnections.removeValue(forKey: name)
+                        self?.resolvingServiceNames.remove(name)
+                    }
+                }
+
+            case .failed, .cancelled:
                 connection.cancel()
                 Task { @MainActor [weak self] in
                     self?.resolvingConnections.removeValue(forKey: name)

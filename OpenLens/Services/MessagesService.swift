@@ -270,6 +270,7 @@ final class MessagesService {
             content: textContent,
             parts: msg.parts,
             isStreaming: false,
+            createdAt: msg.info.createdTimestamp.map(Date.init(timeIntervalSince1970:)) ?? Date(),
             cost: msg.info.cost,
             tokens: msg.info.tokens,
             modelID: resolvedModelID,

@@ -1991,8 +1991,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             return
         }
 
+        guard let sessionsService else { return }
         do {
-            let session = try await sessionsService!.ensureSession(
+            let session = try await sessionsService.ensureSession(
                 model: await newSessionModelPreference()
             )
             await loadSession(session)
@@ -2008,6 +2009,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     func prepareForOpeningSession(_ session: OCSession) {
         resetCachesForConnectionIfNeeded()
         guard !isDemoMode, !isRecordedReplayMode, currentSession?.id != session.id else { return }
+        if isLoading, currentSession?.id != nil {
+            liveActivityTracker?.dismiss()
+        }
         // A half-typed prompt belongs to the session it was typed in. Park it
         // and bring back whatever was drafted for the session being opened.
         if let previousID = currentSession?.id {
@@ -2112,11 +2116,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         }
         let wasAlreadyPreparedForSession = preparedSessionID == session.id && currentSession?.id == session.id
-        preparedSessionID = nil
         let reopeningCurrentSession = usesV2SessionAPI && currentSession?.id == session.id && !wasAlreadyPreparedForSession
         if !reopeningCurrentSession && !wasAlreadyPreparedForSession {
             prepareForOpeningSession(session)
-            preparedSessionID = nil
         }
         let generation = streamSynchronizationGeneration
         let revision = connection?.projectContextRevision
@@ -2204,6 +2206,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         )
         guard !Task.isCancelled, sessionLoadToken == token,
               connection?.client === loadingClient, currentSession?.id == session.id else { return }
+        if didLoadMessages, preparedSessionID == session.id {
+            preparedSessionID = nil
+        }
         let recovered = didLoadMessages && permissionRecovered && questionRecovered && formRecovered
         // Reattach before acknowledging: any gap after the acknowledgement
         // must also have a live observer, rather than falling into a blind spot.
@@ -2362,7 +2367,11 @@ final class ChatClient: SSEEventHandlerDelegate {
                 return false
             }
             let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 16
-            let rawTranscript = try await messagesService!.loadTranscript(
+            guard let messagesService else {
+                _ = await todosTask
+                return false
+            }
+            let rawTranscript = try await messagesService.loadTranscript(
                 sessionID: session.id,
                 limit: fetchLimit
             )
@@ -2512,7 +2521,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// OpenCode performs the actual revert, so this is intentionally unavailable
     /// for locally simulated and read-only chat modes.
     func canUndo(_ message: ChatMessage) -> Bool {
-        message.role == .user
+        let submissionState = promptSubmissionState(forMessageID: message.id)
+        let isUnadmittedLocalRow = submissionState == .sending || submissionState == .failed
+        return message.role == .user
+            && !isUnadmittedLocalRow
             && canCompose
             && !isLoading
             && !isQueueingPrompt
@@ -3072,7 +3084,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func preserveTurnFileChanges(in loaded: [ChatMessage]) {
-        let existingByID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        let existingByID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         for message in loaded {
             if let cached = cachedTurnDiffSummariesByMessageID[message.id] {
                 if !cached.isEmpty {
@@ -3243,6 +3255,11 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         do {
             let loaded = try await client.listTodos(sessionID: session.id)
+            guard !Task.isCancelled,
+                  currentSession?.id == session.id,
+                  connection?.client === client else {
+                return
+            }
             self.todos = loaded.todos
             self.hiddenTodoCount = loaded.hiddenCount
             Logger.debug.info("[TODO] loaded \(loaded.todos.count) visible todos")
@@ -3314,10 +3331,11 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         }
 
+        guard let providersService else { return }
         // Fetch config and providers concurrently — both endpoints are independent,
         // and we apply config filter lists before resolving model selections below.
-        async let configTask = providersService!.loadConfig()
-        async let providersTask = providersService!.loadProviders()
+        async let configTask = providersService.loadConfig()
+        async let providersTask = providersService.loadProviders()
 
         let configResult = await configTask
         guard isCurrent() else {
@@ -3635,8 +3653,14 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     func updateSlashCatalog(commands: [String], agents: [String]) {
-        availableSlashCommandMap = Dictionary(uniqueKeysWithValues: commands.map { ($0.lowercased(), $0) })
-        availableSlashAgentMap = Dictionary(uniqueKeysWithValues: agents.map { ($0.lowercased(), $0) })
+        availableSlashCommandMap = Dictionary(
+            commands.map { ($0.lowercased(), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        availableSlashAgentMap = Dictionary(
+            agents.map { ($0.lowercased(), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     func updateSkillCatalog(_ skills: [String]) {
@@ -3746,7 +3770,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             return
         }
 
-        if let slashAction = parseSlashAction(text) {
+        let allowsSlashDispatch = composerPastedSnippets.isEmpty
+            || BoundedTextInspection.hasNonWhitespace(ComposerPasteExtractor.sanitizedInput(inputText))
+        if allowsSlashDispatch, let slashAction = parseSlashAction(text) {
             switch slashAction {
             case .command:
                 submitCommandIfPresent(text, delivery: .steer)
@@ -3802,7 +3828,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             return
         }
 
-        if usesV2SessionAPI, submitCommandIfPresent(text, delivery: .queue) {
+        let allowsSlashDispatch = composerPastedSnippets.isEmpty
+            || BoundedTextInspection.hasNonWhitespace(ComposerPasteExtractor.sanitizedInput(inputText))
+        if usesV2SessionAPI, allowsSlashDispatch, submitCommandIfPresent(text, delivery: .queue) {
             return
         }
 
@@ -4095,20 +4123,22 @@ final class ChatClient: SSEEventHandlerDelegate {
         return true
     }
 
-    func updateComposerPastedSnippet(id: String, text: String) {
-        guard let index = composerPastedSnippets.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult
+    func updateComposerPastedSnippet(id: String, text: String) -> Bool {
+        guard let index = composerPastedSnippets.firstIndex(where: { $0.id == id }) else { return false }
         let otherBytes = composerPastedSnippets.enumerated().reduce(0) { sum, entry in
             entry.offset == index ? sum : sum + entry.element.byteCount
         }
         guard otherBytes + text.utf8.count <= ComposerPastedSnippet.maximumAllowedUTF8Bytes else {
             errorMessage = "Pasted text is too large to send in a single prompt (limit 1.8 MB)."
-            return
+            return false
         }
         if let updated = composerPastedSnippets[index].updatingText(text) {
             composerPastedSnippets[index] = updated
         } else {
             composerPastedSnippets.remove(at: index)
         }
+        return true
     }
 
     func removeComposerPastedSnippet(id: String) {
@@ -4854,7 +4884,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         guard !text.isEmpty, canSteerPrompt else { return }
         guard let context = sessionWorkContext else { return }
 
-        if submitCommandIfPresent(text, delivery: .steer) {
+        let allowsSlashDispatch = composerPastedSnippets.isEmpty
+            || BoundedTextInspection.hasNonWhitespace(ComposerPasteExtractor.sanitizedInput(inputText))
+        if allowsSlashDispatch, submitCommandIfPresent(text, delivery: .steer) {
             return
         }
 
@@ -4894,8 +4926,9 @@ final class ChatClient: SSEEventHandlerDelegate {
                 await reconcileUncertainSubmissions(in: session.id, before: messageID)
             }
             try requireCurrentWorkLocation(context)
+            guard let messagesService else { throw OpenCodeError.notConnected }
             requestStarted = true
-            let admission = try await messagesService!.sendPromptAsync(
+            let admission = try await messagesService.sendPromptAsync(
                 sessionID: session.id,
                 text: text,
                 model: selectedModelRef,
@@ -4978,7 +5011,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         do {
             try await awaitSessionSettingsChanges(for: session.id)
             try requireCurrentWorkLocation(context)
-            try await messagesService!.sendCommand(
+            guard let messagesService else { throw OpenCodeError.notConnected }
+            try await messagesService.sendCommand(
                 sessionID: session.id,
                 command: command,
                 arguments: arguments,
@@ -5031,8 +5065,11 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         let afterSlash = text.dropFirst()
         let tokenEnd = afterSlash.firstIndex(where: { $0.isWhitespace || $0.isNewline }) ?? afterSlash.endIndex
-        let commandPart = String(afterSlash[..<tokenEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !commandPart.isEmpty else { return nil }
+        let tokenSlice = afterSlash[..<tokenEnd]
+        guard ComposerPasteExtractor.isValidSlashCommandIdentifier(tokenSlice) else {
+            return nil
+        }
+        let commandPart = String(tokenSlice)
 
         let arguments: String
         if tokenEnd < afterSlash.endIndex {
@@ -5185,6 +5222,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         sseClient.onEvent = nil
         sseClient.setRawEventRetentionEnabled(isRecordingStream)
+        sseClient.setConsumerBackpressured(isStreamingConsumerBackpressured)
         sseClient.onInboundEvent = { [weak self] inboundEvent in
             self?.receiveStreamEvent(inboundEvent)
         }
@@ -5528,6 +5566,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 pendingForm = nil
                 showFormSheet = false
             } catch {
+                guard pendingForm?.id == form.id else { return }
                 errorMessage = "\(failureMessage): \(error.localizedDescription)"
                 showFormSheet = true
                 startInteractiveRequestTimeout()
@@ -5751,11 +5790,16 @@ final class ChatClient: SSEEventHandlerDelegate {
         // Moving a ring is O(1): no queued string/chunk has to be rewritten on
         // MainActor when the server replaces an optimistic message identifier.
         if let mailbox = streamingUpdateMailboxes.removeValue(forKey: oldID) {
-            precondition(
-                streamingUpdateMailboxes[newID] == nil,
-                "An assistant stream cannot own two buffered mailboxes"
-            )
-            streamingUpdateMailboxes[newID] = mailbox
+            if let existingTarget = streamingUpdateMailboxes[newID] {
+                while let pendingUpdate = mailbox.popFirst() {
+                    if !existingTarget.append(pendingUpdate) {
+                        flushStreamingBuffer()
+                        _ = existingTarget.append(pendingUpdate)
+                    }
+                }
+            } else {
+                streamingUpdateMailboxes[newID] = mailbox
+            }
         }
 
         if ignoredAssistantMessageIDs.remove(oldID) != nil {
@@ -5808,12 +5852,11 @@ final class ChatClient: SSEEventHandlerDelegate {
             chunks: retainedChunks[...]
         )
 
-        // The consumer gate leaves room for the currently-delivering SSE batch,
-        // so a fixed ring is a correctness assertion rather than a drop policy.
-        precondition(
-            mailbox.append(update),
-            "SSE consumer backpressure must keep the streaming mailbox below capacity"
-        )
+        if !mailbox.append(update) {
+            flushStreamingBuffer()
+            let freshMailbox = streamingMailbox(for: resolvedMessageID)
+            guard freshMailbox.append(update) else { return }
+        }
         bufferedStreamingRecordCount += 1
         bufferedStreamingChunkCount += update.chunks.count
         updateStreamingConsumerPressure()
@@ -6212,6 +6255,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         connection?.sseClient?.setRawEventRetentionEnabled(false)
         isLoading = false
         isQueueingPrompt = false
+        isUndoingMessage = false
         queuedPrompts = []
         queuedPromptMutationID = nil
         responseState = .idle

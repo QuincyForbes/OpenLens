@@ -60,12 +60,16 @@ enum KeychainService {
         let query = baseQuery(key: key)
         let updateAttributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
 
         let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
         if updateStatus == errSecSuccess {
             return true
+        }
+        // Never wipe an existing item when Keychain is temporarily locked (`errSecInteractionNotAllowed`).
+        if updateStatus == errSecInteractionNotAllowed {
+            logger.error("Keychain update deferred while device locked for '\(key, privacy: .public)'")
+            return false
         }
         if updateStatus != errSecItemNotFound {
             SecItemDelete(query as CFDictionary)

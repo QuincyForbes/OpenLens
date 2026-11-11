@@ -403,6 +403,7 @@ struct ChatView: View {
                     }
                 )
                 .presentationDetents([.medium, .large])
+                .id(question.id)
             }
         }
         .sheet(isPresented: $chatClient.showFormSheet) {
@@ -422,6 +423,7 @@ struct ChatView: View {
                 )
                 .presentationDetents(ScreenshotFixtures.showsConditionalForm ? [.large] : [.medium, .large])
                 .interactiveDismissDisabled(chatClient.isResolvingForm)
+                .id(form.identity)
             }
         }
         .onChange(of: chatClient.inputText) { _, newValue in
@@ -1733,7 +1735,10 @@ struct ChatView: View {
         defer { if commandLoadToken == token { isLoadingCommands = false } }
         let workspaceSlashActions = await workspaceService.loadSlashActions()
         guard !Task.isCancelled, context == catalogContextID, commandLoadToken == token else { return }
-        let slashActions = [Self.undoSlashAction] + workspaceSlashActions
+        let deduplicatedWorkspaceActions = workspaceSlashActions.filter {
+            $0.token.caseInsensitiveCompare(Self.undoSlashAction.token) != .orderedSame
+        }
+        let slashActions = [Self.undoSlashAction] + deduplicatedWorkspaceActions
         availableSlashActions = slashActions
         chatClient.updateSlashCatalog(
             commands: slashActions.filter { $0.kind == .command }.map(\.token),
@@ -2975,6 +2980,12 @@ private struct ChatContextStatusSheet: View {
     }
 }
 
+private final class ChatScrollMetricsBox {
+    var latestScrollState = ChatScrollState.initial
+    var lastAutoScrollDate: Date = .distantPast
+    var lastHandledContentVersion: UInt?
+}
+
 private struct ChatMessagesListView: View {
     @Bindable var chatClient: ChatClient
     let jumpToLatestRequest: UInt
@@ -2982,11 +2993,10 @@ private struct ChatMessagesListView: View {
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @AppStorage("showThinking") private var showThinking: Bool = true
 
-    @State private var lastAutoScrollDate: Date = .distantPast
-    @State private var lastHandledContentVersion: UInt?
+    @State private var scrollMetrics = ChatScrollMetricsBox()
     @State private var followLatest = true
     @State private var scrollInteraction = ChatScrollInteraction.idle
-    @State private var scrollState = ChatScrollState.initial
+    @State private var isPastScrollVisibilityThreshold = false
     @State private var pendingForcedScroll = false
     @State private var paginationRestoreAnchorID: String?
     @State private var timelineItems: [ChatTimelineItem] = []
@@ -2999,8 +3009,6 @@ private struct ChatMessagesListView: View {
     init(chatClient: ChatClient, jumpToLatestRequest: UInt = 0) {
         self.jumpToLatestRequest = jumpToLatestRequest
         self._chatClient = Bindable(wrappedValue: chatClient)
-        let showsThinking = UserDefaults.standard.object(forKey: "showThinking") as? Bool ?? true
-        self._timelineItems = State(initialValue: chatClient.timelineItems(showsThinking: showsThinking))
     }
 
     var body: some View {
@@ -3093,9 +3101,7 @@ private struct ChatMessagesListView: View {
                         settledBottomTolerance: settledBottomTolerance,
                         followLatest: $followLatest,
                         scrollInteraction: $scrollInteraction,
-                        scrollState: $scrollState,
-                        lastHandledContentVersion: $lastHandledContentVersion,
-                        lastAutoScrollDate: $lastAutoScrollDate
+                        scrollMetrics: scrollMetrics
                     )
                     .frame(width: 0, height: 0)
                     .accessibilityHidden(true)
@@ -3112,7 +3118,10 @@ private struct ChatMessagesListView: View {
                         visibilityThreshold: scrollToBottomVisibilityThreshold
                     )
                 } action: { _, state in
-                    scrollState = state
+                    scrollMetrics.latestScrollState = state
+                    if isPastScrollVisibilityThreshold != state.isPastVisibilityThreshold {
+                        isPastScrollVisibilityThreshold = state.isPastVisibilityThreshold
+                    }
                 }
                 .onScrollPhaseChange { _, newPhase, context in
                     let state = ChatScrollPolicy.state(
@@ -3124,7 +3133,10 @@ private struct ChatMessagesListView: View {
                         settledBottomTolerance: settledBottomTolerance,
                         visibilityThreshold: scrollToBottomVisibilityThreshold
                     )
-                    scrollState = state
+                    scrollMetrics.latestScrollState = state
+                    if isPastScrollVisibilityThreshold != state.isPastVisibilityThreshold {
+                        isPastScrollVisibilityThreshold = state.isPastVisibilityThreshold
+                    }
                     handleScrollPhaseChange(
                         newPhase,
                         state: state,
@@ -3339,7 +3351,7 @@ private struct ChatMessagesListView: View {
             followLatest = true
         }
 
-        lastAutoScrollDate = now
+        scrollMetrics.lastAutoScrollDate = now
         ChatStreamInstrumentation.recordScrollToBottom()
 
         if animated {
@@ -3451,7 +3463,7 @@ private struct ChatMessagesListView: View {
         guard !timelineItems.isEmpty else { return false }
         return ChatScrollPolicy.shouldShowScrollToLatest(
             followLatest: followLatest,
-            isPastVisibilityThreshold: scrollState.isPastVisibilityThreshold
+            isPastVisibilityThreshold: isPastScrollVisibilityThreshold
         )
     }
 }
@@ -3733,7 +3745,10 @@ private struct MessageActionsBar: View {
         }
         .padding(.leading, isRetroChat ? 8 : 2)
         .sheet(item: $selectableText) { item in
-            SelectableTextSheet(text: item.text)
+            SelectableTextSheet(
+                text: item.text,
+                onReuseInComposer: onReuseInComposer
+            )
         }
     }
 
@@ -3784,16 +3799,14 @@ private struct ChatStreamingAutoFollowObserver: View {
     let settledBottomTolerance: CGFloat
     @Binding var followLatest: Bool
     @Binding var scrollInteraction: ChatScrollInteraction
-    @Binding var scrollState: ChatScrollState
-    @Binding var lastHandledContentVersion: UInt?
-    @Binding var lastAutoScrollDate: Date
+    let scrollMetrics: ChatScrollMetricsBox
 
     var body: some View {
         Color.clear
             .task(id: chatClient.contentVersion) {
                 let contentVersion = chatClient.contentVersion
-                guard lastHandledContentVersion != nil else {
-                    lastHandledContentVersion = contentVersion
+                guard scrollMetrics.lastHandledContentVersion != nil else {
+                    scrollMetrics.lastHandledContentVersion = contentVersion
                     return
                 }
 
@@ -3803,23 +3816,24 @@ private struct ChatStreamingAutoFollowObserver: View {
                 guard !Task.isCancelled else { return }
 
                 let now = Date()
+                let currentScroll = scrollMetrics.latestScrollState
                 let shouldAutoFollow = ChatScrollPolicy.shouldAutoFollow(
                     isLoading: chatClient.isLoading,
                     followLatest: followLatest,
                     interaction: scrollInteraction,
-                    bottomDistance: scrollState.bottomDistance,
-                    bottomOverscroll: scrollState.bottomOverscroll,
+                    bottomDistance: currentScroll.bottomDistance,
+                    bottomOverscroll: currentScroll.bottomOverscroll,
                     settledBottomTolerance: settledBottomTolerance,
                     contentVersion: contentVersion,
-                    lastHandledContentVersion: lastHandledContentVersion,
+                    lastHandledContentVersion: scrollMetrics.lastHandledContentVersion,
                     now: now,
-                    lastAutoScrollDate: lastAutoScrollDate,
+                    lastAutoScrollDate: scrollMetrics.lastAutoScrollDate,
                     minimumInterval: minimumInterval
                 )
-                lastHandledContentVersion = contentVersion
+                scrollMetrics.lastHandledContentVersion = contentVersion
                 guard shouldAutoFollow else { return }
 
-                lastAutoScrollDate = now
+                scrollMetrics.lastAutoScrollDate = now
                 ChatStreamInstrumentation.recordScrollToBottom()
                 // A stream emits many small content updates. Scrolling them
                 // with a fresh animation every ~180 ms keeps the scroll view

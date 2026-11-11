@@ -38,10 +38,14 @@ final class RecordedReplayStore {
     }
 
     func exportReplay(_ descriptor: RecordedChatReplay.Descriptor) throws -> RecordedReplayExport {
-        let replay = try loadReplay(descriptor)
+        let trimmedID = descriptor.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = try replayURL(id: trimmedID, createDirectoryIfNeeded: false)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw StoreError.replayNotFound(trimmedID)
+        }
         return RecordedReplayExport(
-            filename: "\(replay.id).json",
-            data: try Self.encodedReplayData(replay)
+            filename: "\(trimmedID).json",
+            data: try Data(contentsOf: url)
         )
     }
 
@@ -121,8 +125,16 @@ final class RecordedReplayStore {
     }
 
     private func replayURL(id: String, createDirectoryIfNeeded: Bool) throws -> URL {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains(".."),
+              trimmed != "." else {
+            throw StoreError.invalidReplayIdentifier
+        }
         let directory = try storageDirectoryURL(createIfNeeded: createDirectoryIfNeeded)
-        return directory.appendingPathComponent(id).appendingPathExtension("json")
+        return directory.appendingPathComponent(trimmed).appendingPathExtension("json")
     }
 
     private func storageDirectoryURL(createIfNeeded: Bool) throws -> URL {

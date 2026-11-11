@@ -146,11 +146,6 @@ struct SavedConnection: Codable, Identifiable, Hashable {
         guard let data = credentials.data(using: .utf8) else { return nil }
         return "Basic \(data.base64EncodedString())"
     }
-
-    // MARK: - Hashable (by id only)
-
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
-    static func == (lhs: SavedConnection, rhs: SavedConnection) -> Bool { lhs.id == rhs.id }
 }
 
 struct SavedConnectionPublicSnapshot: Codable, Equatable {

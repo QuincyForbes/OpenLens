@@ -89,6 +89,14 @@ nonisolated struct V2EventAdapter {
              "session.instructions.updated", "session.skill.activated", "session.synthetic",
              "session.shell.started", "session.shell.ended",
              "session.compaction.started", "session.compaction.ended", "session.compaction.failed":
+            if type == "session.idle"
+                || type == "session.execution.interrupted"
+                || type == "session.execution.failed"
+                || type == "session.deleted",
+               let sessionID = data["sessionID"] as? String {
+                let prefix = "\(sessionID)/"
+                tools = tools.filter { !$0.key.hasPrefix(prefix) }
+            }
             return reconcile()
         case "session.execution.started":
             guard let sessionID = data["sessionID"] as? String else { return reconcile() }
@@ -174,21 +182,27 @@ nonisolated struct V2EventAdapter {
         case "session.tool.called":
             state["status"] = "running"
             state["input"] = data["input"]
+            if let title = data["title"] { state["title"] = title }
+            if let metadata = data["metadata"] { state["metadata"] = metadata }
         case "session.tool.progress":
-            state["metadata"] = data["metadata"]
+            if let title = data["title"] { state["title"] = title }
+            if let metadata = data["metadata"] { state["metadata"] = metadata }
         case "session.tool.success", "session.tool.failed":
             state["status"] = type.hasSuffix("success") ? "completed" : "error"
             state["content"] = Self.boundedToolContent(data["content"])
             state["error"] = data["error"]
-            state["metadata"] = data["metadata"]
+            if let title = data["title"] { state["title"] = title }
+            if let metadata = data["metadata"] { state["metadata"] = metadata }
         default:
             break
         }
         let decodedState = try JSONDecoder().decode(OCToolState.self, from: JSONSerialization.data(withJSONObject: state))
-        let safePart = StreamToolPartSafety.sanitize(OCPart(
+        let rawPart = OCPart(
             id: id, sessionID: sessionID, messageID: messageID, type: .tool,
             callID: id, tool: tool["name"] as? String, state: decodedState
-        ))
+        )
+        let isQuestion = PreparedQuestionToolPayload.isQuestionTool(rawPart)
+        let safePart = isQuestion ? rawPart : StreamToolPartSafety.sanitize(rawPart)
         var toolPart: [String: Any] = [
             "id": safePart.id,
             "sessionID": safePart.sessionID,
@@ -197,13 +211,9 @@ nonisolated struct V2EventAdapter {
             "callID": safePart.callID ?? id,
         ]
         if let name = safePart.tool { toolPart["tool"] = name }
-        if let safeState = safePart.state,
-           let stateObj = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(safeState)) as? [String: Any] {
-            toolPart["state"] = stateObj
-        }
-        // Retain only the same bounded fields used by chat, never raw tool input.
+        toolPart["state"] = state
         tool["name"] = safePart.tool
-        tool["state"] = toolPart["state"]
+        tool["state"] = state
         if type == "session.tool.success" || type == "session.tool.failed" {
             tools.removeValue(forKey: key)
         } else {

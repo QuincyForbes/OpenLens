@@ -318,15 +318,27 @@ nonisolated enum ComposerPasteExtractor {
         return parts.joined(separator: "\n\n")
     }
 
+    static func isValidSlashCommandIdentifier(_ token: Substring) -> Bool {
+        guard !token.isEmpty, token.count <= 39,
+              let first = token.first,
+              first.isASCII && first.isLetter else {
+            return false
+        }
+        return token.allSatisfy { ch in
+            ch.isASCII && (ch.isLetter || ch.isNumber || ch == "_" || ch == "-")
+        }
+    }
+
     private static func splitLeadingSlashToken(from text: String) -> (commandToken: String, arguments: String)? {
         let afterSlash = text.dropFirst()
         guard let whitespaceIndex = afterSlash.firstIndex(where: { $0.isWhitespace || $0.isNewline }) else {
             return nil
         }
-        let commandHead = text[..<whitespaceIndex]
-        guard commandHead.count >= 2, commandHead.count <= 40 else {
+        let identifier = afterSlash[..<whitespaceIndex]
+        guard isValidSlashCommandIdentifier(identifier) else {
             return nil
         }
+        let commandHead = text[..<whitespaceIndex]
         let remainder = text[whitespaceIndex...].drop(while: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" })
         guard !remainder.isEmpty else { return nil }
         return (String(commandHead), String(remainder))

@@ -62,7 +62,41 @@ nonisolated struct PreparedQuestionToolPayload: Sendable {
         )
     }
 
-    private static func isQuestionTool(_ part: OCPart) -> Bool {
+    /// Bounded REST representation of a `question` tool part: strips arbitrary
+    /// nested payload fields while keeping only the bounded `questions` and
+    /// `answers` arrays needed for transcript reconstruction.
+    static func boundedRESTPart(from part: OCPart, payload: PreparedQuestionToolPayload) -> OCPart {
+        let boundedQuestionDicts: [[String: Any]] = payload.questions.map { q in
+            var dict: [String: Any] = [
+                "header": q.header,
+                "question": q.question,
+                "options": q.options.map { ["label": $0.label, "description": $0.description] },
+            ]
+            if let multiple = q.multiple { dict["multiple"] = multiple }
+            if let custom = q.custom { dict["custom"] = custom }
+            return dict
+        }
+        let boundedState = OCToolState(
+            status: part.state?.status ?? .pending,
+            input: payload.questions.isEmpty ? nil : AnyCodable(["questions": boundedQuestionDicts]),
+            title: StreamDisplayValue.preview(
+                part.state?.title,
+                maximumBytes: maximumToolTitleBytes
+            ),
+            metadata: payload.answers.isEmpty ? nil : ["answers": AnyCodable(payload.answers)]
+        )
+        return OCPart(
+            id: part.id,
+            sessionID: part.sessionID,
+            messageID: part.messageID,
+            type: .tool,
+            callID: part.callID,
+            tool: "question",
+            state: boundedState
+        )
+    }
+
+    static func isQuestionTool(_ part: OCPart) -> Bool {
         guard part.type == .tool,
               let tool = part.tool else { return false }
 

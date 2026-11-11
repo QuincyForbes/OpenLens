@@ -595,15 +595,22 @@ actor OpenCodeClient {
             attachments: attachments,
             delivery: delivery
         )
-        try Self.validatePromptBodySize(input)
+        let encodedBody = try JSONEncoder().encode(input)
+        if input.files?.isEmpty == false, encodedBody.count > Self.maximumPromptBodyBytes {
+            throw PromptAttachmentError.promptTooLarge
+        }
         let data: Data
         do {
-            data = try await sendV2RequestData(
-                method: "POST",
+            var request = makeV2Request(
                 path: "/api/session/\(sessionID)/prompt",
-                body: input,
                 includesLocation: false
             )
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = encodedBody
+            let (responseData, response) = try await transport.data(for: request)
+            try validateResponse(response, data: responseData)
+            data = responseData
         } catch let OpenCodeError.apiError(statusCode, payload)
             where statusCode == 400 && payload.field == "files" {
             // OpenCode refused an attachment before
@@ -955,7 +962,10 @@ actor OpenCodeClient {
         }
 
         var urlPath = "/file"
-        if let path { urlPath += "?path=\(path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path)" }
+        if let path {
+            let safeAllowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&="))
+            urlPath += "?path=\(path.addingPercentEncoding(withAllowedCharacters: safeAllowed) ?? path)"
+        }
         var request = makeRequest(path: urlPath, method: "GET")
         if let directory {
             request.setValue(directory, forHTTPHeaderField: "x-opencode-directory")
@@ -989,7 +999,8 @@ actor OpenCodeClient {
         }
         guard directory == nil else { throw PromptAttachmentError.attachmentsRequireV2 }
 
-        let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
+        let safeAllowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&="))
+        let encodedPath = path.addingPercentEncoding(withAllowedCharacters: safeAllowed) ?? path
         return try await get("/file/content?path=\(encodedPath)")
     }
 
@@ -1695,10 +1706,9 @@ actor OpenCodeClient {
 
         if let pathParameter {
             let segments = pathParameter.split(separator: "/", omittingEmptySubsequences: true)
-            let encodedSegments = segments.map {
-                $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0)
+            for segment in segments {
+                url.append(component: String(segment), directoryHint: .notDirectory)
             }
-            url.append(path: encodedSegments.joined(separator: "/"))
         }
 
         if var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {

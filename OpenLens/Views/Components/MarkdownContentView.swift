@@ -46,9 +46,14 @@ struct MarkdownContentView: View {
     }()
 
     // Wrapper so we can store [Block] in NSCache (which requires AnyObject values).
+    // Stores `sourceText` (O(1) copy-on-write reference) to guard against 64-bit hash collisions.
     private final class BlocksBox {
+        let sourceText: String
         let blocks: [Block]
-        init(_ blocks: [Block]) { self.blocks = blocks }
+        init(sourceText: String, blocks: [Block]) {
+            self.sourceText = sourceText
+            self.blocks = blocks
+        }
     }
 
     init(
@@ -66,14 +71,14 @@ struct MarkdownContentView: View {
     /// without a 2-pass placeholder height jump inside `LazyVStack`.
     static func cachedOrImmediatePrepared(for text: String) -> Prepared? {
         let key = cacheKey(for: text)
-        if let cached = blockCache.object(forKey: key) {
+        if let cached = blockCache.object(forKey: key), cached.sourceText == text {
             return Prepared(cacheKey: key.intValue, blocks: cached.blocks)
         }
         guard text.utf8.count <= 4_096 else {
             return nil
         }
         let parsed = parseBlocks(from: text)
-        blockCache.setObject(BlocksBox(parsed), forKey: key)
+        blockCache.setObject(BlocksBox(sourceText: text, blocks: parsed), forKey: key)
         return Prepared(cacheKey: key.intValue, blocks: parsed)
     }
 
@@ -84,12 +89,12 @@ struct MarkdownContentView: View {
             let key = cacheKey(for: text)
             let prepared: Prepared
 
-            if let cached = blockCache.object(forKey: key) {
+            if let cached = blockCache.object(forKey: key), cached.sourceText == text {
                 prepared = Prepared(cacheKey: key.intValue, blocks: cached.blocks)
             } else {
                 let signpostID = ChatStreamInstrumentation.beginMarkdownPrewarm(characterCount: text.count)
                 let parsed = parseBlocks(from: text)
-                blockCache.setObject(BlocksBox(parsed), forKey: key)
+                blockCache.setObject(BlocksBox(sourceText: text, blocks: parsed), forKey: key)
                 ChatStreamInstrumentation.endMarkdownPrewarm(signpostID)
                 prepared = Prepared(cacheKey: key.intValue, blocks: parsed)
             }
@@ -316,10 +321,16 @@ struct MarkdownContentView: View {
             let line = lines[i]
 
             if line.hasPrefix("```") {
-                let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let fenceLength = line.prefix(while: { $0 == "`" }).count
+                let lang = String(line.dropFirst(fenceLength)).trimmingCharacters(in: .whitespaces)
                 var codeLines: [String] = []
                 i += 1
-                while i < lines.count && !lines[i].hasPrefix("```") {
+                while i < lines.count {
+                    let candidateTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                    if candidateTrimmed.count >= fenceLength,
+                       candidateTrimmed.allSatisfy({ $0 == "`" }) {
+                        break
+                    }
                     codeLines.append(lines[i])
                     i += 1
                 }
@@ -334,8 +345,9 @@ struct MarkdownContentView: View {
 
             if line.hasPrefix("#") {
                 let level = line.prefix(while: { $0 == "#" }).count
-                let headingText = String(line.dropFirst(level)).trimmingCharacters(in: .whitespaces)
-                if !headingText.isEmpty && level <= 6 {
+                let remainder = line.dropFirst(level)
+                let headingText = String(remainder).trimmingCharacters(in: .whitespaces)
+                if !headingText.isEmpty && level <= 6 && remainder.first?.isWhitespace == true {
                     // A generated heading can be arbitrarily large. Turn it
                     // into ordinary bounded blocks while parsing off-main, so
                     // the first render never asks one Text view to lay out a
@@ -349,10 +361,10 @@ struct MarkdownContentView: View {
                 }
             }
 
-            if line.hasPrefix("> ") {
+            if line == ">" || line.hasPrefix("> ") {
                 var quoteLines: [String] = []
-                while i < lines.count && lines[i].hasPrefix("> ") {
-                    quoteLines.append(String(lines[i].dropFirst(2)))
+                while i < lines.count && (lines[i] == ">" || lines[i].hasPrefix("> ")) {
+                    quoteLines.append(lines[i] == ">" ? "" : String(lines[i].dropFirst(2)))
                     i += 1
                 }
                 let raw = quoteLines.joined(separator: "\n")
@@ -362,9 +374,9 @@ struct MarkdownContentView: View {
                 continue
             }
 
-            if line.hasPrefix("- ") || line.hasPrefix("* ") {
+            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
                 var fragments: [ListFragment] = []
-                while i < lines.count && (lines[i].hasPrefix("- ") || lines[i].hasPrefix("* ")) {
+                while i < lines.count && (lines[i].hasPrefix("- ") || lines[i].hasPrefix("* ") || lines[i].hasPrefix("+ ")) {
                     let raw = String(lines[i].dropFirst(2))
                     appendListFragments(raw: raw, marker: "•", to: &fragments)
                     i += 1
@@ -374,22 +386,11 @@ struct MarkdownContentView: View {
                 continue
             }
 
-            if let firstDot = line.firstIndex(of: "."),
-               line.distance(from: line.startIndex, to: firstDot) <= 3,
-               let _ = Int(line[line.startIndex..<firstDot]) {
+            if parseOrderedListItem(line) != nil {
                 var fragments: [ListFragment] = []
-                while i < lines.count {
-                    let currentLine = lines[i]
-                    if let dot = currentLine.firstIndex(of: "."),
-                       currentLine.distance(from: currentLine.startIndex, to: dot) <= 3,
-                       let ordinal = Int(currentLine[currentLine.startIndex..<dot]) {
-                        let afterDot = currentLine[currentLine.index(after: dot)...]
-                        let raw = afterDot.trimmingCharacters(in: .whitespaces)
-                        appendListFragments(raw: raw, marker: "\(ordinal).", to: &fragments)
-                        i += 1
-                    } else {
-                        break
-                    }
+                while i < lines.count, let item = parseOrderedListItem(lines[i]) {
+                    appendListFragments(raw: item.body, marker: "\(item.ordinal).", to: &fragments)
+                    i += 1
                 }
                 blocks.append(Block(id: nextID, kind: .orderedList(fragments)))
                 nextID += 1
@@ -406,8 +407,15 @@ struct MarkdownContentView: View {
             while i < lines.count {
                 let current = lines[i]
                 let trimmed = current.trimmingCharacters(in: .whitespaces)
-                if trimmed.isEmpty || current.hasPrefix("```") || current.hasPrefix("#") ||
-                   current.hasPrefix("> ") || current.hasPrefix("- ") || current.hasPrefix("* ") {
+                if trimmed.isEmpty
+                    || current.hasPrefix("```")
+                    || isHeadingLine(current)
+                    || current == ">"
+                    || current.hasPrefix("> ")
+                    || current.hasPrefix("- ")
+                    || current.hasPrefix("* ")
+                    || current.hasPrefix("+ ")
+                    || parseOrderedListItem(current) != nil {
                     break
                 }
                 paraLines.append(current)
@@ -424,6 +432,31 @@ struct MarkdownContentView: View {
         }
 
         return blocks
+    }
+
+    private static func isHeadingLine(_ line: String) -> Bool {
+        guard line.hasPrefix("#") else { return false }
+        let level = line.prefix(while: { $0 == "#" }).count
+        guard level <= 6 else { return false }
+        let remainder = line.dropFirst(level)
+        return remainder.first?.isWhitespace == true
+            && !remainder.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private static func parseOrderedListItem(_ line: String) -> (ordinal: Int, body: String)? {
+        guard let dot = line.firstIndex(of: ".") else { return nil }
+        let prefix = line[..<dot]
+        guard !prefix.isEmpty,
+              prefix.count <= 3,
+              prefix.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let ordinal = Int(prefix) else {
+            return nil
+        }
+        let afterDot = line[line.index(after: dot)...]
+        guard afterDot.isEmpty || afterDot.first?.isWhitespace == true else {
+            return nil
+        }
+        return (ordinal, afterDot.trimmingCharacters(in: .whitespaces))
     }
 
     private static func textFragments(from text: String) -> [TextFragment] {

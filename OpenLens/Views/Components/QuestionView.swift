@@ -335,6 +335,7 @@ struct QuestionView: View {
     // MARK: - Logic
 
     private func initializeState() {
+        currentQuestionIndex = 0
         selections = questions.map { _ in [] }
         customTexts = questions.map { _ in "" }
         showingCustomInput = questions.map { _ in false }

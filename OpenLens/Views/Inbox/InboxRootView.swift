@@ -28,6 +28,8 @@ struct InboxRootView: View {
     @State private var sessionsByID: [String: OCSession] = [:]
     @State private var activeQuestion: OCQuestionRequest?
     @State private var activeForm: OCFormRequest?
+    @State private var confirmingAllowAllPermission: OCPermissionRequest?
+    @State private var allowAllSheetDetent = PermissionRequestSheet.defaultPresentationDetent
     @State private var isResolvingForm = false
 
     var body: some View {
@@ -89,6 +91,28 @@ struct InboxRootView: View {
                 }
             )
             .interactiveDismissDisabled(isResolvingForm)
+            .id(form.identity)
+        }
+        .sheet(item: $confirmingAllowAllPermission) { permission in
+            PermissionRequestSheet(
+                permission: permission,
+                selectedDetent: $allowAllSheetDetent,
+                initiallyConfirmsAllowAll: true,
+                onDefer: {
+                    confirmingAllowAllPermission = nil
+                },
+                onRespond: { reply in
+                    await respondToPermission(permission, reply: reply)
+                }
+            )
+            .presentationDetents(
+                PermissionRequestSheet.presentationDetents(for: permission),
+                selection: $allowAllSheetDetent
+            )
+            .presentationBackground(Color.appBackground)
+            .presentationContentInteraction(.resizes)
+            .presentationDragIndicator(.visible)
+            .id(permission.id)
         }
     }
 
@@ -200,12 +224,13 @@ struct InboxRootView: View {
                                 }
                                 actionButton(title: AppText.allowOnce, fill: Color.appAccent, foreground: Color.appOnAccent) {
                                     Task {
-                                        await respondToPermission(permission, reply: .once)
+                                        _ = await respondToPermission(permission, reply: .once)
                                     }
                                 }
-                                actionButton(title: AppText.allowAll, fill: Color.appWarning.opacity(0.14), foreground: Color.appWarning) {
-                                    Task {
-                                        await respondToPermission(permission, reply: .always)
+                                if PermissionRequestSheet.offersAlwaysApproval(for: permission) {
+                                    actionButton(title: AppText.allowAll, fill: Color.appWarning.opacity(0.14), foreground: Color.appWarning) {
+                                        allowAllSheetDetent = PermissionRequestSheet.defaultPresentationDetent
+                                        confirmingAllowAllPermission = permission
                                     }
                                 }
                             }
@@ -455,7 +480,7 @@ struct InboxRootView: View {
             async let loadedSessions = try? sessionsService.listAllSessions()
             snapshot = try await inboxService.loadInbox()
             if let sessions = await loadedSessions {
-                sessionsByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+                sessionsByID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
             }
             viewState = .loaded
         } catch {
@@ -463,16 +488,22 @@ struct InboxRootView: View {
         }
     }
 
-    private func respondToPermission(_ permission: OCPermissionRequest, reply: OCPermissionReply) async {
+    @discardableResult
+    private func respondToPermission(_ permission: OCPermissionRequest, reply: OCPermissionReply) async -> Bool {
         do {
             try await inboxService.respondToPermission(permission, reply: reply)
+            if confirmingAllowAllPermission?.id == permission.id {
+                confirmingAllowAllPermission = nil
+            }
             if chatClient.pendingPermission?.id == permission.id {
                 chatClient.pendingPermission = nil
                 chatClient.showPermissionAlert = false
             }
             await loadInbox(force: true)
+            return true
         } catch {
             viewState = .error(error.localizedDescription)
+            return false
         }
     }
 

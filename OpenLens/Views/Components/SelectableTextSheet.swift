@@ -117,7 +117,7 @@ struct SelectableTextSheet: View {
 /// Sheet for inspecting or editing a large pasted snippet in the chat composer.
 struct PastedSnippetEditorSheet: View {
     let snippet: ComposerPastedSnippet
-    let onSave: (String) -> Void
+    let onSave: (String) -> Bool
     let onExpandIntoField: (() -> Void)?
     let onRemove: () -> Void
 
@@ -125,10 +125,11 @@ struct PastedSnippetEditorSheet: View {
     @State private var draftText: String
     @State private var usesMonospacedFont = false
     @State private var didCopy = false
+    @State private var didExplicitlyFinish = false
 
     init(
         snippet: ComposerPastedSnippet,
-        onSave: @escaping (String) -> Void,
+        onSave: @escaping (String) -> Bool,
         onExpandIntoField: (() -> Void)? = nil,
         onRemove: @escaping () -> Void
     ) {
@@ -146,6 +147,13 @@ struct PastedSnippetEditorSheet: View {
             ) ?? snippet.text.endIndex
             self._draftText = State(initialValue: String(snippet.text[..<cut]))
         }
+    }
+
+    private var currentMetricsLabel: String {
+        guard snippet.isEditableInSheet, draftText.utf8.count != snippet.byteCount else {
+            return snippet.metricsLabel
+        }
+        return LongTextMetrics.computeBounded(for: draftText).summaryLabel
     }
 
     var body: some View {
@@ -180,7 +188,7 @@ struct PastedSnippetEditorSheet: View {
                     VStack(spacing: 1) {
                         Text("Pasted Text")
                             .font(.headline)
-                        Text(snippet.metricsLabel)
+                        Text(currentMetricsLabel)
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -188,6 +196,7 @@ struct PastedSnippetEditorSheet: View {
 
                 ToolbarItemGroup(placement: .topBarLeading) {
                     Button(role: .destructive) {
+                        didExplicitlyFinish = true
                         onRemove()
                         dismiss()
                     } label: {
@@ -198,6 +207,10 @@ struct PastedSnippetEditorSheet: View {
                         Button {
                             UIPasteboard.general.string = snippet.isEditableInSheet ? draftText : snippet.text
                             didCopy = true
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .seconds(1.5))
+                                didCopy = false
+                            }
                         } label: {
                             Label(didCopy ? "Copied" : "Copy All", systemImage: "doc.on.doc")
                         }
@@ -214,8 +227,9 @@ struct PastedSnippetEditorSheet: View {
                         if let onExpandIntoField, snippet.canExpandIntoTextField {
                             Button {
                                 if snippet.isEditableInSheet, draftText != snippet.text {
-                                    onSave(draftText)
+                                    guard onSave(draftText) else { return }
                                 }
+                                didExplicitlyFinish = true
                                 onExpandIntoField()
                                 dismiss()
                             } label: {
@@ -231,8 +245,9 @@ struct PastedSnippetEditorSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(AppText.done) {
                         if snippet.isEditableInSheet, draftText != snippet.text {
-                            onSave(draftText)
+                            guard onSave(draftText) else { return }
                         }
+                        didExplicitlyFinish = true
                         dismiss()
                     }
                     .fontWeight(.semibold)
@@ -241,6 +256,11 @@ struct PastedSnippetEditorSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .onDisappear {
+            if !didExplicitlyFinish, snippet.isEditableInSheet, draftText != snippet.text {
+                _ = onSave(draftText)
+            }
+        }
     }
 }
 

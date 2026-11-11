@@ -75,10 +75,19 @@ final class GitHubRepositoryService {
     private(set) var isSearchingGitHub = false
     private(set) var errorMessage: String?
 
+    private var searchGeneration: UInt = 0
+
     var personalAccessToken: String {
         didSet {
             let trimmed = personalAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
+            if userDefaults === UserDefaults.standard {
+                userDefaults.removeObject(forKey: Self.tokenPreferenceKey)
+                if trimmed.isEmpty {
+                    KeychainService.delete(key: Self.tokenPreferenceKey)
+                } else {
+                    KeychainService.save(key: Self.tokenPreferenceKey, value: trimmed)
+                }
+            } else if trimmed.isEmpty {
                 userDefaults.removeObject(forKey: Self.tokenPreferenceKey)
             } else {
                 userDefaults.set(trimmed, forKey: Self.tokenPreferenceKey)
@@ -105,7 +114,19 @@ final class GitHubRepositoryService {
     ) {
         self.userDefaults = userDefaults
         self.dataLoader = dataLoader
-        self.personalAccessToken = userDefaults.string(forKey: Self.tokenPreferenceKey) ?? ""
+        if userDefaults === UserDefaults.standard {
+            if let keychainToken = KeychainService.load(key: Self.tokenPreferenceKey), !keychainToken.isEmpty {
+                self.personalAccessToken = keychainToken
+            } else if let legacyToken = userDefaults.string(forKey: Self.tokenPreferenceKey), !legacyToken.isEmpty {
+                self.personalAccessToken = legacyToken
+                KeychainService.save(key: Self.tokenPreferenceKey, value: legacyToken)
+                userDefaults.removeObject(forKey: Self.tokenPreferenceKey)
+            } else {
+                self.personalAccessToken = ""
+            }
+        } else {
+            self.personalAccessToken = userDefaults.string(forKey: Self.tokenPreferenceKey) ?? ""
+        }
         self.ownersText = userDefaults.string(forKey: Self.ownersPreferenceKey) ?? Self.defaultOwners.joined(separator: ", ")
     }
 
@@ -181,13 +202,25 @@ final class GitHubRepositoryService {
             return
         }
 
+        searchGeneration &+= 1
+        let generation = searchGeneration
         isSearchingGitHub = true
         errorMessage = nil
-        defer { isSearchingGitHub = false }
+        defer {
+            if generation == searchGeneration {
+                isSearchingGitHub = false
+            }
+        }
 
         let token = personalAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "https://api.github.com/search/repositories?q=\(encoded)&sort=stars&order=desc&per_page=30") else {
+        var components = URLComponents(string: "https://api.github.com/search/repositories")
+        components?.queryItems = [
+            URLQueryItem(name: "q", value: trimmed),
+            URLQueryItem(name: "sort", value: "stars"),
+            URLQueryItem(name: "order", value: "desc"),
+            URLQueryItem(name: "per_page", value: "30"),
+        ]
+        guard let url = components?.url else {
             errorMessage = "Invalid search query."
             return
         }
@@ -195,6 +228,7 @@ final class GitHubRepositoryService {
         do {
             let request = Self.makeGitHubRequest(url: url, token: token)
             let (data, response) = try await dataLoader(request)
+            guard !Task.isCancelled, generation == searchGeneration else { return }
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 throw URLError(.badServerResponse)
             }

@@ -45,6 +45,7 @@ struct ReviewRootView: View {
     @Bindable var chatClient: ChatClient
 
     @Environment(AppRouter.self) private var router: AppRouter?
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.inboxService) private var inboxService
     @Environment(\.reviewService) private var reviewService
     @Environment(\.sessionsService) private var sessionsService
@@ -102,12 +103,15 @@ struct ReviewRootView: View {
                 files: selectedScopeState.files,
                 onSelectFile: { selectedFile = $0 },
                 onQuoteInChat: { quote in
-                    chatClient.appendQuotedDiff(quote)
                     selectedFile = nil
                     if let reviewSession = selectedReviewSession ?? chatClient.currentSession {
                         chatClient.prepareForOpeningSession(reviewSession)
+                        chatClient.appendQuotedDiff(quote)
                         router?.selectChatSession(reviewSession)
+                    } else {
+                        chatClient.appendQuotedDiff(quote)
                     }
+                    dismiss()
                 }
             )
         }
@@ -620,6 +624,7 @@ struct ReviewRootView: View {
                 return
             }
         } catch {
+            changeSetToRevert = nil
             // A staged revert can fail after the server changed its preview.
             // Always replace the displayed review snapshot before reporting the
             // failure so the user can safely retry once the session is idle.
@@ -627,6 +632,7 @@ struct ReviewRootView: View {
                 showRevertRefreshFailure()
                 return
             }
+            viewState = .error("Failed to revert changes: \(error.localizedDescription)")
         }
     }
 

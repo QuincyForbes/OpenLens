@@ -1310,7 +1310,7 @@ nonisolated struct OCV2ModelInfo: Decodable, Sendable {
         } else if let variantList = try? container.decodeIfPresent([OCV2ModelVariant].self, forKey: .variants) {
             variants = variantList.isEmpty
                 ? nil
-                : Dictionary(uniqueKeysWithValues: variantList.map { ($0.id, $0.providerVariant) })
+                : Dictionary(variantList.map { ($0.id, $0.providerVariant) }, uniquingKeysWith: { _, latest in latest })
         } else {
             variants = nil
         }
@@ -2428,8 +2428,8 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
                     state: item.state
                 )
                 guard rawPart.type == .tool else { return rawPart }
-                if PreparedQuestionToolPayload.prepare(from: rawPart) != nil {
-                    return PreparedQuestionToolPayload.sanitizedPart(from: rawPart)
+                if let payload = PreparedQuestionToolPayload.prepare(from: rawPart) {
+                    return PreparedQuestionToolPayload.boundedRESTPart(from: rawPart, payload: payload)
                 }
                 return StreamToolPartSafety.sanitize(rawPart)
             }

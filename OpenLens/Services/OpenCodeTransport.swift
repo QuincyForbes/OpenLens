@@ -87,6 +87,7 @@ nonisolated private final class DirectOpenCodeEventStream: NSObject, OpenCodeEve
     private let callbacks: OpenCodeEventStreamCallbacks
     private var session: URLSession?
     private var task: URLSessionDataTask?
+    private var isCancelled = false
 
     init(
         request: URLRequest,
@@ -100,7 +101,7 @@ nonisolated private final class DirectOpenCodeEventStream: NSObject, OpenCodeEve
 
     func start() {
         deliveryQueue.async { [self] in
-            guard task == nil, session == nil else { return }
+            guard !isCancelled, task == nil, session == nil else { return }
 
             let configuration = URLSessionConfiguration.ephemeral
             configuration.urlCache = nil
@@ -136,6 +137,7 @@ nonisolated private final class DirectOpenCodeEventStream: NSObject, OpenCodeEve
 
     func cancel() {
         deliveryQueue.async { [weak self] in
+            self?.isCancelled = true
             self?.task?.cancel()
             self?.task = nil
             self?.session?.invalidateAndCancel()

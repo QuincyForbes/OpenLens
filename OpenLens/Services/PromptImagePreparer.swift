@@ -11,6 +11,7 @@ nonisolated struct PromptImageAttachment: Identifiable, Hashable, Sendable {
     let name: String
     let pixelWidth: Int
     let pixelHeight: Int
+    let dataURI: String
 
     init(
         id: String = UUID().uuidString,
@@ -26,10 +27,7 @@ nonisolated struct PromptImageAttachment: Identifiable, Hashable, Sendable {
         self.name = name
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
-    }
-
-    var dataURI: String {
-        "data:\(mime);base64,\(data.base64EncodedString())"
+        self.dataURI = "data:\(mime);base64,\(data.base64EncodedString())"
     }
 
     var promptFile: OCV2PromptFile {

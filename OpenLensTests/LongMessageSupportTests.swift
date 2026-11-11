@@ -242,6 +242,53 @@ struct LongMessageSupportTests {
         #expect(hunks.flatMap(\.lines).contains { $0.kind == .added && $0.text.contains("updatedTail") })
     }
 
+    @Test func pastingCommentsOrUnixPathsDoesNotSplitAsSlashCommand() {
+        let swiftCommentFile = "// ChatView.swift\n" + String(repeating: "import SwiftUI\nstruct Sample {}\n", count: 45)
+        let blockCommentFile = "/* Header license */\n" + String(repeating: "let value = 1\n", count: 80)
+        let unixPathLog = "/Users/dev/OpenLens/App.swift:42: error: failed\n" + String(repeating: "stack frame\n", count: 90)
+
+        let commentExtraction = ComposerPasteExtractor.extractLargePaste(previous: "", updated: swiftCommentFile)
+        #expect(commentExtraction?.remainingInputText == "")
+        #expect(commentExtraction?.pastedText == swiftCommentFile)
+
+        let blockExtraction = ComposerPasteExtractor.extractLargePaste(previous: "", updated: blockCommentFile)
+        #expect(blockExtraction?.remainingInputText == "")
+        #expect(blockExtraction?.pastedText == blockCommentFile)
+
+        let pathExtraction = ComposerPasteExtractor.extractLargePaste(previous: "", updated: unixPathLog)
+        #expect(pathExtraction?.remainingInputText == "")
+        #expect(pathExtraction?.pastedText == unixPathLog)
+    }
+
+    @Test func duplicateSlashCatalogEntriesDoNotTrap() {
+        let chat = makeChat()
+        chat.updateSlashCatalog(
+            commands: ["undo", "Undo", "review", "Review"],
+            agents: ["explore", "Explore"]
+        )
+        #expect(chat.errorMessage == nil)
+    }
+
+    @Test func markdownParserDistinguishesDirectivesDecimalsAndOrderedLists() throws {
+        let directive = try #require(MarkdownContentView.cachedOrImmediatePrepared(
+            for: "#if DEBUG\n3.14 is roughly pi\nSteps:\n1. First step\n2. Second step"
+        ))
+
+        #expect(directive.blocks.count == 2)
+        if case let .paragraph(_, text) = directive.blocks.first?.kind {
+            #expect(text.contains("#if DEBUG"))
+            #expect(text.contains("3.14 is roughly pi"))
+        } else {
+            Issue.record("Expected compiler directive and decimal line to remain a paragraph")
+        }
+        if case let .orderedList(items) = directive.blocks.last?.kind {
+            #expect(items.count == 2)
+            #expect(items.first?.marker == "1.")
+        } else {
+            Issue.record("Expected trailing numbered lines to parse as an ordered list")
+        }
+    }
+
     private func makeChat() -> ChatClient {
         let connection = ConnectionManager()
         return ChatClient(

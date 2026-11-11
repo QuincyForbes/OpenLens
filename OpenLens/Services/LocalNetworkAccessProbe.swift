@@ -82,7 +82,7 @@ final class LocalNetworkAccessProbe: LocalNetworkAccessProbing {
     }
 
     private func endpoint(for url: URL) -> NWEndpoint? {
-        guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let host = url.host(percentEncoded: false)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !host.isEmpty
         else {
             return nil
@@ -106,6 +106,7 @@ private final class LocalNetworkProbeCoordinator {
 
     private var continuation: CheckedContinuation<LocalNetworkAccessProbeResult, Never>?
     private var timeoutTask: Task<Void, Never>?
+    private var preparingTimeoutTask: Task<Void, Never>?
     private var wasCancelled = false
 
     init(endpoint: NWEndpoint, queue: DispatchQueue, timeout: Duration) {
@@ -121,6 +122,14 @@ private final class LocalNetworkProbeCoordinator {
             guard !wasCancelled else {
                 finish(.continueConnection)
                 return
+            }
+
+            // Cap `.preparing` so an asleep/unreachable LAN or Tailscale peer does not
+            // hang until the ~75s kernel TCP SYN timeout before `probeCapabilities` runs.
+            preparingTimeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(2500))
+                guard !Task.isCancelled else { return }
+                self?.finish(.continueConnection)
             }
 
             connection.stateUpdateHandler = { [weak self] state in
@@ -144,6 +153,8 @@ private final class LocalNetworkProbeCoordinator {
 
         case .waiting:
             if connection.currentPath?.unsatisfiedReason == .localNetworkDenied {
+                preparingTimeoutTask?.cancel()
+                preparingTimeoutTask = nil
                 waitForPermissionDecision()
             } else {
                 finish(.continueConnection)
@@ -171,6 +182,8 @@ private final class LocalNetworkProbeCoordinator {
     }
 
     private func finish(_ result: LocalNetworkAccessProbeResult) {
+        preparingTimeoutTask?.cancel()
+        preparingTimeoutTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
         connection.stateUpdateHandler = nil

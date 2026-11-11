@@ -181,7 +181,12 @@ final class MeridianUsageService {
         return candidates.filter { seen.insert($0.absoluteString).inserted }
     }
 
+    private var refreshGeneration: UInt = 0
+
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+
         if ScreenshotFixtures.isEnabled {
             state = .loaded(Self.fixtureSnapshot)
             return
@@ -204,35 +209,61 @@ final class MeridianUsageService {
                 tmpDirectory: tmpDir,
                 displayURL: URL(string: "https://desktop-t43r9nu.taild1dd15.ts.net:8443")!
             ) {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == refreshGeneration else { return }
                 state = .loaded(bridged)
                 return
             }
         }
 
         guard !candidates.isEmpty else {
+            guard generation == refreshGeneration else { return }
             state = .failed("Connect to a server or set a Meridian URL (for example http://host:3456).")
             return
         }
 
-        var lastError: Error?
-        for baseURL in candidates {
-            do {
-                let loaded = try await loader(baseURL)
-                try Task.checkCancellation()
-                state = .loaded(loaded)
-                return
-            } catch is CancellationError {
-                return
-            } catch {
-                lastError = error
+        let loader = self.loader
+        let raceOutcome = await withTaskGroup(
+            of: (Int, Result<MeridianUsageSnapshot, Error>).self,
+            returning: Result<MeridianUsageSnapshot, Error>?.self
+        ) { group in
+            for (index, baseURL) in candidates.enumerated() {
+                group.addTask {
+                    do {
+                        return (index, .success(try await loader(baseURL)))
+                    } catch {
+                        return (index, .failure(error))
+                    }
+                }
             }
+
+            var lastError: Error?
+            for await (_, result) in group {
+                switch result {
+                case .success(let snapshot):
+                    group.cancelAll()
+                    return .success(snapshot)
+                case .failure(let error):
+                    if !(error is CancellationError) {
+                        lastError = error
+                    }
+                }
+            }
+            return lastError.map { .failure($0) }
+        }
+
+        guard !Task.isCancelled, generation == refreshGeneration else { return }
+
+        if case let .success(loaded) = raceOutcome {
+            state = .loaded(loaded)
+            return
         }
 
         if let previous {
             state = .loaded(previous)
+        } else if case let .failure(error) = raceOutcome {
+            state = .failed(error.localizedDescription)
         } else {
-            state = .failed(lastError?.localizedDescription ?? "Could not reach Meridian dashboard.")
+            state = .failed("Could not reach Meridian dashboard.")
         }
     }
 
@@ -321,7 +352,8 @@ final class MeridianUsageService {
         let telemetry = telemetryData.flatMap { try? decoder.decode(TelemetryResponse.self, from: $0) }
 
         let metadataByID = Dictionary(
-            uniqueKeysWithValues: (profileList?.profiles ?? []).map { ($0.id, $0) }
+            (profileList?.profiles ?? []).map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
         )
         let activeIDs = Set(
             [quota.activeProfile, profileList?.activeProfile].compactMap { $0 }
