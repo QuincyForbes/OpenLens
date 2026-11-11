@@ -67,14 +67,13 @@ nonisolated struct PreparedQuestionToolPayload: Sendable {
     /// `answers` arrays needed for transcript reconstruction.
     static func boundedRESTPart(from part: OCPart, payload: PreparedQuestionToolPayload) -> OCPart {
         let boundedQuestionDicts: [[String: Any]] = payload.questions.map { q in
-            var dict: [String: Any] = [
+            [
                 "header": q.header,
                 "question": q.question,
                 "options": q.options.map { ["label": $0.label, "description": $0.description] },
+                "multiple": q.multiple,
+                "custom": q.custom,
             ]
-            if let multiple = q.multiple { dict["multiple"] = multiple }
-            if let custom = q.custom { dict["custom"] = custom }
-            return dict
         }
         let boundedState = OCToolState(
             status: part.state?.status ?? .pending,
