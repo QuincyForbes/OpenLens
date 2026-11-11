@@ -75,17 +75,23 @@ final class GitHubRepositoryService {
     private(set) var isSearchingGitHub = false
     private(set) var errorMessage: String?
 
-    private var searchGeneration: UInt = 0
+    @ObservationIgnored private var searchGeneration: UInt = 0
+    @ObservationIgnored private var tokenPersistenceTask: Task<Void, Never>?
 
     var personalAccessToken: String {
         didSet {
             let trimmed = personalAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
             if userDefaults === UserDefaults.standard {
                 userDefaults.removeObject(forKey: Self.tokenPreferenceKey)
-                if trimmed.isEmpty {
-                    KeychainService.delete(key: Self.tokenPreferenceKey)
-                } else {
-                    KeychainService.save(key: Self.tokenPreferenceKey, value: trimmed)
+                tokenPersistenceTask?.cancel()
+                tokenPersistenceTask = Task {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    guard !Task.isCancelled else { return }
+                    if trimmed.isEmpty {
+                        KeychainService.delete(key: Self.tokenPreferenceKey)
+                    } else {
+                        KeychainService.save(key: Self.tokenPreferenceKey, value: trimmed)
+                    }
                 }
             } else if trimmed.isEmpty {
                 userDefaults.removeObject(forKey: Self.tokenPreferenceKey)
@@ -155,22 +161,26 @@ final class GitHubRepositoryService {
         var collected: [GitHubRepositoryItem] = []
 
         do {
+            let ownerURLs: [String] = owners.compactMap { owner in
+                guard let encodedOwner = owner.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+                    return nil
+                }
+                return "https://api.github.com/users/\(encodedOwner)/repos?sort=updated&per_page=100"
+            }
+
             if !token.isEmpty {
-                let authenticated = try await fetchRepositories(
+                async let authenticatedTask = fetchRepositories(
                     urlString: "https://api.github.com/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator,organization_member",
                     token: token
                 )
+                async let ownerReposTask = fetchOwnerRepositoriesConcurrently(urls: ownerURLs, token: token)
+                let authenticated = try await authenticatedTask
+                let ownerRepos = await ownerReposTask
                 collected.append(contentsOf: authenticated)
-            }
-
-            for owner in owners {
-                guard let encodedOwner = owner.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { continue }
-                if let userRepos = try? await fetchRepositories(
-                    urlString: "https://api.github.com/users/\(encodedOwner)/repos?sort=updated&per_page=100",
-                    token: token
-                ) {
-                    collected.append(contentsOf: userRepos)
-                }
+                collected.append(contentsOf: ownerRepos)
+            } else {
+                let ownerRepos = await fetchOwnerRepositoriesConcurrently(urls: ownerURLs, token: token)
+                collected.append(contentsOf: ownerRepos)
             }
 
             accessibleRepositories = Self.deduplicatedAndSorted(collected)
@@ -333,6 +343,31 @@ final class GitHubRepositoryService {
             cloneURL: "https://github.com/\(fullName).git",
             htmlURL: "https://github.com/\(fullName)"
         )
+    }
+
+    private func fetchOwnerRepositoriesConcurrently(urls: [String], token: String) async -> [GitHubRepositoryItem] {
+        guard !urls.isEmpty else { return [] }
+        let loader = dataLoader
+        return await withTaskGroup(of: [GitHubRepositoryItem].self) { group in
+            for urlString in urls {
+                group.addTask {
+                    guard let url = URL(string: urlString) else { return [] }
+                    let request = Self.makeGitHubRequest(url: url, token: token)
+                    guard let (data, response) = try? await loader(request),
+                          let http = response as? HTTPURLResponse,
+                          (200..<300).contains(http.statusCode),
+                          let decoded = try? Self.decodeRepositories(from: data) else {
+                        return []
+                    }
+                    return decoded
+                }
+            }
+            var combined: [GitHubRepositoryItem] = []
+            for await batch in group {
+                combined.append(contentsOf: batch)
+            }
+            return combined
+        }
     }
 
     private func fetchRepositories(urlString: String, token: String) async throws -> [GitHubRepositoryItem] {

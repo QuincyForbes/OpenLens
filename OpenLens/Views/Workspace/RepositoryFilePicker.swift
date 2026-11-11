@@ -224,10 +224,15 @@ private struct RepositoryFileRangeView: View {
             ContentUnavailableView(AppText.repositoryFileUnavailable, systemImage: "doc", description: Text(message))
         case let .loaded(lines):
             let trimmedSearch = lineSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            let selectedRange: ServerFileReference.LineRange? = {
+                if case let .valid(range) = selection { return range }
+                return nil
+            }()
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(lines.prefix(Self.maximumPreviewLines).enumerated()), id: \.offset) { index, line in
                         let lineNumber = index + 1
+                        let lineSelected = selectedRange.map { lineNumber >= $0.start && lineNumber <= ($0.end ?? .max) } ?? false
                         let matchesSearch = !trimmedSearch.isEmpty && line.localizedCaseInsensitiveContains(trimmedSearch)
                         Button {
                             let updated = RepositoryFilePicker.updatedLineRange(
@@ -240,8 +245,8 @@ private struct RepositoryFileRangeView: View {
                         } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
                                 Text("\(lineNumber)")
-                                    .foregroundStyle(isSelected(lineNumber) ? Color.appAccent : Color.appSecondary)
-                                    .fontWeight(isSelected(lineNumber) ? .bold : .regular)
+                                    .foregroundStyle(lineSelected ? Color.appAccent : Color.appSecondary)
+                                    .fontWeight(lineSelected ? .bold : .regular)
                                     .frame(minWidth: 36, alignment: .trailing)
                                 Text(line.isEmpty ? " " : line)
                                     .foregroundStyle(Color.appPrimary)
@@ -251,7 +256,7 @@ private struct RepositoryFileRangeView: View {
                             .padding(.vertical, 2)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(
-                                isSelected(lineNumber)
+                                lineSelected
                                     ? Color.appAccent.opacity(0.16)
                                     : (matchesSearch ? Color.yellow.opacity(0.18) : .clear)
                             )
@@ -313,16 +318,15 @@ private struct RepositoryFileRangeView: View {
         return .valid(lines)
     }
 
-    private func isSelected(_ line: Int) -> Bool {
-        guard case let .valid(lines?) = selection else { return false }
-        return line >= lines.start && line <= (lines.end ?? .max)
-    }
-
     private func load() async {
         loadState = .loading
         do {
             let text = try await workspaceService.readRepositoryFile(at: entry.path, in: directory)
-            loadState = .loaded(text.components(separatedBy: "\n"))
+            let splitLines = await Task.detached(priority: .userInitiated) {
+                text.components(separatedBy: "\n")
+            }.value
+            guard !Task.isCancelled else { return }
+            loadState = .loaded(splitLines)
         } catch {
             loadState = .error(error.localizedDescription)
         }

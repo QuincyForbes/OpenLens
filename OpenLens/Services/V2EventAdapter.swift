@@ -4,6 +4,8 @@ import Foundation
 /// reducers. Owned by SSEClient's serial queue; reset on every stream change.
 nonisolated struct V2EventAdapter {
     private var tools: [String: [String: Any]] = [:]
+    private var cachedContextDirectory: (raw: String, normalized: String?)?
+    private var cachedEventDirectory: (raw: String, normalized: String?)?
     private static let maximumTools = 256
     /// Emitted when a session's pending inbox changed but its transcript did not.
     static let inboxChangedEventType = "session.inbox.changed"
@@ -52,9 +54,12 @@ nonisolated struct V2EventAdapter {
         if let directory {
             if let location = envelope["location"] as? [String: Any],
                let eventDirectory = location["directory"] as? String {
-                guard WorkspaceSelectionBuilder.normalizedDirectory(eventDirectory)
-                        == WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
-                    return nil
+                if eventDirectory != directory {
+                    let normalizedContext = normalizedContextDirectory(for: directory)
+                    let normalizedEvent = normalizedEventDirectory(for: eventDirectory)
+                    guard normalizedEvent == normalizedContext else {
+                        return nil
+                    }
                 }
             } else if envelope["location"] != nil {
                 throw OpenCodeError.invalidPayload("Native v2 event has no location.")
@@ -151,11 +156,25 @@ nonisolated struct V2EventAdapter {
                 guard let delta = data["delta"] as? String else { throw OpenCodeError.invalidPayload("Invalid v2 delta.") }
                 return make("message.part.delta", ["sessionID": sessionID, "messageID": messageID, "partID": partID, "field": "text", "delta": delta])
             }
-            return make("message.part.updated", ["part": [
-                "id": partID, "sessionID": sessionID, "messageID": messageID,
-                "type": type.hasPrefix("session.reasoning.") ? "reasoning" : "text",
-                "text": data["text"] as? String ?? ""
-            ]])
+            let isReasoning = type.hasPrefix("session.reasoning.")
+            let textValue = data["text"] as? String ?? ""
+            let prepared = OCPart(
+                id: partID,
+                sessionID: sessionID,
+                messageID: messageID,
+                type: isReasoning ? .reasoning : .text,
+                text: textValue
+            )
+            return make("message.part.updated", [
+                "part": [
+                    "id": partID,
+                    "sessionID": sessionID,
+                    "messageID": messageID,
+                    "type": isReasoning ? "reasoning" : "text",
+                    "text": textValue,
+                ],
+                "preparedPart": prepared,
+            ])
         }
         guard let id = data["id"] as? String, StreamDisplayValue.fitsIdentifier(id) else {
             throw OpenCodeError.invalidPayload("Invalid native v2 tool identity.")
@@ -220,6 +239,24 @@ nonisolated struct V2EventAdapter {
             tools[key] = tool
         }
         return make("message.part.updated", ["part": toolPart, "preparedPart": safePart])
+    }
+
+    private mutating func normalizedContextDirectory(for raw: String) -> String? {
+        if let cached = cachedContextDirectory, cached.raw == raw {
+            return cached.normalized
+        }
+        let normalized = WorkspaceSelectionBuilder.normalizedDirectory(raw)
+        cachedContextDirectory = (raw, normalized)
+        return normalized
+    }
+
+    private mutating func normalizedEventDirectory(for raw: String) -> String? {
+        if let cached = cachedEventDirectory, cached.raw == raw {
+            return cached.normalized
+        }
+        let normalized = WorkspaceSelectionBuilder.normalizedDirectory(raw)
+        cachedEventDirectory = (raw, normalized)
+        return normalized
     }
 
     /// Bounds text items inside `session.tool.success` before JSON re-encoding so a

@@ -45,6 +45,7 @@ struct GlowDotField: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
     @State private var startDate = Date.now
     @State private var glide: Glide?
@@ -53,7 +54,7 @@ struct GlowDotField: View {
     var body: some View {
         GeometryReader { proxy in
             let origin = proxy.frame(in: .global).origin
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || !isVisible)) { timeline in
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || !isVisible || scenePhase != .active)) { timeline in
                 let renderer = GlowDotFieldRenderer(
                     time: reduceMotion ? 0 : timeline.date.timeIntervalSince(startDate),
                     date: timeline.date,

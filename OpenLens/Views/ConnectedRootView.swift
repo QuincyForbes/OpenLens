@@ -92,7 +92,7 @@ struct ConnectedRootView: View {
             )
             .presentationBackground(Color.appBackground)
             .presentationContentInteraction(.resizes)
-            .presentationDragIndicator(.visible)
+            .adaptiveSheetDragIndicator()
             .interactiveDismissDisabled()
         }
         .onChange(of: chatClient.pendingPermission?.id) { _, _ in
@@ -147,20 +147,28 @@ struct ConnectedRootView: View {
 
         while !Task.isCancelled, chatClient.isLoading {
             // Yield first so sending a prompt (`POST .../prompt`) does not immediately
-            // contend with 6 redundant status/transcript recovery GETs at t = 0ms.
-            let interval: UInt64 = connection.sseClient?.state == .connected ? 3_000_000_000 : 1_000_000_000
+            // contend with status/transcript recovery GETs at t = 0ms. When SSE is
+            // healthy and synchronized, poll gently as a safety net; when SSE is
+            // reconnecting or unsynchronized, recover quickly.
+            let sseHealthy = connection.sseClient?.state == .connected && chatClient.isStreamSynchronized
+            let interval: UInt64 = sseHealthy ? 12_000_000_000 : 1_500_000_000
             try? await Task.sleep(nanoseconds: interval)
             guard !Task.isCancelled, chatClient.isLoading else { return }
 
             let needsExternalTranscriptSync = chatClient.pendingAssistantMessage == nil
                 || connection.sseClient?.state != .connected
-            async let statusRefresh = chatClient.refreshCurrentSessionStatus()
-            async let permissionRefresh = chatClient.recoverPendingPermission()
-            async let questionRefresh = chatClient.recoverPendingQuestions()
-            async let formRefresh = chatClient.recoverPendingForms()
-            _ = await (statusRefresh, permissionRefresh, questionRefresh, formRefresh)
-            if needsExternalTranscriptSync, !Task.isCancelled {
-                _ = await chatClient.loadMessages(syncModelSelection: false)
+            if needsExternalTranscriptSync {
+                async let messagesRefresh = chatClient.loadMessages(syncModelSelection: false)
+                async let permissionRefresh = chatClient.recoverPendingPermission()
+                async let questionRefresh = chatClient.recoverPendingQuestions()
+                async let formRefresh = chatClient.recoverPendingForms()
+                _ = await (messagesRefresh, permissionRefresh, questionRefresh, formRefresh)
+            } else {
+                async let statusRefresh = chatClient.refreshCurrentSessionStatus()
+                async let permissionRefresh = chatClient.recoverPendingPermission()
+                async let questionRefresh = chatClient.recoverPendingQuestions()
+                async let formRefresh = chatClient.recoverPendingForms()
+                _ = await (statusRefresh, permissionRefresh, questionRefresh, formRefresh)
             }
         }
     }
@@ -215,21 +223,31 @@ struct ConnectedRootView: View {
 }
 
 private struct ConnectedSidebarLayout: View {
+    private static let minimumSidebarWidth: CGFloat = 272
+    private static let maximumSidebarWidth: CGFloat = 440
+
     @Bindable var chatClient: ChatClient
     let initialSessions: SessionsListView.InitialState
     var inboxPendingCount: Int = 0
 
     @Environment(AppRouter.self) private var router
+    @AppStorage("sidebar.isCollapsed") private var isSidebarCollapsed = false
+    @AppStorage("sidebar.width") private var persistedSidebarWidth: Double = 320
+    @State private var dragStartSidebarWidth: CGFloat?
+
+    private var effectiveSidebarWidth: CGFloat {
+        min(max(CGFloat(persistedSidebarWidth), Self.minimumSidebarWidth), Self.maximumSidebarWidth)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            sidebar
-                .frame(width: 320)
+            if !isSidebarCollapsed {
+                sidebar
+                    .frame(width: effectiveSidebarWidth)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
 
-            Rectangle()
-                .fill(Color.appSeparator)
-                .frame(width: 1)
-                .ignoresSafeArea()
+                sidebarDivider
+            }
 
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -238,6 +256,41 @@ private struct ConnectedSidebarLayout: View {
             Color.appBackground
                 .ignoresSafeArea()
         }
+        .onChange(of: router.toggleSidebarCommandCount) { _, _ in
+            toggleSidebar()
+        }
+    }
+
+    private var sidebarDivider: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.appSeparator)
+                .frame(width: 1)
+                .ignoresSafeArea()
+        }
+        .frame(width: 7)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { value in
+                    let initial = dragStartSidebarWidth ?? effectiveSidebarWidth
+                    dragStartSidebarWidth = initial
+                    let clamped = min(
+                        max(initial + value.translation.width, Self.minimumSidebarWidth),
+                        Self.maximumSidebarWidth
+                    )
+                    persistedSidebarWidth = Double(clamped)
+                }
+                .onEnded { _ in
+                    dragStartSidebarWidth = nil
+                }
+        )
+    }
+
+    private func toggleSidebar() {
+        withAnimation(.snappy(duration: 0.22)) {
+            isSidebarCollapsed.toggle()
+        }
     }
 
     private var sidebar: some View {
@@ -245,6 +298,7 @@ private struct ConnectedSidebarLayout: View {
             ConnectedSidebarNavigation(
                 selectedTab: router.selectedTab,
                 badgeCounts: [.review: inboxPendingCount],
+                onToggleSidebar: toggleSidebar,
                 onSelect: { router.selectedTab = $0 }
             )
 
@@ -273,19 +327,25 @@ private struct ConnectedSidebarLayout: View {
         switch router.selectedTab {
         case .chat:
             sidebarNavigationStack(for: .chat) {
-                ChatDetailPlaceholderView()
+                ChatDetailPlaceholderView(
+                    showsExpandSidebarButton: isSidebarCollapsed,
+                    onExpandSidebar: toggleSidebar
+                )
             }
         case .review:
             sidebarNavigationStack(for: .review) {
                 ReviewRootView(chatClient: chatClient)
+                    .modifier(CollapsedSidebarToolbarButton(isVisible: isSidebarCollapsed, action: toggleSidebar))
             }
         case .workspace:
             sidebarNavigationStack(for: .workspace) {
                 WorkspaceRootView(chatClient: chatClient)
+                    .modifier(CollapsedSidebarToolbarButton(isVisible: isSidebarCollapsed, action: toggleSidebar))
             }
         case .settings:
             sidebarNavigationStack(for: .settings) {
                 SettingsView()
+                    .modifier(CollapsedSidebarToolbarButton(isVisible: isSidebarCollapsed, action: toggleSidebar))
             }
         }
     }
@@ -297,7 +357,13 @@ private struct ConnectedSidebarLayout: View {
         NavigationStack(path: pathBinding(for: tab)) {
             root()
                 .navigationDestination(for: RouterDestination.self) { destination in
-                    ConnectedDestinationView(chatClient: chatClient, destination: destination)
+                    ConnectedDestinationView(
+                        chatClient: chatClient,
+                        destination: destination,
+                        isSidebarDetail: true,
+                        isSidebarCollapsed: isSidebarCollapsed,
+                        onToggleSidebar: toggleSidebar
+                    )
                 }
         }
     }
@@ -320,20 +386,60 @@ private struct ConnectedSidebarLayout: View {
     }
 }
 
+private struct CollapsedSidebarToolbarButton: ViewModifier {
+    let isVisible: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                if isVisible {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: action) {
+                            Image(systemName: "sidebar.left")
+                        }
+                        .help("Show Sidebar (⌥⌘S)")
+                        .accessibilityLabel("Show Sidebar")
+                    }
+                }
+            }
+    }
+}
+
 private struct ConnectedSidebarNavigation: View {
     let selectedTab: AppTab
     var badgeCounts: [AppTab: Int] = [:]
+    var onToggleSidebar: (() -> Void)? = nil
     let onSelect: (AppTab) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("OpenLens", systemImage: "circle.hexagongrid.fill")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.appPrimary)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 10)
+            HStack(spacing: 8) {
+                Label("OpenLens", systemImage: "circle.hexagongrid.fill")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.appPrimary)
 
-            ForEach(AppTab.allCases) { tab in
+                Spacer(minLength: 4)
+
+                if let onToggleSidebar {
+                    Button(action: onToggleSidebar) {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Color.appSecondary)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .macHoverHighlight(cornerRadius: 8)
+                    .help("Hide Sidebar (⌥⌘S)")
+                    .accessibilityLabel("Hide Sidebar")
+                }
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 4)
+            .padding(.bottom, 10)
+
+            ForEach(Array(AppTab.allCases.enumerated()), id: \.element.id) { index, tab in
                 Button {
                     onSelect(tab)
                 } label: {
@@ -352,14 +458,20 @@ private struct ConnectedSidebarNavigation: View {
                                 .background(Color.appWarning, in: Capsule())
                                 .accessibilityLabel("\(count) pending")
                         }
+                        #if targetEnvironment(macCatalyst)
+                        Text("⌘\(index + 1)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.appSecondary.opacity(0.65))
+                        #endif
                     }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)
-                        .frame(height: 42)
+                        .frame(height: 40)
                         .background(
                             selectedTab == tab ? Color.appTertiary : Color.clear,
                             in: RoundedRectangle(cornerRadius: 11, style: .continuous)
                         )
+                        .macHoverHighlight(cornerRadius: 11)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -379,12 +491,21 @@ private struct ConnectedSidebarNavigation: View {
 private struct ConnectedDestinationView: View {
     @Bindable var chatClient: ChatClient
     let destination: RouterDestination
+    var isSidebarDetail: Bool = false
+    var isSidebarCollapsed: Bool = false
+    var onToggleSidebar: (() -> Void)? = nil
 
     @ViewBuilder
     var body: some View {
         switch destination {
         case .chatSession(let session):
-            SessionChatDestinationView(chatClient: chatClient, session: session)
+            SessionChatDestinationView(
+                chatClient: chatClient,
+                session: session,
+                isSidebarDetail: isSidebarDetail,
+                isSidebarCollapsed: isSidebarCollapsed,
+                onToggleSidebar: onToggleSidebar
+            )
         case .sessionInsights(let sessionID):
             InsightsRootView(chatClient: chatClient, sessionID: sessionID)
         }
@@ -394,12 +515,33 @@ private struct ConnectedDestinationView: View {
 private struct SessionChatDestinationView: View {
     @Bindable var chatClient: ChatClient
     let session: OCSession
+    var isSidebarDetail: Bool = false
+    var isSidebarCollapsed: Bool = false
+    var onToggleSidebar: (() -> Void)? = nil
+
+    @Environment(AppRouter.self) private var router: AppRouter?
+
+    private var hidesRootBackButton: Bool {
+        isSidebarDetail && (router?.chatPath.count ?? 0) <= 1
+    }
 
     var body: some View {
         ChatView(chatClient: chatClient, initialSession: session)
             .id(session.id)
             .background(Color.appBackground)
+            .navigationBarBackButtonHidden(hidesRootBackButton)
             .toolbar(.visible, for: .navigationBar)
+            .toolbar {
+                if isSidebarDetail, isSidebarCollapsed, let onToggleSidebar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: onToggleSidebar) {
+                            Image(systemName: "sidebar.left")
+                        }
+                        .help("Show Sidebar (⌥⌘S)")
+                        .accessibilityLabel("Show Sidebar")
+                    }
+                }
+            }
             .task(id: session.id) {
                 if chatClient.needsSessionLoad(session) {
                     await chatClient.loadSession(session)
@@ -411,6 +553,11 @@ private struct SessionChatDestinationView: View {
 }
 
 private struct ChatDetailPlaceholderView: View {
+    var showsExpandSidebarButton: Bool = false
+    var onExpandSidebar: (() -> Void)? = nil
+
+    @Environment(AppRouter.self) private var router: AppRouter?
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "bubble.left.and.bubble.right")
@@ -429,11 +576,38 @@ private struct ChatDetailPlaceholderView: View {
                     .foregroundStyle(Color.appSecondary)
                     .multilineTextAlignment(.center)
             }
+
+            if let router {
+                Button {
+                    router.requestNewSession()
+                } label: {
+                    Label(AppText.newSession, systemImage: "plus")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .background(Color.appAccent.opacity(0.14), in: Capsule())
+                        .foregroundStyle(Color.appAccent)
+                }
+                .buttonStyle(.plain)
+                .macHoverHighlight(cornerRadius: 18)
+                .padding(.top, 4)
+            }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(showsExpandSidebarButton ? .visible : .hidden, for: .navigationBar)
+        .toolbar {
+            if showsExpandSidebarButton, let onExpandSidebar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: onExpandSidebar) {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .help("Show Sidebar (⌥⌘S)")
+                    .accessibilityLabel("Show Sidebar")
+                }
+            }
+        }
     }
 }

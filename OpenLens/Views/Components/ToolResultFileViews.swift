@@ -153,17 +153,7 @@ struct ToolResultFilePreview: View {
         case let .failed(message):
             ContentUnavailableView(AppText.toolFileCouldNotOpen, systemImage: "exclamationmark.triangle", description: Text(message))
         case let .loaded(.image(data)):
-            if let image = UIImage(data: data) {
-                ScrollView([.vertical, .horizontal]) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .containerRelativeFrame(.horizontal)
-                        .accessibilityLabel(file.title)
-                }
-            } else {
-                ContentUnavailableView(AppText.toolFileCouldNotOpen, systemImage: "photo", description: Text(AppText.toolFileUnreadable))
-            }
+            ToolResultDownsampledImageView(id: file.id, title: file.title, data: data)
         case let .loaded(.text(text)):
             ScrollView([.vertical, .horizontal]) {
                 Text(AttachmentPreviewText.truncated(text))
@@ -190,4 +180,53 @@ private struct ToolResultPDFView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: PDFView, context: Context) {}
+}
+
+private struct ToolResultDownsampledImageView: View {
+    let id: String
+    let title: String
+    let data: Data
+
+    @State private var phase: ImagePhase = .decoding
+
+    private enum ImagePhase {
+        case decoding
+        case decoded(UIImage)
+        case unreadable
+    }
+
+    var body: some View {
+        Group {
+            switch phase {
+            case .decoding:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case let .decoded(image):
+                ScrollView([.vertical, .horizontal]) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .containerRelativeFrame(.horizontal)
+                        .accessibilityLabel(title)
+                }
+            case .unreadable:
+                ContentUnavailableView(
+                    AppText.toolFileCouldNotOpen,
+                    systemImage: "photo",
+                    description: Text(AppText.toolFileUnreadable)
+                )
+            }
+        }
+        .task(id: id) {
+            if let image = await PromptImageThumbnailCache.thumbnail(
+                key: "tool-result-\(id)-\(data.count)",
+                source: .data(data),
+                maximumPixelSize: 2_400
+            ) {
+                phase = .decoded(image)
+            } else {
+                phase = .unreadable
+            }
+        }
+    }
 }

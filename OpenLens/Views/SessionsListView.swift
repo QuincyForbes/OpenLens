@@ -82,6 +82,8 @@ struct SessionsListView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.sessionsService) private var sessionsService
     @Environment(\.inboxService) private var inboxService
+    @Environment(AppRouter.self) private var router: AppRouter?
+    @FocusState private var isSidebarSearchFocused: Bool
     @Environment(\.connection) private var connection
 
     init(
@@ -268,7 +270,7 @@ struct SessionsListView: View {
                 handleCreatedSession(session)
             }
             .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+            .adaptiveSheetDragIndicator()
             .presentationBackground(Color.appBackground)
         }
         .confirmationDialog(
@@ -322,6 +324,14 @@ struct SessionsListView: View {
         }
         .onChange(of: sessionsService.repositoryProjects.map { "\($0.id):\($0.worktree ?? "")" }) { _, _ in
             rebuildRepositoryIndex()
+        }
+        .onChange(of: router?.newSessionCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isOnScreen else { return }
+            presentNewSessionSheet()
+        }
+        .onChange(of: router?.focusSessionSearchCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isSidebar, isOnScreen else { return }
+            isSidebarSearchFocused = true
         }
         .task(id: pollTaskKey) {
             guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
@@ -504,9 +514,34 @@ struct SessionsListView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if isSidebar {
-                TextField("Search sessions or repositories", text: $searchQuery)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("sessions.search")
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.appSecondary)
+                    TextField("Search sessions or repos…", text: $searchQuery)
+                        .focused($isSidebarSearchFocused)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .accessibilityIdentifier("sessions.search")
+                    if !searchQuery.isEmpty {
+                        Button {
+                            searchQuery = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.appSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear search")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.appTertiary.opacity(0.85), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(isSidebarSearchFocused ? Color.appAccent.opacity(0.55) : Color.appSeparator, lineWidth: 1)
+                }
             }
             Picker(AppText.sessionsLayout, selection: $layout) {
                 ForEach(SessionListOrganization.Layout.allCases) { option in
@@ -1031,6 +1066,7 @@ struct SessionsListView: View {
                     .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
             }
         }
+        .macHoverHighlight(cornerRadius: 12)
         .contentShape(Rectangle())
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
@@ -1390,18 +1426,22 @@ private struct SessionsSidebarHeader: View {
                 if isRefreshing { ProgressView() }
                 else { Image(systemName: "arrow.clockwise") }
             }
-            .frame(minWidth: 44, minHeight: 44)
+            .frame(minWidth: 36, minHeight: 36)
             .disabled(isRefreshing)
+            .macHoverHighlight(cornerRadius: 8)
+            .help("Refresh sessions")
             .accessibilityLabel("Refresh sessions")
 
             Button(action: onCreate) {
                 Image(systemName: "plus")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.appPrimary)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .macHoverHighlight(cornerRadius: 8)
+            .help("\(AppText.newSession) (⌘N)")
             .accessibilityLabel(AppText.newSession)
         }
         .padding(.leading, 22)
@@ -1532,7 +1572,7 @@ private struct NewSessionSheet: View {
             .sheet(item: $folderBrowserRequest) { request in
                 WorkspaceFolderBrowser(initialDirectory: request.directory, onSelect: selectBrowsedDirectory)
                     .presentationDetents([.large])
-                    .presentationDragIndicator(.visible)
+                    .adaptiveSheetDragIndicator()
                     .presentationBackground(Color.appBackground)
             }
             .sheet(isPresented: $showGitHubCloneSheet) {
@@ -1541,7 +1581,7 @@ private struct NewSessionSheet: View {
                     onSelectRepository: selectClonedRepository
                 )
                 .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
+                .adaptiveSheetDragIndicator()
                 .presentationBackground(Color.appBackground)
             }
         }

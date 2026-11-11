@@ -607,6 +607,31 @@ actor OpenCodeClient {
         try JSONEncoder().encode(input).count
     }
 
+    /// O(1) conservative byte estimate of `input` without allocating a 2 MiB JSON buffer.
+    nonisolated static func fastEstimatedPromptBodyBounds(_ input: OCV2PromptInput) -> (lowerBound: Int, upperBound: Int) {
+        let textBytes = input.text.utf8.count
+        var lower = 64 + textBytes + (input.id?.utf8.count ?? 0)
+        // Worst-case JSON string escaping (`\u00XX`) is 6 bytes per ASCII control byte.
+        var upper = 256 + (input.id?.utf8.count ?? 0) * 6 + textBytes * 6
+        if let skills = input.skills {
+            for skill in skills {
+                lower += 16 + skill.id.utf8.count
+                upper += 64 + skill.id.utf8.count * 6
+            }
+        }
+        if let files = input.files {
+            for file in files {
+                let uriBytes = file.uri.utf8.count
+                let nameBytes = (file.name?.utf8.count ?? 0)
+                lower += 20 + uriBytes + nameBytes
+                // JSONEncoder escapes `/` as `\/`, so worst-case ASCII base64 (`////`) is 2x.
+                let uriUpper = uriBytes * 2 + 128
+                upper += 64 + uriUpper + nameBytes * 6
+            }
+        }
+        return (lower, upper)
+    }
+
     nonisolated static func makePromptInput(
         messageID: String?,
         text: String,
@@ -624,9 +649,17 @@ actor OpenCodeClient {
     }
 
     /// Throws `promptTooLarge` when the complete request would exceed the
-    /// body limit, before anything is sent.
+    /// body limit, before anything is sent. Uses O(1) bounds first and only
+    /// runs `JSONEncoder` when near the 2 MiB boundary.
     nonisolated static func validatePromptBodySize(_ input: OCV2PromptInput) throws {
         guard input.files?.isEmpty == false else { return }
+        let bounds = fastEstimatedPromptBodyBounds(input)
+        if bounds.lowerBound > maximumPromptBodyBytes {
+            throw PromptAttachmentError.promptTooLarge
+        }
+        if bounds.upperBound <= maximumPromptBodyBytes {
+            return
+        }
         if try encodedPromptBodySize(input) > maximumPromptBodyBytes {
             throw PromptAttachmentError.promptTooLarge
         }

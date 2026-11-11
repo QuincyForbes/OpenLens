@@ -100,10 +100,16 @@ final class WorkspaceService {
         guard catalogClient !== client else { return }
         cachedSlashActionsByDirectory.removeAll()
         cachedSkillsByDirectory.removeAll()
+        cachedWorkingTreeDiffsByDirectory.removeAll()
+        inFlightSlashActionTasks.removeAll()
+        inFlightSkillTasks.removeAll()
         catalogClient = client
     }
     private var cachedSlashActionsByDirectory: [String: [WorkspaceSlashActionItem]] = [:]
     private var cachedSkillsByDirectory: [String: [WorkspaceSkillItem]] = [:]
+    private var cachedWorkingTreeDiffsByDirectory: [String: (date: Date, diffs: [OCFileDiff])] = [:]
+    private var inFlightSlashActionTasks: [String: Task<[WorkspaceSlashActionItem], Never>] = [:]
+    private var inFlightSkillTasks: [String: Task<[WorkspaceSkillItem], Never>] = [:]
 
     init(connection: ConnectionManager) {
         self.connection = connection
@@ -135,6 +141,7 @@ final class WorkspaceService {
         guard !Task.isCancelled, connection.projectContextRevision == revision else {
             throw CancellationError()
         }
+        cachedWorkingTreeDiffsByDirectory.removeAll()
 
         return WorkspaceSnapshot(
             currentProject: currentProject,
@@ -360,9 +367,20 @@ final class WorkspaceService {
             return summary
         }
 
+        resetCatalogCache(using: client)
         let contextDirectory = await client.currentContextDirectory() ?? "nil"
         do {
-            let diffs = (try? await client.getWorkingTreeDiff()) ?? []
+            let diffs: [OCFileDiff]
+            if let cached = cachedWorkingTreeDiffsByDirectory[contextDirectory],
+               Date().timeIntervalSince(cached.date) < 12 {
+                diffs = cached.diffs
+            } else {
+                let fetched = (try? await client.getWorkingTreeDiff()) ?? []
+                if connection.client === client {
+                    cachedWorkingTreeDiffsByDirectory[contextDirectory] = (Date(), fetched)
+                }
+                diffs = fetched
+            }
             let matchingDiff = diffs.first(where: { $0.resolvedPath == summary.path })
                 .map(ReviewFileChange.init(diff:))
             if let matchingDiff, matchingDiff.hasReadableDiff {
@@ -392,43 +410,51 @@ final class WorkspaceService {
         guard let client = connection.client else { return [] }
         let cacheKey = (await client.currentContextDirectory()) ?? "__default__"
         resetCatalogCache(using: client)
-        if let cached = cachedSlashActionsByDirectory[cacheKey], !cached.isEmpty {
+        if let cached = cachedSlashActionsByDirectory[cacheKey] {
             return cached
         }
-
-        async let commandsTask = tryCommands(client)
-        async let agentsTask = tryAgents(client)
-
-        let commands = await commandsTask.map { command in
-            WorkspaceSlashActionItem(
-                kind: .command,
-                token: command.id,
-                title: command.title,
-                description: command.description,
-                prompt: command.prompt
-            )
+        if let inFlight = inFlightSlashActionTasks[cacheKey] {
+            return await inFlight.value
         }
 
-        let agents = await agentsTask.map { agent in
-            WorkspaceSlashActionItem(
-                kind: .agent,
-                token: agent.id,
-                title: agent.title,
-                description: agent.description,
-                prompt: agent.prompt
-            )
-        }
+        let task = Task<[WorkspaceSlashActionItem], Never> { @MainActor in
+            async let commandsTask = self.tryCommands(client)
+            async let agentsTask = self.tryAgents(client)
 
-        let sorted = (commands + agents)
-            .sorted { lhs, rhs in
-                if lhs.kind != rhs.kind {
-                    return lhs.kind == .command
-                }
-                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            let commands = await commandsTask.map { command in
+                WorkspaceSlashActionItem(
+                    kind: .command,
+                    token: command.id,
+                    title: command.title,
+                    description: command.description,
+                    prompt: command.prompt
+                )
             }
-        guard connection.client === client, catalogClient === client else { return [] }
-        cachedSlashActionsByDirectory[cacheKey] = sorted
-        return sorted
+
+            let agents = await agentsTask.map { agent in
+                WorkspaceSlashActionItem(
+                    kind: .agent,
+                    token: agent.id,
+                    title: agent.title,
+                    description: agent.description,
+                    prompt: agent.prompt
+                )
+            }
+
+            let sorted = (commands + agents)
+                .sorted { lhs, rhs in
+                    if lhs.kind != rhs.kind {
+                        return lhs.kind == .command
+                    }
+                    return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                }
+            guard self.connection.client === client, self.catalogClient === client else { return [] }
+            self.cachedSlashActionsByDirectory[cacheKey] = sorted
+            return sorted
+        }
+        inFlightSlashActionTasks[cacheKey] = task
+        defer { inFlightSlashActionTasks.removeValue(forKey: cacheKey) }
+        return await task.value
     }
 
     func loadSkills() async -> [WorkspaceSkillItem] {
@@ -443,23 +469,32 @@ final class WorkspaceService {
         if let cached = cachedSkillsByDirectory[contextDirectory] {
             return cached
         }
-        do {
-            let loaded = try await client.listSkills()
-                .map { skill in
-                    WorkspaceSkillItem(
-                        id: skill.id,
-                        name: skill.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? skill.id,
-                        description: skill.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    )
-                }
-                .sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
-            guard connection.client === client, catalogClient === client else { return [] }
-            cachedSkillsByDirectory[contextDirectory] = loaded
-            return loaded
-        } catch {
-            Logger.api.error("WorkspaceService failed to load skills for context directory \(contextDirectory, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return []
+        if let inFlight = inFlightSkillTasks[contextDirectory] {
+            return await inFlight.value
         }
+
+        let task = Task<[WorkspaceSkillItem], Never> { @MainActor in
+            do {
+                let loaded = try await client.listSkills()
+                    .map { skill in
+                        WorkspaceSkillItem(
+                            id: skill.id,
+                            name: skill.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? skill.id,
+                            description: skill.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        )
+                    }
+                    .sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
+                guard self.connection.client === client, self.catalogClient === client else { return [] }
+                self.cachedSkillsByDirectory[contextDirectory] = loaded
+                return loaded
+            } catch {
+                Logger.api.error("WorkspaceService failed to load skills for context directory \(contextDirectory, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return []
+            }
+        }
+        inFlightSkillTasks[contextDirectory] = task
+        defer { inFlightSkillTasks.removeValue(forKey: contextDirectory) }
+        return await task.value
     }
 
     private func tryCurrentProject(_ client: OpenCodeClient) async -> OCProject? {

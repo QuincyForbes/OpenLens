@@ -503,6 +503,10 @@ nonisolated struct SSETextDelta {
 private enum SSETextChunker {
     nonisolated static func chunks(_ text: String) -> [String] {
         let maximumChunkLength = 2_200
+        // UTF-8 byte count >= character count, so short deltas skip O(N) grapheme traversal.
+        if text.utf8.count <= maximumChunkLength {
+            return [text]
+        }
         guard text.count > maximumChunkLength else { return [text] }
 
         var chunks: [String] = []
@@ -2062,6 +2066,9 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
 
     private func splitTextForBoundedDelivery(_ text: String) -> [String] {
         guard !text.isEmpty else { return [] }
+        if text.utf8.count <= Self.maximumTextDeliveryTextBytes {
+            return [text]
+        }
 
         var fragments: [String] = []
         var current = String.UnicodeScalarView()
@@ -2626,7 +2633,8 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
 
         reconnectWorkItem?.cancel()
 
-        let delay = reconnectDelay
+        let baseDelay = reconnectDelay
+        let delay = min(baseDelay * Double.random(in: 0.85...1.15), Self.maxReconnectDelay)
         reconnectDelay = min(reconnectDelay * Self.reconnectBackoffMultiplier, Self.maxReconnectDelay)
 
         let workItem = DispatchWorkItem { [weak self] in

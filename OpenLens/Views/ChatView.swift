@@ -57,6 +57,30 @@ struct ChatView: View {
     @State private var editingPastedSnippet: ComposerPastedSnippet?
     @State private var isOnScreen = false
     @State private var backgroundedAt: Date?
+    @State private var isDropTargeted = false
+    @State private var highlightedPickerIndex = 0
+
+    private static let fileImporterContentTypes: [UTType] = [
+        .image,
+        .png,
+        .jpeg,
+        .gif,
+        .webP,
+        .heic,
+        .tiff,
+        .bmp,
+        .plainText,
+        .utf8PlainText,
+        .text,
+        .sourceCode,
+        .json,
+        .xml,
+        .yaml,
+        .shellScript,
+        .propertyList,
+        .commaSeparatedText,
+        .data,
+    ]
 
     private struct ResultViewingContext: Equatable {
         let sessionID: String?
@@ -86,6 +110,8 @@ struct ChatView: View {
     )
 
     var body: some View {
+        let currentContextUsage = chatClient.contextUsageSummary
+
         VStack(spacing: 0) {
             ChatMessagesListView(
                 chatClient: chatClient,
@@ -158,9 +184,48 @@ struct ChatView: View {
             responseStatusOverlay
                 .padding(.top, 8)
         }
+        .overlay {
+            if isDropTargeted, !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.appBackground.opacity(0.84))
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(
+                            Color.appAccent,
+                            style: StrokeStyle(lineWidth: 2, dash: [8, 6])
+                        )
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.down.doc.fill")
+                            .font(.system(size: 32, weight: .semibold))
+                            .foregroundStyle(Color.appAccent)
+                        Text("Drop images or text files to attach")
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.appPrimary)
+                        Text("PNG, JPEG, GIF, WebP, HEIC, Markdown, JSON, and source code")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.appSecondary)
+                    }
+                    .padding(24)
+                }
+                .padding(16)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
+        }
+        .onDrop(of: ComposerItemImporter.supportedContentTypes, isTargeted: $isDropTargeted) { providers in
+            guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return false }
+            handleImportedProviders(providers, includePlainText: true)
+            return true
+        }
+        #if targetEnvironment(macCatalyst)
+        .onPasteCommand(of: ComposerItemImporter.supportedContentTypes) { providers in
+            guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return }
+            handleImportedProviders(providers, includePlainText: true)
+        }
+        #endif
         .safeAreaInset(edge: .bottom) {
             if chatClient.showsComposer {
-                chatComposerInset
+                chatComposerInset(contextUsage: currentContextUsage)
                     .background {
                         composerInsetBackground
                             .ignoresSafeArea(edges: .bottom)
@@ -195,7 +260,7 @@ struct ChatView: View {
                 onShowMeridianUsage: {
                     showMeridianUsage = true
                 },
-                onShowContext: (chatClient.showsActiveContext || chatClient.contextUsageSummary != nil) ? {
+                onShowContext: (chatClient.showsActiveContext || currentContextUsage != nil) ? {
                     showContextStatus = true
                 } : nil,
                 onRenameSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
@@ -337,7 +402,7 @@ struct ChatView: View {
                     }
             }
             .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+            .adaptiveSheetDragIndicator()
             .presentationBackground(Color.appBackground)
         }
         .sheet(isPresented: $showSessionReview) {
@@ -352,7 +417,7 @@ struct ChatView: View {
                     }
             }
             .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+            .adaptiveSheetDragIndicator()
             .presentationBackground(Color.appBackground)
         }
         .sheet(isPresented: $showMeridianUsage) {
@@ -367,7 +432,7 @@ struct ChatView: View {
                     }
             }
             .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+            .adaptiveSheetDragIndicator()
             .presentationBackground(Color.appBackground)
         }
         .alert("Rename Session", isPresented: $showRenameSessionAlert) {
@@ -389,8 +454,12 @@ struct ChatView: View {
                 SessionActiveContextView(chatClient: chatClient)
             } else if let contextUsage = chatClient.contextUsageSummary {
                 ChatContextStatusSheet(summary: contextUsage, visualMode: visualMode)
+                    #if targetEnvironment(macCatalyst)
+                    .frame(minWidth: 420, minHeight: 240)
+                    #else
                     .presentationDetents([.fraction(0.34), .medium])
-                    .presentationDragIndicator(.visible)
+                    #endif
+                    .adaptiveSheetDragIndicator()
             }
         }
         .sheet(isPresented: $chatClient.showQuestionSheet) {
@@ -444,9 +513,34 @@ struct ChatView: View {
         }
         .onChange(of: chatClient.currentSession?.id) { _, _ in
             clearSelectedSlashAction()
+            #if targetEnvironment(macCatalyst)
+            if chatClient.currentSession != nil, !chatClient.isOfflinePreviewMode {
+                isInputFocused = true
+            }
+            #endif
         }
         .onChange(of: connection.selectedProjectDirectory) { _, _ in
             clearSelectedSlashAction()
+        }
+        .onChange(of: router?.switchSessionCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
+            showSessionSwitcher = true
+        }
+        .onChange(of: router?.chooseModelCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isOnScreen, chatClient.currentSession != nil else { return }
+            showModelPicker = true
+        }
+        .onChange(of: router?.attachFileCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isOnScreen, chatClient.canAttachFiles else { return }
+            attachmentSource = .files
+        }
+        .onChange(of: router?.pasteClipboardCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
+            pasteFromGeneralPasteboard()
+        }
+        .onChange(of: router?.jumpToLatestCommandCount) { oldValue, newValue in
+            guard oldValue != nil, newValue != nil, isOnScreen, chatClient.hasDisplayedMessages else { return }
+            jumpToLatestRequest &+= 1
         }
     }
 
@@ -845,16 +939,22 @@ struct ChatView: View {
         }
     }
 
-    private var chatComposerInset: some View {
+    private func chatComposerInset(contextUsage: ChatClient.ContextUsageSummary?) -> some View {
         VStack(spacing: 8) {
             if chatClient.currentSession != nil && chatClient.showsComposer {
-                modelSelectionRow
+                modelSelectionRow(contextUsage: contextUsage)
             }
             inputBar
         }
+        #if targetEnvironment(macCatalyst)
+        .frame(maxWidth: 920)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity)
+        #else
         .padding(.horizontal, isComposerExpanded ? 0 : 16)
         .padding(.bottom, isComposerExpanded ? 12 : 0)
         .animation(.easeOut(duration: 0.4), value: isComposerExpanded)
+        #endif
     }
 
     // MARK: - Model Selector
@@ -865,7 +965,7 @@ struct ChatView: View {
         }
     }
 
-    private var modelSelectionRow: some View {
+    private func modelSelectionRow(contextUsage: ChatClient.ContextUsageSummary?) -> some View {
         HStack(alignment: VerticalAlignment(ModelControlAlignment.self), spacing: 8) {
             ViewThatFits {
                 HStack(spacing: 6) {
@@ -892,7 +992,7 @@ struct ChatView: View {
                 if !chatClient.todos.isEmpty {
                     todoChip
                 }
-                if let contextUsage = chatClient.contextUsageSummary {
+                if let contextUsage {
                     Button {
                         showContextStatus = true
                     } label: {
@@ -1029,6 +1129,7 @@ struct ChatView: View {
             } else if showsSkillPicker {
                 SkillMentionPicker(
                     skills: filteredSkills,
+                    highlightedIndex: min(highlightedPickerIndex, max(filteredSkills.count - 1, 0)),
                     visualMode: visualMode,
                     onSelect: applySkillMention
                 )
@@ -1071,9 +1172,22 @@ struct ChatView: View {
                             .onSubmit {
                                 performComposerAction()
                             }
+                            .onKeyPress(phases: .down) { keyPress in
+                                handleComposerKeyPress(keyPress)
+                            }
                             .onTapGesture {
                                 setComposerExpanded(true)
                             }
+                            .background(
+                                ComposerPasteInterceptor(
+                                    isEnabled: !chatClient.isOfflinePreviewMode && chatClient.currentSession != nil,
+                                    isFocused: isInputFocused,
+                                    onPasteProviders: { providers in
+                                        handleImportedProviders(providers, includePlainText: false)
+                                    }
+                                )
+                                .frame(width: 0, height: 0)
+                            )
                             .lineLimit(1 ... 5)
                             .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
                             .foregroundStyle(primaryTextColor)
@@ -1109,13 +1223,17 @@ struct ChatView: View {
 
     private var composerAttachMenu: some View {
         Menu {
-            Button(AppText.attachPhotos, systemImage: "photo.on.rectangle") {
-                attachmentSource = .photos
-            }
             Button(AppText.attachFromFiles, systemImage: "folder") {
                 attachmentSource = .files
             }
+            Button(AppText.attachPhotos, systemImage: "photo.on.rectangle") {
+                attachmentSource = .photos
+            }
+            Button(AppText.attachFromClipboard, systemImage: "doc.on.clipboard") {
+                pasteFromGeneralPasteboard()
+            }
             if chatClient.sessionDirectory != nil {
+                Divider()
                 Button(AppText.attachRepositoryFile, systemImage: "chevron.left.forwardslash.chevron.right") {
                     attachmentSource = .repository
                 }
@@ -1125,9 +1243,11 @@ struct ChatView: View {
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(secondaryTextColor)
                 .frame(width: 32, height: 32)
+                .macHoverHighlight(cornerRadius: 8)
                 .contentShape(Rectangle())
         }
         .disabled(chatClient.isPreparingComposerImage)
+        .help("Attach files, images, or clipboard (⇧⌘A)")
         .accessibilityLabel(AppText.attachFiles)
         .photosPicker(
             isPresented: attachmentSourceBinding(.photos),
@@ -1138,12 +1258,14 @@ struct ChatView: View {
         )
         .fileImporter(
             isPresented: attachmentSourceBinding(.files),
-            allowedContentTypes: [.text, .sourceCode, .json, .xml, .yaml, .data],
+            allowedContentTypes: Self.fileImporterContentTypes,
             allowsMultipleSelection: true
         ) { result in
             guard case let .success(urls) = result else { return }
-            for url in urls {
-                chatClient.attachComposerTextFile(at: url)
+            Task {
+                for url in urls {
+                    await chatClient.attachComposerFile(at: url)
+                }
             }
         }
         .sheet(isPresented: attachmentSourceBinding(.repository)) {
@@ -1206,6 +1328,9 @@ struct ChatView: View {
                 animatedComposerActionButtonLabel
             }
             .disabled(isComposerActionDisabled)
+            #if targetEnvironment(macCatalyst)
+            .help(chatClient.isLoading && !hasComposerText ? "Stop (⌘.)" : "Send (Return) · New line (⇧Return)")
+            #endif
             .accessibilityLabel(composerActionAccessibilityLabel)
         }
     }
@@ -1221,6 +1346,9 @@ struct ChatView: View {
         guard attachedSkills.isEmpty else { return AppText.messagePlaceholderWithAttachedSkills }
         if !chatClient.composerPastedSnippets.isEmpty {
             return "Add a prompt for pasted text, or send…"
+        }
+        if !chatClient.composerAttachments.isEmpty {
+            return "Add a message for attached files, or send…"
         }
         return availableSkills.isEmpty ? AppText.messagePlaceholder : AppText.messagePlaceholderWithSkills
     }
@@ -1411,16 +1539,133 @@ struct ChatView: View {
         return "Send"
     }
 
-    private func performComposerAction() {
+    private func performComposerAction(keepFocusOnDesktop: Bool = true) {
         if chatClient.isLoading && hasComposerText {
             sendComposerInput()
         } else if chatClient.isLoading {
+            #if !targetEnvironment(macCatalyst)
             collapseComposerFocus()
+            #endif
             chatClient.abort()
         } else {
+            #if targetEnvironment(macCatalyst)
+            sendComposerInput()
+            if keepFocusOnDesktop {
+                isInputFocused = true
+            }
+            #else
             collapseComposerFocus()
             sendComposerInput()
+            #endif
         }
+    }
+
+    private func handleImportedProviders(_ providers: [NSItemProvider], includePlainText: Bool) {
+        guard !providers.isEmpty else { return }
+        Task {
+            let items = await ComposerItemImporter.extractItems(
+                from: providers,
+                includePlainText: includePlainText
+            )
+            guard !items.isEmpty else { return }
+            await chatClient.importComposerItems(items)
+            #if targetEnvironment(macCatalyst)
+            isInputFocused = true
+            #endif
+        }
+    }
+
+    private func pasteFromGeneralPasteboard() {
+        Task {
+            let items = await ComposerItemImporter.extractFromGeneralPasteboard()
+            guard !items.isEmpty else {
+                chatClient.errorMessage = AppText.clipboardNothingAttachable
+                return
+            }
+            await chatClient.importComposerItems(items)
+            #if targetEnvironment(macCatalyst)
+            isInputFocused = true
+            #endif
+        }
+    }
+
+    private func handleComposerKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        if showsCommandPicker {
+            let actions = filteredSlashActions
+            if !actions.isEmpty {
+                switch keyPress.key {
+                case .downArrow:
+                    highlightedPickerIndex = (highlightedPickerIndex + 1) % actions.count
+                    return .handled
+                case .upArrow:
+                    highlightedPickerIndex = (highlightedPickerIndex - 1 + actions.count) % actions.count
+                    return .handled
+                case .tab:
+                    let index = min(max(highlightedPickerIndex, 0), actions.count - 1)
+                    applySlashAction(actions[index])
+                    return .handled
+                case .return where keyPress.modifiers.isEmpty:
+                    let index = min(max(highlightedPickerIndex, 0), actions.count - 1)
+                    applySlashAction(actions[index])
+                    return .handled
+                case .escape:
+                    chatClient.inputText = ""
+                    return .handled
+                default:
+                    break
+                }
+            }
+        } else if showsSkillPicker {
+            let skills = filteredSkills
+            if !skills.isEmpty {
+                switch keyPress.key {
+                case .downArrow:
+                    highlightedPickerIndex = (highlightedPickerIndex + 1) % skills.count
+                    return .handled
+                case .upArrow:
+                    highlightedPickerIndex = (highlightedPickerIndex - 1 + skills.count) % skills.count
+                    return .handled
+                case .tab:
+                    let index = min(max(highlightedPickerIndex, 0), skills.count - 1)
+                    applySkillMention(skills[index])
+                    return .handled
+                case .return where keyPress.modifiers.isEmpty:
+                    let index = min(max(highlightedPickerIndex, 0), skills.count - 1)
+                    applySkillMention(skills[index])
+                    return .handled
+                case .escape:
+                    chatClient.inputText = SkillMention.removingActiveQuery(from: chatClient.inputText)
+                    return .handled
+                default:
+                    break
+                }
+            }
+        }
+
+        if keyPress.key == .escape, chatClient.isLoading, !chatClient.isStoppingResponse {
+            chatClient.abort()
+            return .handled
+        }
+
+        if keyPress.key == .return {
+            if keyPress.modifiers.contains(.command) {
+                if !isComposerActionDisabled, hasComposerText {
+                    performComposerAction(keepFocusOnDesktop: true)
+                }
+                return .handled
+            }
+            #if targetEnvironment(macCatalyst)
+            if keyPress.modifiers.contains(.shift) || keyPress.modifiers.contains(.option) {
+                return .ignored
+            }
+            if !isComposerActionDisabled, hasComposerText {
+                performComposerAction(keepFocusOnDesktop: true)
+            }
+            return .handled
+            #endif
+        }
+
+        return .ignored
     }
 
     private func sendComposerInput() {
@@ -1438,7 +1683,8 @@ struct ChatView: View {
 
         let composedText = composerSendText
         guard !composedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !chatClient.composerPastedSnippets.isEmpty else {
+            || !chatClient.composerPastedSnippets.isEmpty
+            || !chatClient.composerAttachments.isEmpty else {
             return false
         }
 
@@ -1577,7 +1823,9 @@ struct ChatView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        let currentHighlight = min(highlightedPickerIndex, max(filteredSlashActions.count - 1, 0))
                         ForEach(Array(filteredSlashActions.enumerated()), id: \.element.id) { index, action in
+                            let isHighlighted = index == currentHighlight
                             Button {
                                 applySlashAction(action)
                             } label: {
@@ -1617,6 +1865,8 @@ struct ChatView: View {
                                 }
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 14)
+                                .background(isHighlighted ? Color.appAccent.opacity(0.10) : Color.clear)
+                                .macHoverHighlight(cornerRadius: 8)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -1656,6 +1906,7 @@ struct ChatView: View {
 
     private var hasComposerText: Bool {
         if !chatClient.composerPastedSnippets.isEmpty
+            || !chatClient.composerAttachments.isEmpty
             || selectedSlashAction != nil
             || !attachedSkills.isEmpty {
             return true
@@ -1785,6 +2036,7 @@ struct ChatView: View {
     }
 
     private func handleComposerTextChange(_ rawNewValue: String) {
+        highlightedPickerIndex = 0
         let newValue = ComposerPasteExtractor.sanitizedInput(rawNewValue)
         if shouldClearSelectedSlashAction(forComposerText: newValue) {
             clearSelectedSlashAction()
@@ -2496,6 +2748,7 @@ private struct ComposerTokenLayout: Layout {
 
 private struct SkillMentionPicker: View {
     let skills: [WorkspaceSkillItem]
+    var highlightedIndex: Int = 0
     let visualMode: ChatVisualMode
     let onSelect: (WorkspaceSkillItem) -> Void
 
@@ -2506,7 +2759,7 @@ private struct SkillMentionPicker: View {
                     Button {
                         onSelect(skill)
                     } label: {
-                        row(for: skill)
+                        row(for: skill, isHighlighted: index == highlightedIndex)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Attach skill \(skill.id)")
@@ -2524,7 +2777,7 @@ private struct SkillMentionPicker: View {
         .chatPopoverChrome(visualMode)
     }
 
-    private func row(for skill: WorkspaceSkillItem) -> some View {
+    private func row(for skill: WorkspaceSkillItem, isHighlighted: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "wand.and.sparkles")
                 .font(.system(size: 15, weight: .semibold))
@@ -2558,6 +2811,8 @@ private struct SkillMentionPicker: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+        .background(isHighlighted ? Color.appAccent.opacity(0.10) : Color.clear)
+        .macHoverHighlight(cornerRadius: 8)
         .contentShape(Rectangle())
     }
 
@@ -2582,6 +2837,7 @@ private struct ResponseStatusSiriIndicator: View {
     let isRetroChat: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
 
     private var isAnimatedState: Bool {
         state == .generating || state == .stopping
@@ -2596,7 +2852,7 @@ private struct ResponseStatusSiriIndicator: View {
             capsuleBackground
 
             if isAnimatedState {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { timeline in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || scenePhase != .active)) { timeline in
                     animatedBars(time: reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate)
                 }
             } else if showsTextLabel {
@@ -3061,16 +3317,10 @@ private struct ChatMessagesListView: View {
                             timelineRow(item)
                         }
 
-                        if chatClient.isLoading, chatClient.pendingAssistantMessage == nil {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text(chatClient.currentActivity?.currentLabel ?? "Agent is working…")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
-                            }
-                            .padding(.vertical, 6)
-                        }
+                        ChatPendingActivityStatusRow(
+                            chatClient: chatClient,
+                            isRetroChat: isRetroChat
+                        )
 
                         let queuePositions = QueuedPrompt.queuePositions(chatClient.queuedPrompts)
                         ForEach(chatClient.queuedPrompts) { prompt in
@@ -3083,7 +3333,12 @@ private struct ChatMessagesListView: View {
                         }
                     }
                     .padding(.horizontal, isRetroChat ? 12 : 16)
+                    #if targetEnvironment(macCatalyst)
+                    .frame(maxWidth: 920)
+                    .frame(maxWidth: .infinity)
+                    #endif
                     .animation(.easeOut(duration: 0.22), value: chatClient.queuedPrompts)
+                    #if !targetEnvironment(macCatalyst)
                     // Any tap gesture on an ancestor of a `Text` disables the
                     // links inside it. Keyboard dismissal therefore lives on a
                     // background layer that only receives taps on empty space.
@@ -3094,6 +3349,7 @@ private struct ChatMessagesListView: View {
                                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                             }
                     }
+                    #endif
 
                     Color.clear
                         .frame(height: 17)
@@ -3201,13 +3457,19 @@ private struct ChatMessagesListView: View {
         chatEasterEgg.visualMode.isRetro
     }
 
+#if DEBUG
+    private static let logsStressTimelineRebuilds = ProcessInfo.processInfo.arguments.contains("CHAT_STREAM_STRESS_MODE")
+#endif
+
     private func rebuildTimeline() {
         timelineItems = chatClient.timelineItems(showsThinking: showThinking)
 #if DEBUG
-        print(
-            "CHAT_STRESS_TIMELINE_REBUILD displayed=\(chatClient.displayedMessages.count) "
-                + "items=\(timelineItems.count) version=\(chatClient.timelineVersion)"
-        )
+        if Self.logsStressTimelineRebuilds {
+            print(
+                "CHAT_STRESS_TIMELINE_REBUILD displayed=\(chatClient.displayedMessages.count) "
+                    + "items=\(timelineItems.count) version=\(chatClient.timelineVersion)"
+            )
+        }
 #endif
     }
 
@@ -3765,10 +4027,32 @@ private struct MessageActionsBar: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(tint)
                 .frame(width: 32, height: 28)
+                .macHoverHighlight(cornerRadius: 7)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(label)
         .accessibilityLabel(label)
+    }
+}
+
+/// Isolated observation subtree for the pre-stream "Agent is working…" status
+/// so `currentActivity.currentLabel` updates never invalidate `ChatMessagesListView`.
+private struct ChatPendingActivityStatusRow: View {
+    let chatClient: ChatClient
+    let isRetroChat: Bool
+
+    var body: some View {
+        if chatClient.isLoading, chatClient.pendingAssistantMessage == nil {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(chatClient.currentActivity?.currentLabel ?? "Agent is working…")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+            }
+            .padding(.vertical, 6)
+        }
     }
 }
 

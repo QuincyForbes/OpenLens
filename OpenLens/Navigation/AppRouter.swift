@@ -8,6 +8,53 @@ final class AppRouter {
     var workspacePath: [RouterDestination] = []
     var settingsPath: [RouterDestination] = []
 
+    private(set) var newSessionCommandCount: UInt = 0
+    private(set) var switchSessionCommandCount: UInt = 0
+    private(set) var toggleSidebarCommandCount: UInt = 0
+    private(set) var focusSessionSearchCommandCount: UInt = 0
+    private(set) var chooseModelCommandCount: UInt = 0
+    private(set) var attachFileCommandCount: UInt = 0
+    private(set) var pasteClipboardCommandCount: UInt = 0
+    private(set) var jumpToLatestCommandCount: UInt = 0
+
+    func requestNewSession() {
+        selectedTab = .chat
+        newSessionCommandCount &+= 1
+    }
+
+    func requestSessionSwitcher() {
+        switchSessionCommandCount &+= 1
+    }
+
+    func requestToggleSidebar() {
+        toggleSidebarCommandCount &+= 1
+    }
+
+    func requestFocusSessionSearch() {
+        selectedTab = .chat
+        focusSessionSearchCommandCount &+= 1
+    }
+
+    func requestChooseModel() {
+        selectedTab = .chat
+        chooseModelCommandCount &+= 1
+    }
+
+    func requestAttachFile() {
+        selectedTab = .chat
+        attachFileCommandCount &+= 1
+    }
+
+    func requestPasteClipboard() {
+        selectedTab = .chat
+        pasteClipboardCommandCount &+= 1
+    }
+
+    func requestJumpToLatest() {
+        selectedTab = .chat
+        jumpToLatestCommandCount &+= 1
+    }
+
     var selectedChatSessionID: String? {
         guard let firstDestination = chatPath.first,
               case .chatSession(let session) = firstDestination else { return nil }

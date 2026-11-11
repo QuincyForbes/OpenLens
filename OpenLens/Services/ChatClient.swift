@@ -88,10 +88,20 @@ struct PromptSubmission: Identifiable, Equatable {
     let id: String
     let sessionID: String
     /// Raw composer text, used to match retries and to restore the composer.
-    let text: String
+    var text: String
     /// The exact prepared attachments, so a retry resends identical bytes.
-    let attachments: [PromptAttachment]
+    var attachments: [PromptAttachment]
     var state: State
+
+    /// Once an accepted submission has been delivered into the session
+    /// transcript, it can never be retried or projected as a queued inbox card.
+    /// Drop its duplicate text and multi-MB attachment bytes while keeping its
+    /// identity and `.accepted` state intact.
+    mutating func releaseDeliveredPayload() {
+        guard case .accepted = state else { return }
+        text = ""
+        attachments = []
+    }
 }
 
 private enum PromptAdmissionOutcome: Equatable {
@@ -622,7 +632,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         rebuildAvailableModels()
     }
 
+    @ObservationIgnored private var isBatchUpdatingProviders = false
+
     private func rebuildAvailableModels() {
+        guard !isBatchUpdatingProviders else { return }
         var activeProviders = connectedProviderIDs.isEmpty
             ? providers
             : providers.filter { connectedProviderIDs.contains($0.id) }
@@ -1365,6 +1378,8 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     @ObservationIgnored private var preparedSessionID: String?
     @ObservationIgnored private var composerDraftsBySessionID: [String: SessionComposerDraft] = [:]
+    @ObservationIgnored private var composerDraftOrder: [String] = []
+    private static let maximumParkedComposerDrafts = 12:]
     @ObservationIgnored private var streamSynchronizationGeneration: UInt = 0
     @ObservationIgnored private var streamSynchronizationToken: UUID?
     @ObservationIgnored private var sessionLoadToken: UUID?
@@ -2046,13 +2061,24 @@ final class ChatClient: SSEEventHandlerDelegate {
                 attachments: composerAttachments,
                 directory: WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory)
             )
-            composerDraftsBySessionID[previousID] = draft.isEmpty ? nil : draft
+            composerDraftOrder.removeAll { $0 == previousID }
+            if draft.isEmpty {
+                composerDraftsBySessionID.removeValue(forKey: previousID)
+            } else {
+                composerDraftsBySessionID[previousID] = draft
+                composerDraftOrder.append(previousID)
+                while composerDraftOrder.count > Self.maximumParkedComposerDrafts {
+                    let evictedID = composerDraftOrder.removeFirst()
+                    composerDraftsBySessionID.removeValue(forKey: evictedID)
+                }
+            }
         }
         composerPastedSnippets = []
         composerAttachments = []
         resetSessionState()
         isStreamSynchronized = false
         currentSession = session
+        composerDraftOrder.removeAll { $0 == session.id }
         if let restored = composerDraftsBySessionID.removeValue(forKey: session.id) {
             inputText = restored.text
             composerPastedSnippets = restored.pastedSnippets
@@ -2218,7 +2244,7 @@ final class ChatClient: SSEEventHandlerDelegate {
               connection?.client === loadingClient, currentSession?.id == session.id else { return }
         restoredWorkspaceRevision = connection?.projectContextRevision
         async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
-        async let messagesTask = loadMessages()
+        async let messagesTask = loadMessages(knownCanonicalSession: usesV2SessionAPI ? session : nil)
         async let permissionTask = recoverPendingPermission()
         async let questionTask = recoverPendingQuestions()
         async let formTask = recoverPendingForms()
@@ -2371,7 +2397,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     @discardableResult
-    func loadMessages(syncModelSelection: Bool = true) async -> Bool {
+    func loadMessages(
+        syncModelSelection: Bool = true,
+        knownCanonicalSession: OCSession? = nil
+    ) async -> Bool {
         guard !isOfflinePreviewMode, let session = currentSession else { return false }
         let loadingClient = connection?.client
         let generation = streamSynchronizationGeneration
@@ -2383,16 +2412,20 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         // Read the inbox before the transcript: an entry delivered in between
         // then appears in both and is shown once, rather than in neither.
+        // Statuses and todos are independent reads and run concurrently.
         async let todosTask: Void = loadTodos()
+        async let statusesPrefetch = prefetchSessionStatuses()
         var inboxRecovered = false
         do {
             inboxRecovered = await recoverSessionInbox() == .current
             guard isCurrent() else {
+                _ = await statusesPrefetch
                 _ = await todosTask
                 return false
             }
             let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 16
             guard let messagesService else {
+                _ = await statusesPrefetch
                 _ = await todosTask
                 return false
             }
@@ -2401,6 +2434,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 limit: fetchLimit
             )
             guard isCurrent() else {
+                _ = await statusesPrefetch
                 _ = await todosTask
                 return false
             }
@@ -2410,6 +2444,9 @@ final class ChatClient: SSEEventHandlerDelegate {
             let loadedIDs = Set(transcript.entryOrder)
             queuedPrompts.removeAll { prompt in
                 prompt.state == .queued && loadedIDs.contains(prompt.messageID)
+            }
+            for index in promptSubmissions.indices where loadedIDs.contains(promptSubmissions[index].id) {
+                promptSubmissions[index].releaseDeliveredPayload()
             }
             let mergedMessages = mergeLoadedMessagesWithLocalMessages(loaded)
             let revert = currentSession?.id == session.id
@@ -2455,22 +2492,29 @@ final class ChatClient: SSEEventHandlerDelegate {
                 self.scrollAnchor &+= 1
             }
         } catch is CancellationError {
+            _ = await statusesPrefetch
             _ = await todosTask
             return false
         } catch {
+            _ = await statusesPrefetch
             _ = await todosTask
             guard isCurrent() else { return false }
             self.errorMessage = "Failed to load messages: \(error.localizedDescription)"
             return false
         }
 
-        let statusRecovered = await refreshCurrentSessionStatus()
+        let prefetched = await statusesPrefetch
+        let statusRecovered = await refreshCurrentSessionStatus(
+            prefetchedStatuses: prefetched,
+            knownCanonicalSession: knownCanonicalSession
+        )
         await todosTask
         return inboxRecovered && statusRecovered && !Task.isCancelled && currentSession?.id == session.id
     }
 
     func unloadSession(ifMatching sessionID: String) {
         composerDraftsBySessionID.removeValue(forKey: sessionID)
+        composerDraftOrder.removeAll { $0 == sessionID }
         guard currentSession?.id == sessionID else { return }
         sessionLoadToken = nil
         resetSessionState()
@@ -2837,8 +2881,20 @@ final class ChatClient: SSEEventHandlerDelegate {
         isStreamSynchronized = false
     }
 
+    private func prefetchSessionStatuses() async -> Result<[String: OCSessionStatus], Error>? {
+        guard let sessionsService else { return nil }
+        do {
+            return .success(try await sessionsService.getSessionStatuses())
+        } catch {
+            return .failure(error)
+        }
+    }
+
     @discardableResult
-    func refreshCurrentSessionStatus() async -> Bool {
+    func refreshCurrentSessionStatus(
+        prefetchedStatuses: Result<[String: OCSessionStatus], Error>? = nil,
+        knownCanonicalSession: OCSession? = nil
+    ) async -> Bool {
         guard !isOfflinePreviewMode,
               let sessionsService,
               let sessionID = currentSession?.id else { return false }
@@ -2846,19 +2902,31 @@ final class ChatClient: SSEEventHandlerDelegate {
         let generation = streamSynchronizationGeneration
         let revision = connection?.projectContextRevision
         do {
-            let statuses = try await sessionsService.getSessionStatuses()
+            let statuses: [String: OCSessionStatus]
+            if let prefetchedStatuses {
+                statuses = try prefetchedStatuses.get()
+            } else {
+                statuses = try await sessionsService.getSessionStatuses()
+            }
             guard !Task.isCancelled, currentSession?.id == sessionID,
                   generation == streamSynchronizationGeneration,
                   revision == connection?.projectContextRevision else { return false }
             // The sparse V2 active snapshot proves only that work is absent.
-            // Fetch its result before finalizing a response observed as active.
+            // Fetch its result before finalizing a response observed as active,
+            // unless this recovery pass already fetched the canonical session.
             if usesV2SessionAPI, statuses[sessionID] == nil,
                isLoading || pendingAssistantMessage != nil {
-                let session = try await sessionsService.getSession(id: sessionID)
-                guard !Task.isCancelled, currentSession?.id == sessionID,
-                  generation == streamSynchronizationGeneration,
-                  revision == connection?.projectContextRevision else { return false }
-                try await applyRecoveredSession(session, generation: generation)
+                let session: OCSession
+                if let knownCanonicalSession, knownCanonicalSession.id == sessionID {
+                    session = knownCanonicalSession
+                } else {
+                    session = try await sessionsService.getSession(id: sessionID)
+                    guard !Task.isCancelled, currentSession?.id == sessionID,
+                          generation == streamSynchronizationGeneration,
+                          revision == connection?.projectContextRevision else { return false }
+                    try await applyRecoveredSession(session, generation: generation)
+                }
+                _ = session
             }
             reconcileCurrentSessionStatus(statuses[sessionID])
             return true
@@ -2925,7 +2993,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                     guard generation == self.streamSynchronizationGeneration else { continue }
                     try await self.applyRecoveredSession(session, generation: generation)
 
-                    async let messagesTask = self.loadMessages()
+                    async let messagesTask = self.loadMessages(knownCanonicalSession: session)
                     async let permissionTask = self.recoverPendingPermission(sessionID: sessionID)
                     async let questionTask = self.recoverPendingQuestions()
                     async let formTask = self.recoverPendingForms()
@@ -3252,12 +3320,22 @@ final class ChatClient: SSEEventHandlerDelegate {
             sessionID: sessionID,
             userMessageID: userMessageID
         )
-        guard currentSession?.id == sessionID,
-              let file = files.first(where: { $0.path == path }) else {
+        guard currentSession?.id == sessionID else {
+            throw OpenCodeError.notConnected
+        }
+        // Cache every file returned for this turn so inspecting sibling files
+        // in the same turn requires zero additional HTTP requests.
+        for candidate in files {
+            cacheTurnFileDetail(
+                candidate,
+                for: TurnFileDetailCacheKey(userMessageID: userMessageID, path: candidate.path)
+            )
+        }
+        guard let file = files.first(where: { $0.path == path }) else {
             throw OpenCodeError.invalidPayload("This historical file diff is no longer available.")
         }
 
-        cacheTurnFileDetail(file, for: key)
+        touchTurnFileDetailCacheKey(key)
         return file
     }
 
@@ -3392,6 +3470,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             _ = try? await providersTask
             return
         }
+        isBatchUpdatingProviders = true
         self.enabledProviders = configResult.enabledProviders
         self.disabledProviders = configResult.disabledProviders
 
@@ -3409,14 +3488,22 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             let result = try await providersTask
-            guard isCurrent() else { return }
+            guard isCurrent() else {
+                isBatchUpdatingProviders = false
+                rebuildAvailableModels()
+                return
+            }
             self.providers = result.providers
             self.connectedProviderIDs = result.connectedProviderIDs
+            isBatchUpdatingProviders = false
+            rebuildAvailableModels()
             serverDefault = result.defaultProviderID.flatMap { providerID in
                 result.defaultModelID.map { (providerID: providerID, modelID: $0) }
             }
             serverReportedDefault = serverDefault
         } catch {
+            isBatchUpdatingProviders = false
+            rebuildAvailableModels()
             guard isCurrent() else { return }
             Logger.chat.error("loadProviders failed: \(error, privacy: .public)")
         }
@@ -3796,7 +3883,11 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func send() {
         let text = composedPromptText()
-        guard canCompose, !text.isEmpty, !isLoading, !isQueueingPrompt, currentSession != nil else { return }
+        guard canCompose,
+              (!text.isEmpty || !composerAttachments.isEmpty),
+              !isLoading,
+              !isQueueingPrompt,
+              currentSession != nil else { return }
 
         if Self.isUndoCommand(text) {
             inputText = ""
@@ -3867,7 +3958,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             errorMessage = "Wait for the active session to finish before undoing."
             return
         }
-        guard !text.isEmpty,
+        guard (!text.isEmpty || !composerAttachments.isEmpty),
               isLoading,
               !isStoppingResponse,
               !isQueueingPrompt,
@@ -4219,11 +4310,15 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
     }
 
-    /// Prepares picked image data off the main actor and attaches it,
+    /// Prepares picked or pasted image data off the main actor and attaches it,
     /// within the space the composer's text and attachments leave in the request.
-    /// `nil` means the photo library could not provide the image's bytes.
-    func attachComposerImage(data: Data?) async {
-        guard canAttachFiles else { return }
+    /// `nil` means the photo library or clipboard could not provide the image's bytes.
+    func attachComposerImage(data: Data?, preferredName: String? = nil) async {
+        guard !isDemoMode, !isRecordedReplayMode, canCompose, currentSession != nil else { return }
+        if !usesV2SessionAPI {
+            errorMessage = PromptAttachmentError.attachmentsRequireV2.errorDescription
+            return
+        }
         guard let data else {
             errorMessage = PromptAttachmentError.unsupportedImage.errorDescription
             return
@@ -4239,7 +4334,12 @@ final class ChatClient: SSEEventHandlerDelegate {
         let sessionID = currentSession?.id
         let remaining = OpenCodeClient.maximumPromptBodyBytes - currentComposerBodySize()
         // Base64 grows bytes by 4/3 and JSON escapes its slashes; keep headroom.
-        let budget = min(PromptImagePreparer.defaultMaximumBytes, Int(Double(remaining - 4_096) * 0.72))
+        // Allow a larger single-image ceiling when the composer has no other
+        // attachments so desktop/Retina PNG screenshots stay lossless more often.
+        let imageCap = composerAttachments.isEmpty
+            ? PromptImagePreparer.singleImageMaximumBytes
+            : PromptImagePreparer.defaultMaximumBytes
+        let budget = min(imageCap, Int(Double(remaining - 4_096) * 0.72))
         guard budget >= 16_384 else {
             errorMessage = PromptAttachmentError.promptTooLarge.errorDescription
             return
@@ -4247,13 +4347,66 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             let image = try await Task.detached(priority: .userInitiated) {
-                try PromptImagePreparer.prepare(data, maximumBytes: budget)
+                try PromptImagePreparer.prepare(data, maximumBytes: budget, preferredName: preferredName)
             }.value
             guard currentSession?.id == sessionID else { return }
-            composerAttachments.append(.image(image))
+            try appendIfItFits(.image(image))
         } catch {
             errorMessage = (error as? PromptAttachmentError)?.errorDescription
                 ?? PromptAttachmentError.unsupportedImage.errorDescription
+        }
+    }
+
+    /// Attaches any supported local file (PNG/JPEG/GIF/WebP/HEIC/TIFF/BMP image
+    /// or UTF-8 plain-text/source file) picked from Finder/Files, pasted from the
+    /// clipboard, or dragged into the chat window.
+    func attachComposerFile(at url: URL) async {
+        guard !isDemoMode, !isRecordedReplayMode, canCompose, currentSession != nil else { return }
+        guard usesV2SessionAPI else {
+            errorMessage = PromptAttachmentError.attachmentsRequireV2.errorDescription
+            return
+        }
+        let sessionID = currentSession?.id
+        let name = url.lastPathComponent.isEmpty ? "attachment" : url.lastPathComponent
+        do {
+            let payload = try await Task.detached(priority: .userInitiated) {
+                try LocalComposerFilePayload.read(from: url)
+            }.value
+            guard currentSession?.id == sessionID else { return }
+            switch payload {
+            case let .image(data, imageName):
+                await attachComposerImage(data: data, preferredName: imageName)
+            case let .textFile(file):
+                attachPreparedTextFile(file)
+            }
+        } catch {
+            guard currentSession?.id == sessionID else { return }
+            errorMessage = (error as? PromptAttachmentError)?.errorDescription
+                ?? PromptAttachmentError.unreadableFile(name: name).errorDescription
+        }
+    }
+
+    /// Imports items extracted from pasteboard (`Cmd+V` / Paste) or drag-and-drop.
+    func importComposerItems(_ items: [ComposerItemImporter.ImportedItem]) async {
+        guard !items.isEmpty else { return }
+        for item in items {
+            switch item {
+            case let .fileURL(url):
+                await attachComposerFile(at: url)
+            case let .image(data, name):
+                await attachComposerImage(data: data, preferredName: name)
+            case let .textFile(file):
+                attachPreparedTextFile(file)
+            case let .text(rawText):
+                let clean = ComposerPasteExtractor.sanitizedInput(rawText)
+                guard !clean.isEmpty else { continue }
+                if ComposerPasteExtractor.shouldStoreAsSnippet(clean) {
+                    _ = addComposerPastedSnippet(clean)
+                } else {
+                    let current = ComposerPasteExtractor.sanitizedInput(inputText)
+                    inputText = current.isEmpty ? clean : "\(current)\n\(clean)"
+                }
+            }
         }
     }
 
@@ -4267,8 +4420,16 @@ final class ChatClient: SSEEventHandlerDelegate {
         attachComposerTextFile(name: name) { try PromptTextFileAttachment(data: data, name: name) }
     }
 
+    private func attachPreparedTextFile(_ file: PromptTextFileAttachment) {
+        attachComposerTextFile(name: file.name) { file }
+    }
+
     private func attachComposerTextFile(name: String, _ makeFile: () throws -> PromptTextFileAttachment) {
-        guard canAttachFiles else { return }
+        guard !isDemoMode, !isRecordedReplayMode, canCompose, currentSession != nil else { return }
+        guard usesV2SessionAPI else {
+            errorMessage = PromptAttachmentError.attachmentsRequireV2.errorDescription
+            return
+        }
         do {
             let file = try makeFile()
             do {
@@ -4344,7 +4505,13 @@ final class ChatClient: SSEEventHandlerDelegate {
             attachments: composerAttachments,
             delivery: .queue
         )
-        return (try? OpenCodeClient.encodedPromptBodySize(input)) ?? 0
+        let bounds = OpenCodeClient.fastEstimatedPromptBodyBounds(input)
+        // Only run exact JSON encoding when existing attachments are large enough
+        // to matter near the 2 MiB prompt ceiling.
+        if bounds.upperBound < OpenCodeClient.maximumPromptBodyBytes / 2 {
+            return bounds.lowerBound
+        }
+        return (try? OpenCodeClient.encodedPromptBodySize(input)) ?? bounds.lowerBound
     }
 
     private func imageCapabilityError() -> PromptAttachmentError? {
@@ -4931,7 +5098,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// appending it behind the active turn.
     func steerPrompt() {
         let text = composedPromptText()
-        guard !text.isEmpty, canSteerPrompt else { return }
+        guard (!text.isEmpty || !composerAttachments.isEmpty), canSteerPrompt else { return }
         guard let context = sessionWorkContext else { return }
 
         let allowsSlashDispatch = composerPastedSnippets.isEmpty

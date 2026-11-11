@@ -42,10 +42,11 @@ struct PromptImageThumbnail: View {
     }
 }
 
-private enum PromptImageThumbnailCache {
+enum PromptImageThumbnailCache {
     private static let cache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 120
+        cache.totalCostLimit = 24 * 1_024 * 1_024
         return cache
     }()
 
@@ -56,7 +57,10 @@ private enum PromptImageThumbnailCache {
         let image = await Task.detached(priority: .userInitiated) {
             decode(source, maximumPixelSize: maximumPixelSize)
         }.value
-        if let image { cache.setObject(image, forKey: cacheKey) }
+        if let image {
+            let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? (maximumPixelSize * maximumPixelSize * 4)
+            cache.setObject(image, forKey: cacheKey, cost: max(cost, 1))
+        }
         return image
     }
 
@@ -90,16 +94,27 @@ struct MessageAttachmentsRow: View {
     let images: [OCPart]
     let files: [OCPart]
 
+    @State private var previewedImage: PreviewedImageItem?
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
             if !images.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(images, id: \.id) { part in
-                        PromptImageThumbnail(
-                            cacheKey: part.id,
-                            source: .dataURL(part.url ?? ""),
-                            side: images.count == 1 ? 160 : 96
-                        )
+                        Button {
+                            previewedImage = PreviewedImageItem(
+                                id: part.id,
+                                title: part.filename ?? AppText.attachedImage,
+                                source: .dataURL(part.url ?? "")
+                            )
+                        } label: {
+                            PromptImageThumbnail(
+                                cacheKey: part.id,
+                                source: .dataURL(part.url ?? ""),
+                                side: images.count == 1 ? 160 : 96
+                            )
+                        }
+                        .buttonStyle(.plain)
                         .accessibilityLabel(part.filename ?? AppText.attachedImage)
                     }
                 }
@@ -110,6 +125,9 @@ struct MessageAttachmentsRow: View {
                     kind: part.url?.hasPrefix("file:") == true ? .serverFile : .textFile
                 )
             }
+        }
+        .sheet(item: $previewedImage) { item in
+            ImageAttachmentPreview(item: item)
         }
     }
 }
@@ -177,6 +195,8 @@ struct ComposerAttachmentStrip: View {
     let onRemove: (String) -> Void
     let onPreview: (PromptTextFileAttachment) -> Void
 
+    @State private var previewedImage: PreviewedImageItem?
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -199,6 +219,9 @@ struct ComposerAttachmentStrip: View {
             }
             .padding(.vertical, 2)
         }
+        .sheet(item: $previewedImage) { item in
+            ImageAttachmentPreview(item: item)
+        }
     }
 
     @ViewBuilder
@@ -206,6 +229,14 @@ struct ComposerAttachmentStrip: View {
         switch attachment {
         case let .image(image):
             PromptImageThumbnail(cacheKey: image.id, source: .data(image.data), side: 56)
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .onTapGesture {
+                    previewedImage = PreviewedImageItem(
+                        id: image.id,
+                        title: image.name,
+                        source: .data(image.data)
+                    )
+                }
                 .overlay(alignment: .topTrailing) {
                     Button {
                         onRemove(image.id)
@@ -220,15 +251,76 @@ struct ComposerAttachmentStrip: View {
                     .accessibilityLabel(AppText.removeAttachedImage)
                 }
                 .accessibilityElement(children: .contain)
-                .accessibilityLabel(AppText.attachedImage)
+                .accessibilityLabel("\(AppText.attachedImage): \(image.name)")
         case let .textFile(file):
             PromptAttachmentChip(title: file.name, kind: .textFile) { onRemove(file.id) }
+                .macHoverHighlight(cornerRadius: 14)
                 .contentShape(Capsule())
                 .onTapGesture { onPreview(file) }
                 .accessibilityAction(named: AppText.previewAttachment) { onPreview(file) }
         case let .serverFile(reference):
             PromptAttachmentChip(title: reference.displayName, kind: .serverFile) { onRemove(reference.id) }
         }
+    }
+}
+
+struct PreviewedImageItem: Identifiable {
+    let id: String
+    let title: String
+    let source: PromptImageThumbnail.Source
+}
+
+/// Full-size preview sheet for attached or sent images with Copy Image action.
+struct ImageAttachmentPreview: View {
+    let item: PreviewedImageItem
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var image: UIImage?
+    @State private var didCopy = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let image {
+                    ScrollView([.vertical, .horizontal]) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .containerRelativeFrame(.horizontal)
+                            .padding()
+                    }
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .background(Color.appBackground)
+            .navigationTitle(item.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let image {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            UIPasteboard.general.image = image
+                            didCopy = true
+                        } label: {
+                            Label(didCopy ? "Copied" : "Copy Image", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                        }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(AppText.done) { dismiss() }
+                }
+            }
+            .task(id: item.id) {
+                image = await PromptImageThumbnailCache.thumbnail(
+                    key: "\(item.id)-full",
+                    source: item.source,
+                    maximumPixelSize: 2_400
+                )
+            }
+        }
+        .adaptiveSheetDragIndicator()
     }
 }
 

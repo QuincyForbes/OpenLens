@@ -46,6 +46,7 @@ final class InboxService {
     private var formsRevision: UInt = 0
     private var formsLoadRevision: UInt?
     private var formsLoadID: UInt = 0
+    private var snapshotTaskMaxAge: TimeInterval = 0
 
     init(connection: ConnectionManager) {
         self.connection = connection
@@ -56,12 +57,15 @@ final class InboxService {
         guard let client = connection.client else { throw OpenCodeError.notConnected }
         let workspace = connection.projectContextRevision
         let revision = snapshotRevision
-        if let task = snapshotTask, snapshotTaskClient === client, snapshotTaskWorkspace == workspace {
+        if let task = snapshotTask,
+           snapshotTaskClient === client,
+           snapshotTaskWorkspace == workspace,
+           (maxAge > 0 || snapshotTaskMaxAge == 0) {
             let result = try await task.value
             try Task.checkCancellation()
             guard connection.client === client else { throw CancellationError() }
             if connection.projectContextRevision != workspace || snapshotRevision != revision {
-                return try await loadInbox(maxAge: 5)
+                return try await loadInbox(maxAge: maxAge)
             }
             return result
         }
@@ -71,6 +75,7 @@ final class InboxService {
         snapshotTaskID = id
         snapshotTaskClient = client
         snapshotTaskWorkspace = workspace
+        snapshotTaskMaxAge = maxAge
         defer {
             if snapshotTaskID == id { snapshotTask = nil; snapshotTaskID = nil }
         }

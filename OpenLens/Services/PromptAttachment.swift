@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 /// Something attached to a v2 prompt. Content from the phone travels as a
 /// `data:` URI; a repository reference is a `file:` URI the server reads from
@@ -86,6 +87,69 @@ nonisolated struct PromptTextFileAttachment: Identifiable, Hashable, Sendable {
 
     var promptFile: OCV2PromptFile {
         OCV2PromptFile(uri: dataURI, name: name)
+    }
+}
+
+/// Classifies a local file from Files, Finder, pasteboard, or drag-and-drop as
+/// either a preparable image or an inline UTF-8 text file.
+nonisolated enum LocalComposerFilePayload: Sendable {
+    case image(data: Data, name: String)
+    case textFile(PromptTextFileAttachment)
+
+    /// Maximum raw source image size read from disk before `PromptImagePreparer`
+    /// downsamples and compresses it to fit the 2 MiB prompt request.
+    static let maximumSourceImageBytes = 32 * 1_024 * 1_024
+
+    static func read(from url: URL) throws -> LocalComposerFilePayload {
+        let rawName = url.lastPathComponent
+        let name = rawName.isEmpty ? "attachment" : rawName
+        let isScoped = url.startAccessingSecurityScopedResource()
+        defer { if isScoped { url.stopAccessingSecurityScopedResource() } }
+
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentTypeKey, .isDirectoryKey])
+        if values?.isDirectory == true {
+            throw PromptAttachmentError.unreadableFile(name: name)
+        }
+        guard let size = values?.fileSize else {
+            throw PromptAttachmentError.unreadableFile(name: name)
+        }
+
+        let extType = url.pathExtension.isEmpty ? nil : UTType(filenameExtension: url.pathExtension)
+        let declaredType = values?.contentType ?? extType
+        let isDeclaredImage = declaredType?.conforms(to: .image) == true
+
+        if isDeclaredImage {
+            guard size <= maximumSourceImageBytes else {
+                throw PromptAttachmentError.imageTooLarge
+            }
+            guard let data = try? Data(contentsOf: url) else {
+                throw PromptAttachmentError.unreadableFile(name: name)
+            }
+            guard PromptImagePreparer.isDecodableImage(data) else {
+                throw PromptAttachmentError.unsupportedImage
+            }
+            return .image(data: data, name: name)
+        }
+
+        if size > OpenCodeClient.maximumPromptBodyBytes {
+            // Check whether an extensionless file is actually an image within the
+            // image byte ceiling before reporting textFileTooLarge.
+            if size <= maximumSourceImageBytes,
+               declaredType == nil || declaredType == .data,
+               let data = try? Data(contentsOf: url),
+               PromptImagePreparer.isDecodableImage(data) {
+                return .image(data: data, name: name)
+            }
+            throw PromptAttachmentError.textFileTooLarge(name: name)
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            throw PromptAttachmentError.unreadableFile(name: name)
+        }
+        if PromptImagePreparer.isDecodableImage(data) {
+            return .image(data: data, name: name)
+        }
+        return .textFile(try PromptTextFileAttachment(data: data, name: name))
     }
 }
 

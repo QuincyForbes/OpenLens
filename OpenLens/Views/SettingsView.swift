@@ -60,30 +60,73 @@ struct SettingsView: View {
                 Section("Saved Servers") {
                     ForEach(savedConnections.connections) { saved in
                         let isActive = saved.id == savedConnections.activeConnectionID
-                        Button {
-                            guard !isActive else { return }
-                            Task {
-                                await connection.connect(
-                                    url: saved.serverURL,
-                                    username: saved.username,
-                                    password: saved.password,
-                                    method: .manual
-                                )
-                            }
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(saved.displayName)
-                                        .font(.system(size: 14, weight: .medium, design: .monospaced))
-                                        .foregroundStyle(Color.appPrimary)
-                                    Text(saved.username)
-                                        .font(.caption)
-                                        .foregroundStyle(Color.appSecondary)
+                        HStack(spacing: 10) {
+                            Button {
+                                guard !isActive else { return }
+                                Task {
+                                    await connection.connect(
+                                        url: saved.serverURL,
+                                        username: saved.username,
+                                        password: saved.password,
+                                        method: .manual
+                                    )
                                 }
-                                Spacer()
-                                if isActive {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(Color.appUserAccent)
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(saved.displayName)
+                                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(Color.appPrimary)
+                                        Text(saved.username)
+                                            .font(.caption)
+                                            .foregroundStyle(Color.appSecondary)
+                                    }
+                                    Spacer()
+                                    if isActive {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(Color.appUserAccent)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            #if targetEnvironment(macCatalyst)
+                            if !isActive {
+                                Button(role: .destructive) {
+                                    savedConnections.removeConnection(saved)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.red.opacity(0.85))
+                                        .frame(width: 28, height: 28)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help(AppText.forget)
+                                .accessibilityLabel("\(AppText.forget) \(saved.displayName)")
+                            }
+                            #endif
+                        }
+                        .contextMenu {
+                            if !isActive {
+                                Button {
+                                    Task {
+                                        await connection.connect(
+                                            url: saved.serverURL,
+                                            username: saved.username,
+                                            password: saved.password,
+                                            method: .manual
+                                        )
+                                    }
+                                } label: {
+                                    Label(AppText.connect, systemImage: "network")
+                                }
+                                Divider()
+                                Button(role: .destructive) {
+                                    savedConnections.removeConnection(saved)
+                                } label: {
+                                    Label(AppText.forget, systemImage: "trash")
                                 }
                             }
                         }
@@ -105,12 +148,14 @@ struct SettingsView: View {
                 Toggle(isOn: $showThinking) {
                     preferenceLabel(AppText.showThinking, subtitle: AppText.showThinkingSubtitle, icon: "brain")
                 }
+                #if !targetEnvironment(macCatalyst)
                 Toggle(isOn: $hapticsEnabled) {
                     preferenceLabel(AppText.settingsHaptics, subtitle: AppText.settingsHapticsSubtitle, icon: "hand.tap")
                 }
                 Toggle(isOn: $liveActivitiesEnabled) {
                     preferenceLabel(AppText.settingsLiveActivities, subtitle: AppText.settingsLiveActivitiesSubtitle, icon: "platter.filled.top.iphone")
                 }
+                #endif
                 Toggle(isOn: $autoReconnect) {
                     preferenceLabel(AppText.autoReconnect, subtitle: AppText.autoReconnectSubtitle, icon: "arrow.triangle.2.circlepath")
                 }
@@ -240,6 +285,22 @@ struct SettingsView: View {
             }
             .listRowBackground(Color.appSurface)
 
+            #if targetEnvironment(macCatalyst)
+            Section("Keyboard Shortcuts") {
+                detailRow("Send Prompt", value: "Return / ⌘Return")
+                detailRow("New Line in Composer", value: "⇧Return")
+                detailRow("Paste Image, File, or Text", value: "⌘V / ⌥⌘V")
+                detailRow("Attach File or Image", value: "⇧⌘A")
+                detailRow("Choose Model", value: "⇧⌘M")
+                detailRow("New Session", value: "⌘N")
+                detailRow("Quick Switch Session", value: "⌘K")
+                detailRow("Search Sessions", value: "⌥⌘F")
+                detailRow("Toggle Sidebar", value: "⌥⌘S")
+                detailRow("Stop Agent Response", value: "⌘.")
+            }
+            .listRowBackground(Color.appSurface)
+            #endif
+
             Section {
                 if gitHubStars.state != .failed {
                     starGoalRow
@@ -248,11 +309,13 @@ struct SettingsView: View {
                     Label(AppText.settingsSupportGitHubCTA, systemImage: "arrow.up.right.square")
                 }
                 .tint(Color.appUserAccent)
+                #if !targetEnvironment(macCatalyst)
                 Button {
                     requestReviewPrompt()
                 } label: {
                     Label(AppText.settingsSupportReviewCTA, systemImage: "star.bubble.fill")
                 }
+                #endif
             } header: {
                 Text(AppText.settingsAboutSupport)
             }

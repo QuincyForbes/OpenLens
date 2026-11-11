@@ -1530,9 +1530,11 @@ private struct UserMessageBubbleContentView: View {
             SkillMentionText(text: shortText, chipStyle: chipStyle)
                 .font(bodyFont)
                 .foregroundStyle(foregroundColor)
+                .macInlineTextSelection()
 
         case let .collapsible(preview, initialMetrics, canExpandInline):
             let metrics = exactMetrics ?? initialMetrics
+            let fadeColor = isRetroChat ? RetroChatStyle.playerFill : Color.appUserAccent
 
             VStack(alignment: .leading, spacing: 10) {
                 if isExpandedInline && !inlineChunks.isEmpty {
@@ -1544,6 +1546,7 @@ private struct UserMessageBubbleContentView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .macInlineTextSelection()
                     .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     SkillMentionText(text: preview, chipStyle: chipStyle)
@@ -1552,16 +1555,14 @@ private struct UserMessageBubbleContentView: View {
                         .lineLimit(UserMessagePresentation.collapsedPreviewLineLimit)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .mask {
+                        .overlay(alignment: .bottom) {
                             LinearGradient(
-                                stops: [
-                                    .init(color: .black, location: 0),
-                                    .init(color: .black, location: 0.76),
-                                    .init(color: .black.opacity(0.38), location: 1.0)
-                                ],
+                                colors: [fadeColor.opacity(0), fadeColor.opacity(0.65)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
+                            .frame(height: 28)
+                            .allowsHitTesting(false)
                         }
                 }
 

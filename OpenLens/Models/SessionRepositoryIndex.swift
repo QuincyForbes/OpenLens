@@ -26,8 +26,14 @@ struct SessionRepositoryIndex {
             for id in ids { canonicalIDs[id] = canonical }
         }
         var projectsByPath: [String: Set<String>] = [:]
+        var normalizedRoots: [(canonicalID: String, key: String)] = []
+        normalizedRoots.reserveCapacity(roots.count)
         for (id, root) in roots {
-            if let key = Self.pathKey(root) { projectsByPath[key, default: []].insert(canonicalIDs[id] ?? id) }
+            if let key = Self.pathKey(root) {
+                let canonical = canonicalIDs[id] ?? id
+                projectsByPath[key, default: []].insert(canonical)
+                normalizedRoots.append((canonical, key))
+            }
         }
         for session in sessions {
             if let id = Self.projectID(session.projectID), let key = Self.pathKey(session.directory) {
@@ -45,13 +51,17 @@ struct SessionRepositoryIndex {
                 if let ids = projectsByPath[path], ids.count == 1 {
                     projectID = ids.first
                 } else if projectsByPath[path] == nil {
-                    let matches = roots.compactMap { id, root -> (String, String)? in
-                        guard let key = Self.pathKey(root), path == key || path.hasPrefix(key + "/") else { return nil }
-                        return (canonicalIDs[id] ?? id, key)
+                    var longest = -1
+                    var matchedIDs = Set<String>()
+                    for entry in normalizedRoots where path == entry.key || path.hasPrefix(entry.key + "/") {
+                        if entry.key.count > longest {
+                            longest = entry.key.count
+                            matchedIDs = [entry.canonicalID]
+                        } else if entry.key.count == longest {
+                            matchedIDs.insert(entry.canonicalID)
+                        }
                     }
-                    let longest = matches.map { $0.1.count }.max()
-                    let ids = Set(matches.filter { $0.1.count == longest }.map { $0.0 })
-                    if ids.count == 1 { projectID = ids.first }
+                    if matchedIDs.count == 1 { projectID = matchedIDs.first }
                 }
             }
             let id = projectID.map { "projectID:\($0)" }
@@ -64,12 +74,19 @@ struct SessionRepositoryIndex {
             let projectID = id.hasPrefix("projectID:") ? String(id.dropFirst("projectID:".count)) : nil
             // Stable across refresh/order changes. Prefer the server's root, then
             // the shallowest known directory; never use the most recently active row.
-            let paths = sessions.compactMap { Self.displayPath($0.directory) }.sorted {
-                let left = $0.replacingOccurrences(of: "\\", with: "/").split(separator: "/").count
-                let right = $1.replacingOccurrences(of: "\\", with: "/").split(separator: "/").count
-                return left == right ? $0 < $1 : left < right
+            let directory: String?
+            if let root = projectID.flatMap({ roots[$0] }) {
+                directory = root
+            } else {
+                let rankedPaths: [(path: String, depth: Int)] = sessions.compactMap { session in
+                    guard let path = Self.displayPath(session.directory) else { return nil }
+                    let depth = path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").count
+                    return (path, depth)
+                }
+                directory = rankedPaths.min { lhs, rhs in
+                    lhs.depth == rhs.depth ? lhs.path < rhs.path : lhs.depth < rhs.depth
+                }?.path
             }
-            let directory = projectID.flatMap { roots[$0] } ?? paths.first
             let repository = Repository(
                 id: id,
                 title: directory.map(WorkspaceSelectionBuilder.displayName(for:)) ?? projectID ?? AppText.projectFallback,

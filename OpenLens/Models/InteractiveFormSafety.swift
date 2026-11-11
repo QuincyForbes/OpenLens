@@ -240,14 +240,35 @@ nonisolated enum InteractiveFormSafety {
             && (maximum.map { $0 >= 0 } ?? true)
     }
 
+    private static let regexCache: NSCache<NSString, NSRegularExpression> = {
+        let cache = NSCache<NSString, NSRegularExpression>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    private static let isoDateLock = NSLock()
+    nonisolated(unsafe) private static let isoDateFormatter = ISO8601DateFormatter()
+
+    private static func compiledRegex(for pattern: String) -> NSRegularExpression? {
+        let key = pattern as NSString
+        if let cached = regexCache.object(forKey: key) {
+            return cached
+        }
+        guard let compiled = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        regexCache.setObject(compiled, forKey: key)
+        return compiled
+    }
+
     private static func validPattern(_ pattern: String?) -> Bool {
         guard let pattern else { return true }
-        return (try? NSRegularExpression(pattern: pattern)) != nil
+        return compiledRegex(for: pattern) != nil
     }
 
     private static func matchesStringConstraints(_ value: String, field: OCFormField) -> Bool {
         if let pattern = field.stringPattern,
-           let expression = try? NSRegularExpression(pattern: pattern) {
+           let expression = compiledRegex(for: pattern) {
             let range = NSRange(value.startIndex..<value.endIndex, in: value)
             guard expression.firstMatch(in: value, range: range) != nil else { return false }
         }
@@ -259,12 +280,19 @@ nonisolated enum InteractiveFormSafety {
         case "uri":
             return URL(string: value)?.scheme != nil
         case "date":
-            guard value.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil,
-                  let date = ISO8601DateFormatter().date(from: "\(value)T00:00:00Z")
-            else { return false }
-            return ISO8601DateFormatter().string(from: date).hasPrefix(value)
+            guard value.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil else {
+                return false
+            }
+            return isoDateLock.withLock {
+                guard let date = isoDateFormatter.date(from: "\(value)T00:00:00Z") else {
+                    return false
+                }
+                return isoDateFormatter.string(from: date).hasPrefix(value)
+            }
         case "date-time":
-            return ISO8601DateFormatter().date(from: value) != nil
+            return isoDateLock.withLock {
+                isoDateFormatter.date(from: value) != nil
+            }
         default:
             return false
         }

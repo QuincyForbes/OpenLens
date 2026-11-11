@@ -52,8 +52,8 @@ final class ConnectionManager: ConnectionProviding {
 
     /// Timestamp of the last liveness signal: stream bytes or a heartbeat event.
     /// Used by the heartbeat watchdog to detect silently dead connections.
-    private var lastHeartbeat: Date = .distantPast
-    private var heartbeatWatchdog: Timer?
+    @ObservationIgnored private var lastHeartbeat: Date = .distantPast
+    @ObservationIgnored private var heartbeatWatchdog: Timer?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastNetworkInterfaceSignature: String?
     @ObservationIgnored private var pathReconnectTask: Task<Void, Never>?

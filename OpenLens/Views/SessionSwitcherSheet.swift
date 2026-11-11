@@ -40,8 +40,9 @@ struct SessionSwitcherSheet: View {
                 }
             }
         }
+        .adaptiveSheetDragIndicator()
         .task {
-            guard fetchedState == nil else { return }
+            guard fetchedState == nil, sessionsService.cachedSessions.isEmpty else { return }
             do {
                 let sessions = try await sessionsService.listAllSessions()
                 try Task.checkCancellation()

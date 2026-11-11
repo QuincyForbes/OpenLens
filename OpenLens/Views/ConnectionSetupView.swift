@@ -185,6 +185,19 @@ struct ConnectionWelcomeView<ManualFields: View, ManualAccessories: View>: View 
             } else {
                 switch step {
                 case .welcome:
+                    #if targetEnvironment(macCatalyst)
+                    ConnectionSetupButton(
+                        title: "Paste pairing link",
+                        action: pastePairingLinkFromClipboard
+                    )
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .global)
+                    } action: { frame in
+                        scanButtonFrame = frame
+                    }
+                    .accessibilityIdentifier("connection.setup.paste")
+                    .transition(actionTransition)
+                    #else
                     ConnectionSetupButton(title: AppText.connectionPairingScan, action: startScanning)
                         .onGeometryChange(for: CGRect.self) { proxy in
                             proxy.frame(in: .global)
@@ -193,6 +206,7 @@ struct ConnectionWelcomeView<ManualFields: View, ManualAccessories: View>: View 
                         }
                         .accessibilityIdentifier("connection.setup.scan")
                         .transition(actionTransition)
+                    #endif
                 case .scanner:
                     ConnectionSetupButton(
                         title: "Paste pairing link",
@@ -293,7 +307,7 @@ struct ConnectionWelcomeView<ManualFields: View, ManualAccessories: View>: View 
         .sheet(item: $presentedSheet) { sheet in
             ConnectionSetupTipsView(sheet: sheet)
                 .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+                .adaptiveSheetDragIndicator()
                 .presentationBackground(Color.appBackground)
         }
     }

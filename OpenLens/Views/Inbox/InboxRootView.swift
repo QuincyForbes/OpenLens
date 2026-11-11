@@ -477,10 +477,16 @@ struct InboxRootView: View {
 
         viewState = .loading
         do {
-            async let loadedSessions = try? sessionsService.listAllSessions()
-            snapshot = try await inboxService.loadInbox()
-            if let sessions = await loadedSessions {
-                sessionsByID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            let existingCached = sessionsService.cachedSessions
+            if existingCached.isEmpty {
+                async let loadedSessions = try? sessionsService.listAllSessions()
+                snapshot = try await inboxService.loadInbox()
+                if let sessions = await loadedSessions {
+                    sessionsByID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+                }
+            } else {
+                sessionsByID = Dictionary(existingCached.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+                snapshot = try await inboxService.loadInbox()
             }
             viewState = .loaded
         } catch {

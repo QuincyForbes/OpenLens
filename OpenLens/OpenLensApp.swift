@@ -469,7 +469,7 @@ struct OpenLensApp: App {
                         .sheet(isPresented: $isOpenCodeV2SupportPresented) {
                             OpenCodeV2SupportView(serverCapabilities: connection.serverCapabilities)
                                 .presentationDetents([.medium, .large])
-                                .presentationDragIndicator(.visible)
+                                .adaptiveSheetDragIndicator()
                                 .presentationBackground(Color.appBackground)
                         }
                         .transition(.opacity)
@@ -614,10 +614,122 @@ struct OpenLensApp: App {
             } message: {
                 Text(AppText.switchMessage)
             }
+            #if targetEnvironment(macCatalyst)
+            .background(MacWindowSceneConfigurator().frame(width: 0, height: 0))
+            #endif
         }
         #if targetEnvironment(macCatalyst)
-        .defaultSize(width: 1120, height: 780)
+        .defaultSize(width: 1220, height: 820)
         #endif
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button(AppText.newSession) {
+                    router.requestNewSession()
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode)
+
+                Button("Switch Session…") {
+                    router.requestSessionSwitcher()
+                }
+                .keyboardShortcut("k", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode)
+
+                Button("Search Sessions") {
+                    router.requestFocusSessionSearch()
+                }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+                .disabled(!connection.isConnected || isPreviewMode)
+            }
+
+            #if targetEnvironment(macCatalyst)
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    router.selectedTab = .settings
+                }
+                .keyboardShortcut(",", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode)
+            }
+            #endif
+
+            CommandMenu("Navigate") {
+                Button("Chat") {
+                    router.selectedTab = .chat
+                }
+                .keyboardShortcut("1", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode)
+
+                Button(AppTab.review.title) {
+                    router.selectedTab = .review
+                }
+                .keyboardShortcut("2", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode)
+
+                Button(AppTab.workspace.title) {
+                    router.selectedTab = .workspace
+                }
+                .keyboardShortcut("3", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode)
+
+                Button(AppTab.settings.title) {
+                    router.selectedTab = .settings
+                }
+                #if targetEnvironment(macCatalyst)
+                .keyboardShortcut("4", modifiers: .command)
+                #else
+                .keyboardShortcut(",", modifiers: .command)
+                #endif
+                .disabled(!connection.isConnected || isPreviewMode)
+
+                Divider()
+
+                Button("Toggle Sidebar") {
+                    router.requestToggleSidebar()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .disabled(!connection.isConnected || isPreviewMode)
+            }
+
+            CommandMenu("Chat") {
+                Button("Choose Model…") {
+                    router.requestChooseModel()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .disabled(!connection.isConnected || isPreviewMode || chatClient.currentSession == nil)
+
+                Button("Attach File or Image…") {
+                    router.requestAttachFile()
+                }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+                .disabled(!chatClient.canAttachFiles)
+
+                Button(AppText.attachFromClipboard) {
+                    router.requestPasteClipboard()
+                }
+                .keyboardShortcut("v", modifiers: [.command, .option])
+                .disabled(!connection.isConnected || isPreviewMode || chatClient.currentSession == nil)
+
+                Divider()
+
+                Button("Sync Session") {
+                    Task { await chatClient.refreshCurrentSessionFromServer() }
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!connection.isConnected || isPreviewMode || chatClient.currentSession == nil)
+
+                Button("Jump to Latest") {
+                    router.requestJumpToLatest()
+                }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .shift])
+                .disabled(!chatClient.hasDisplayedMessages)
+
+                Button("Stop Response") {
+                    chatClient.abort()
+                }
+                .keyboardShortcut(".", modifiers: .command)
+                .disabled(!chatClient.isLoading)
+            }
+        }
     }
 
     // MARK: - Preview Modes

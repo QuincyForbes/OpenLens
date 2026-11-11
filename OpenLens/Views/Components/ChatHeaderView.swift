@@ -110,7 +110,7 @@ struct ChatHeaderToolbar: ToolbarContent {
                     Circle()
                         .fill(statusColor)
                         .frame(width: 6, height: 6)
-                        .symbolEffect(.pulse, isActive: connectionState == .connected)
+                        .symbolEffect(.pulse, isActive: connectionState == .connecting || connectionState == .reconnecting)
                         .padding(.trailing, 4)
 
                     if let projectName {

@@ -403,7 +403,7 @@ private struct CodeListingView: View {
                 }
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(0..<shownCount, id: \.self) { index in
                             let line = lines[index]
                             HStack(alignment: .top, spacing: 12) {
@@ -576,7 +576,7 @@ private struct UnifiedDiffHunkCard: View {
                     .padding(.vertical, 10)
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 2) {
+                        LazyVStack(alignment: .leading, spacing: 2) {
                             ForEach(visibleLines) { line in
                                 UnifiedDiffLineRow(line: line, codeWidth: codeWidth, wrapLines: false)
                             }

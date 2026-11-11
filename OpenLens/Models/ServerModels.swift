@@ -969,9 +969,14 @@ nonisolated struct OCSessionStatus: Codable, Equatable, Sendable {
     let env: [String]?
     let models: [String: OCProviderModel]
 
-    /// Convenience: array of all models in this provider.
+    /// Convenience: deterministically sorted array of all models in this provider.
     var modelList: [OCProviderModel] {
-        Array(models.values)
+        models.values.sorted { lhs, rhs in
+            let leftName = lhs.name.isEmpty ? lhs.id : lhs.name
+            let rightName = rhs.name.isEmpty ? rhs.id : rhs.name
+            let cmp = leftName.localizedCaseInsensitiveCompare(rightName)
+            return cmp == .orderedSame ? lhs.id < rhs.id : cmp == .orderedAscending
+        }
     }
 
     init(id: String, name: String, env: [String]? = nil, models: [String: OCProviderModel] = [:]) {

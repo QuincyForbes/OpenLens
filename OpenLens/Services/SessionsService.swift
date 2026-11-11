@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 struct WorkspaceActivityDay: Hashable, Sendable {
     let date: Date
@@ -29,14 +30,19 @@ final class SessionsService {
     private var viewedClientID: ObjectIdentifier?
     private weak var projectsClient: OpenCodeClient?
     private var catalogProjects: [OCProject] = []
-    private var catalogGeneration: UInt = 0
+    @ObservationIgnored private var catalogGeneration: UInt = 0
+    @ObservationIgnored private var inFlightCatalogTask: Task<[OCSession], Error>?
+    @ObservationIgnored private var inFlightCatalogTaskID: UUID?
+    @ObservationIgnored private weak var inFlightCatalogClient: OpenCodeClient?
     private var liveStateClientID: ObjectIdentifier?
     private var storedCachedSessions: [OCSession] = []
     private var storedServerStatuses: [String: OCSessionStatus] = [:]
     private var clientObservedActiveSessionIDs: Set<String> = []
-    private var pendingCanonicalRefreshIDs: Set<String> = []
-    private var inFlightSessionRefreshIDs: Set<String> = []
+    @ObservationIgnored private var pendingCanonicalRefreshIDs: Set<String> = []
+    @ObservationIgnored private var inFlightSessionRefreshIDs: Set<String> = []
     private var pinsByServer: [String: [String]] = UserDefaults.standard.dictionary(forKey: "sessions.pinsByServer") as? [String: [String]] ?? [:]
+    @ObservationIgnored private var cachedPinnedScope: String? = "__uninitialized__"
+    @ObservationIgnored private var cachedPinnedSet: Set<String> = []
 
     var cachedSessions: [OCSession] {
         guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
@@ -72,14 +78,23 @@ final class SessionsService {
     private var pinScope: String? { connection.serverURL?.absoluteString }
 
     var pinnedSessionIDs: Set<String> {
-        guard let pinScope else { return [] }
-        return Set(pinsByServer[pinScope] ?? [])
+        let scope = pinScope
+        // Read `pinsByServer` so `@Observable` tracks pin toggles, while caching
+        // the constructed `Set` so N rows don't re-hash it N times per render.
+        let list = scope.flatMap { pinsByServer[$0] } ?? []
+        if cachedPinnedScope != scope {
+            cachedPinnedScope = scope
+            cachedPinnedSet = Set(list)
+        }
+        return cachedPinnedSet
     }
 
     func togglePin(_ sessionID: String) {
         guard let pinScope else { return }
-        var ids = pinnedSessionIDs
+        var ids = Set(pinsByServer[pinScope] ?? [])
         if !ids.insert(sessionID).inserted { ids.remove(sessionID) }
+        cachedPinnedScope = pinScope
+        cachedPinnedSet = ids
         pinsByServer[pinScope] = ids.sorted()
         UserDefaults.standard.set(pinsByServer, forKey: "sessions.pinsByServer")
     }
@@ -170,24 +185,31 @@ final class SessionsService {
         guard ensureLiveStateScope() != nil else { return }
         switch event {
         case let .busy(sessionID, isRetry):
-            storedServerStatuses[sessionID] = OCSessionStatus(
+            let nextStatus = OCSessionStatus(
                 type: isRetry ? .retry : .busy,
                 attempt: nil,
                 message: nil,
                 next: nil
             )
+            if storedServerStatuses[sessionID] != nextStatus {
+                storedServerStatuses[sessionID] = nextStatus
+            }
             if !storedCachedSessions.contains(where: { $0.id == sessionID }) {
                 refreshSingleCanonicalSessionInBackground(id: sessionID)
             }
         case let .ended(sessionID):
-            storedServerStatuses.removeValue(forKey: sessionID)
+            if storedServerStatuses[sessionID] != nil {
+                storedServerStatuses.removeValue(forKey: sessionID)
+            }
             clientObservedActiveSessionIDs.remove(sessionID)
             pendingCanonicalRefreshIDs.insert(sessionID)
             refreshSingleCanonicalSessionInBackground(id: sessionID)
         case let .updated(sessionID):
             refreshSingleCanonicalSessionInBackground(id: sessionID)
         case let .deleted(sessionID):
-            storedServerStatuses.removeValue(forKey: sessionID)
+            if storedServerStatuses[sessionID] != nil {
+                storedServerStatuses.removeValue(forKey: sessionID)
+            }
             clientObservedActiveSessionIDs.remove(sessionID)
             pendingCanonicalRefreshIDs.remove(sessionID)
             storedCachedSessions.removeAll { $0.id == sessionID }
@@ -273,6 +295,8 @@ final class SessionsService {
     }
 
     /// Fetch the session catalog for the Sessions screen, across directories.
+    /// Concurrent callers against the same `OpenCodeClient` coalesce onto a
+    /// single network pass.
     func listAllSessions() async throws -> [OCSession] {
         if ScreenshotFixtures.isEnabled {
             return ScreenshotFixtures.sessions
@@ -282,24 +306,50 @@ final class SessionsService {
             throw OpenCodeError.notConnected
         }
 
+        if let existingTask = inFlightCatalogTask, inFlightCatalogClient === client {
+            let result = try await existingTask.value
+            try Task.checkCancellation()
+            guard connection.client === client else { throw CancellationError() }
+            return result
+        }
+
+        let taskID = UUID()
         catalogGeneration &+= 1
         let generation = catalogGeneration
-        async let projectRead = try? client.listProjects()
-        let sessions = try await client.listAllSessions()
-        let projects = await projectRead
+        let task = Task<[OCSession], Error> { @MainActor in
+            async let projectRead = try? client.listProjects()
+            let sessions = try await client.listAllSessions()
+            let projects = await projectRead
+            guard self.connection.client === client else { throw CancellationError() }
+            if generation == self.catalogGeneration, let projects {
+                self.catalogProjects = projects
+                self.projectsClient = client
+            }
+            let resolved = self.visibleSessions(
+                from: Self.applyingProjectDirectories(sessions, projects: projects ?? self.repositoryProjects)
+            )
+            if generation == self.catalogGeneration, self.ensureLiveStateScope() === client {
+                let updated = self.applyingConfirmedViewedMarkers(to: resolved)
+                if self.storedCachedSessions != updated {
+                    self.storedCachedSessions = updated
+                }
+            }
+            return resolved
+        }
+        inFlightCatalogTask = task
+        inFlightCatalogTaskID = taskID
+        inFlightCatalogClient = client
+        defer {
+            if inFlightCatalogTaskID == taskID {
+                inFlightCatalogTask = nil
+                inFlightCatalogTaskID = nil
+                inFlightCatalogClient = nil
+            }
+        }
+        let result = try await task.value
         try Task.checkCancellation()
         guard connection.client === client else { throw CancellationError() }
-        if generation == catalogGeneration, let projects {
-            catalogProjects = projects
-            projectsClient = client
-        }
-        let resolved = visibleSessions(
-            from: Self.applyingProjectDirectories(sessions, projects: projects ?? repositoryProjects)
-        )
-        if generation == catalogGeneration, ensureLiveStateScope() === client {
-            storedCachedSessions = applyingConfirmedViewedMarkers(to: resolved)
-        }
-        return resolved
+        return result
     }
 
     func getSession(id: String) async throws -> OCSession {
@@ -639,7 +689,7 @@ final class SessionsService {
             throw OpenCodeError.notConnected
         }
         let statuses = try await client.getSessionStatus()
-        if connection.client === client, ensureLiveStateScope() === client {
+        if connection.client === client, ensureLiveStateScope() === client, storedServerStatuses != statuses {
             storedServerStatuses = statuses
         }
         return statuses
@@ -666,8 +716,13 @@ final class SessionsService {
         guard connection.serverCapabilities?.protocolVersion == .v2
                 || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes) else {
             if ensureLiveStateScope() != nil {
-                storedServerStatuses = statuses
-                storedCachedSessions = visibleSessions(from: sessions)
+                if storedServerStatuses != statuses {
+                    storedServerStatuses = statuses
+                }
+                let nextCached = visibleSessions(from: sessions)
+                if storedCachedSessions != nextCached {
+                    storedCachedSessions = nextCached
+                }
             }
             return SessionExecutionSnapshot(sessions: sessions, statuses: statuses)
         }
@@ -688,8 +743,13 @@ final class SessionsService {
             return session.withoutExecutionOutcome()
         }
         if ensureLiveStateScope() != nil {
-            storedServerStatuses = statuses
-            storedCachedSessions = applyingConfirmedViewedMarkers(to: visibleSessions(from: refreshed))
+            if storedServerStatuses != statuses {
+                storedServerStatuses = statuses
+            }
+            let nextCached = applyingConfirmedViewedMarkers(to: visibleSessions(from: refreshed))
+            if storedCachedSessions != nextCached {
+                storedCachedSessions = nextCached
+            }
         }
         return SessionExecutionSnapshot(sessions: refreshed, statuses: statuses, failedOutcomeSessionIDs: failures)
     }

@@ -30,7 +30,7 @@ struct MarkdownContentView: View {
     private static let codeLanguageLabelLimit = 80
     private static let parserQueue = DispatchQueue(
         label: "com.openlens.MarkdownContentView.parser",
-        qos: .utility
+        qos: .userInitiated
     )
 
     /// Number of blocks currently visible (nil = show all).
@@ -42,6 +42,7 @@ struct MarkdownContentView: View {
     private static let blockCache: NSCache<NSNumber, BlocksBox> = {
         let c = NSCache<NSNumber, BlocksBox>()
         c.countLimit = 200
+        c.totalCostLimit = 16 * 1_024 * 1_024
         return c
     }()
 
@@ -78,7 +79,11 @@ struct MarkdownContentView: View {
             return nil
         }
         let parsed = parseBlocks(from: text)
-        blockCache.setObject(BlocksBox(sourceText: text, blocks: parsed), forKey: key)
+        blockCache.setObject(
+            BlocksBox(sourceText: text, blocks: parsed),
+            forKey: key,
+            cost: max(text.utf8.count * 4, 256)
+        )
         return Prepared(cacheKey: key.intValue, blocks: parsed)
     }
 
@@ -94,7 +99,11 @@ struct MarkdownContentView: View {
             } else {
                 let signpostID = ChatStreamInstrumentation.beginMarkdownPrewarm(characterCount: text.count)
                 let parsed = parseBlocks(from: text)
-                blockCache.setObject(BlocksBox(sourceText: text, blocks: parsed), forKey: key)
+                blockCache.setObject(
+                    BlocksBox(sourceText: text, blocks: parsed),
+                    forKey: key,
+                    cost: max(text.utf8.count * 4, 256)
+                )
                 ChatStreamInstrumentation.endMarkdownPrewarm(signpostID)
                 prepared = Prepared(cacheKey: key.intValue, blocks: parsed)
             }
@@ -228,10 +237,15 @@ struct MarkdownContentView: View {
         return applyingDetectedLinks(to: attributed, linkColor: Color.appAccent)
     }
 
-    private static let linkDetector = try? NSDataDetector(
+    // Separate detectors for main thread vs background worker so scrolling on
+    // MainActor never blocks behind a background `parserQueue` lock.
+    private static let mainThreadLinkDetector = try? NSDataDetector(
         types: NSTextCheckingResult.CheckingType.link.rawValue
     )
-    private static let linkDetectorLock = NSLock()
+    private static let backgroundLinkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+    private static let backgroundLinkDetectorLock = NSLock()
     private static let domainCandidateRegex = try? NSRegularExpression(
         pattern: #"[A-Za-z0-9-]\.[A-Za-z]{2,}(/|\b)"#
     )
@@ -266,19 +280,22 @@ struct MarkdownContentView: View {
     /// and `MainActor` (`linkedPlainText`) invoke link detection.
     private static func applyingDetectedLinks(to attributed: AttributedString, linkColor: Color?) -> AttributedString {
         var result = attributed
-        if let linkDetector {
-            let plain = String(result.characters)
-            if containsLinkCandidate(plain) {
-                let nsRange = NSRange(plain.startIndex..., in: plain)
-                let matches = linkDetectorLock.withLock {
-                    linkDetector.matches(in: plain, range: nsRange)
+        let plain = String(result.characters)
+        if containsLinkCandidate(plain) {
+            let nsRange = NSRange(plain.startIndex..., in: plain)
+            let matches: [NSTextCheckingResult]
+            if Thread.isMainThread {
+                matches = mainThreadLinkDetector?.matches(in: plain, range: nsRange) ?? []
+            } else {
+                matches = backgroundLinkDetectorLock.withLock {
+                    backgroundLinkDetector?.matches(in: plain, range: nsRange) ?? []
                 }
-                for match in matches {
-                    guard let url = match.url,
-                          let range = Range(match.range, in: result),
-                          result[range].link == nil else { continue }
-                    result[range].link = url
-                }
+            }
+            for match in matches {
+                guard let url = match.url,
+                      let range = Range(match.range, in: result),
+                      result[range].link == nil else { continue }
+                result[range].link = url
             }
         }
         for run in result.runs where run.link != nil {
@@ -612,12 +629,15 @@ struct LinkedPlainText: View {
     var tint: Color = Color.appAccent
 
     var body: some View {
-        if let linked = MarkdownContentView.linkedPlainText(text) {
-            Text(linked)
-                .tint(tint)
-        } else {
-            Text(text)
+        Group {
+            if let linked = MarkdownContentView.linkedPlainText(text) {
+                Text(linked)
+                    .tint(tint)
+            } else {
+                Text(text)
+            }
         }
+        .macInlineTextSelection()
     }
 }
 
@@ -641,6 +661,7 @@ private struct MarkdownInlineText: View {
         .foregroundStyle(foregroundColor)
         // Links inside `Text` render with the tint, not the foreground style.
         .tint(usesRetroTypography ? RetroChatStyle.blueAccent : Color.appAccent)
+        .macInlineTextSelection()
     }
 }
 
@@ -825,6 +846,7 @@ private struct MarkdownCodeBlockView: View {
                             .fixedSize(horizontal: true, vertical: true)
                     }
                 }
+                .macInlineTextSelection()
                 .padding(12)
             }
 

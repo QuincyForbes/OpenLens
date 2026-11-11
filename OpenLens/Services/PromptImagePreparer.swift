@@ -46,9 +46,29 @@ nonisolated enum PromptImagePreparer {
     static let maximumPixelDimension = 2_000
     /// Leaves room for several images within the 2 MiB prompt body.
     static let defaultMaximumBytes = 600_000
+    /// Generous single-image budget when the composer has plenty of room, so
+    /// crisp desktop/mobile PNG screenshots pass through without lossy re-encoding.
+    static let singleImageMaximumBytes = 950_000
 
     private static let minimumPixelDimension = 320
     private static let jpegQualities: [Double] = [0.85, 0.7, 0.55, 0.4]
+
+    static func isDecodableImage(_ data: Data) -> Bool {
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int else {
+            return false
+        }
+        // Reject PDFs that CGImageSource might inspect on some OS versions;
+        // OpenCode image attachments only accept raster images.
+        if data.starts(with: Array("%PDF-".utf8)) {
+            return false
+        }
+        return width > 0 && height > 0
+    }
 
     private enum Format {
         case png, jpeg, gif, webp, other
@@ -84,9 +104,11 @@ nonisolated enum PromptImagePreparer {
     static func prepare(
         _ data: Data,
         maximumBytes: Int = defaultMaximumBytes,
-        id: String = UUID().uuidString
+        id: String = UUID().uuidString,
+        preferredName: String? = nil
     ) throws -> PromptImageAttachment {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+        guard !data.starts(with: Array("%PDF-".utf8)),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
@@ -103,7 +125,7 @@ nonisolated enum PromptImagePreparer {
                 id: id,
                 data: data,
                 mime: passthrough.mime,
-                name: "image.\(passthrough.ext)",
+                name: resolvedName(preferredName: preferredName, ext: passthrough.ext),
                 pixelWidth: width,
                 pixelHeight: height
             )
@@ -122,7 +144,7 @@ nonisolated enum PromptImagePreparer {
                         id: id,
                         data: jpeg,
                         mime: "image/jpeg",
-                        name: "image.jpg",
+                        name: resolvedName(preferredName: preferredName, ext: "jpg"),
                         pixelWidth: opaque.width,
                         pixelHeight: opaque.height
                     )
@@ -131,6 +153,20 @@ nonisolated enum PromptImagePreparer {
             dimension = dimension * 3 / 4
         }
         throw PromptAttachmentError.imageTooLarge
+    }
+
+    private static func resolvedName(preferredName: String?, ext: String) -> String {
+        guard let raw = preferredName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return "image.\(ext)"
+        }
+        let filename = (raw as NSString).lastPathComponent
+        let stem = (filename as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stem.isEmpty, stem != "." else {
+            return "image.\(ext)"
+        }
+        return "\(stem).\(ext)"
     }
 
     private static func thumbnail(from source: CGImageSource, maximumDimension: Int) -> CGImage? {

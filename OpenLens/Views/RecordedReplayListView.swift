@@ -97,6 +97,12 @@ struct RecordedReplayListView: View {
                         } label: {
                             Label(AppText.exportCapture, systemImage: "square.and.arrow.up")
                         }
+                        Divider()
+                        Button(role: .destructive) {
+                            delete(descriptor)
+                        } label: {
+                            Label(AppText.delete, systemImage: "trash")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                             .font(.system(size: 17, weight: .semibold))
@@ -105,6 +111,25 @@ struct RecordedReplayListView: View {
                     .buttonStyle(.plain)
                 }
                 .listRowBackground(Color.appBackground)
+                .contextMenu {
+                    Button(AppText.playRealtime) {
+                        play(descriptor, mode: .realtime)
+                    }
+                    Button(AppText.playFast) {
+                        play(descriptor, mode: .fast)
+                    }
+                    Button {
+                        export(descriptor)
+                    } label: {
+                        Label(AppText.exportCapture, systemImage: "square.and.arrow.up")
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        delete(descriptor)
+                    } label: {
+                        Label(AppText.delete, systemImage: "trash")
+                    }
+                }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     Button(role: .destructive) {
                         delete(descriptor)
