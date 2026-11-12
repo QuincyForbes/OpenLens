@@ -39,7 +39,7 @@ struct ChatView: View {
     @State private var showRenameSessionAlert = false
     @State private var renameSessionDraft = ""
     @State private var showTodoList = false
-    @State private var showBackgroundWatchersPopover = false
+    @State private var showSubagentThreadsSheet = false
     @State private var availableSlashActions: [WorkspaceSlashActionItem] = []
     @State private var selectedSlashAction: WorkspaceSlashActionItem?
     @State private var attachedSkills: [WorkspaceSkillItem] = []
@@ -129,12 +129,36 @@ struct ChatView: View {
 
     private var chatMainStack: some View {
         VStack(spacing: 0) {
+            if !chatClient.isOfflinePreviewMode,
+               let parentID = chatClient.currentSession?.parentID?.nilIfBlank {
+                SubagentParentBanner(
+                    parentTitle: sessionsService.session(withID: parentID)?.title,
+                    subagentName: chatClient.currentSession?.agent,
+                    isSubagentRunning: chatClient.isLoading,
+                    isStopping: chatClient.isStoppingResponse,
+                    startDate: chatClient.activeTurnStartDate,
+                    isRetroChat: isRetroChat,
+                    onOpenParent: {
+                        openSessionByID(parentID)
+                    },
+                    onStopSubagent: {
+                        chatClient.abort()
+                    }
+                )
+            }
+
             ChatMessagesListView(
                 chatClient: chatClient,
                 jumpToLatestRequest: jumpToLatestRequest
             )
             .environment(\.chatSkillIDs, availableSkillIDs)
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
+            .environment(\.onOpenSubagentSession, (!chatClient.isOfflinePreviewMode && router != nil) ? { childID in
+                openSessionByID(childID)
+            } : nil)
+            .environment(\.onStopSubagentSession, !chatClient.isOfflinePreviewMode ? { childID in
+                Task { await chatClient.stopSubagent(childSessionID: childID) }
+            } : nil)
 
             if let attention = pendingAttention {
                 pendingAttentionBanner(attention)
@@ -264,6 +288,9 @@ struct ChatView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                let subagents = chatClient.isOfflinePreviewMode ? [] : chatClient.currentSessionSubagents()
+                let runningSubagents = subagents.filter(\.isRunning).count
+                let latestCompletedReply = chatClient.messages.last(where: { $0.role == .assistant && !$0.isStreaming && !$0.content.isEmpty })?.content
                 ChatHeaderToolbar(
                     projectName: chatClient.sessionLocationState == .ready
                         ? (headerSession?.workspaceDisplayName ?? connection.projectName)
@@ -306,9 +333,22 @@ struct ChatView: View {
                     onSwitchSession: (!chatClient.isOfflinePreviewMode && router != nil) ? {
                         showSessionSwitcher = true
                     } : nil,
+                    onShowSubagents: !subagents.isEmpty ? {
+                        showSubagentThreadsSheet = true
+                    } : nil,
+                    onStopAllInChat: (!chatClient.isOfflinePreviewMode && (chatClient.isLoading || runningSubagents > 0)) ? {
+                        Task { await chatClient.stopAllCurrentSessionAgents() }
+                    } : nil,
+                    onCopyLastReply: latestCompletedReply != nil ? {
+                        if let latestCompletedReply {
+                            UIPasteboard.general.string = latestCompletedReply
+                        }
+                    } : nil,
                     otherActiveSessionCount: chatClient.isOfflinePreviewMode
                         ? 0
-                        : sessionsService.activeSessionCount(excluding: headerSession?.id)
+                        : sessionsService.activeSessionCount(excluding: headerSession?.id),
+                    subagentCount: subagents.count,
+                    runningSubagentCount: runningSubagents
                 )
             }
     }
@@ -464,6 +504,44 @@ struct ChatView: View {
                 .adaptiveSheetDragIndicator()
                 .presentationBackground(Color.appBackground)
             }
+            .sheet(isPresented: $showSubagentThreadsSheet) {
+                SubagentThreadsSheet(
+                    subagents: chatClient.currentSessionSubagents(),
+                    shellWatchers: chatClient.activeBackgroundWatchers.filter { $0.kind == .shell },
+                    isParentRunning: chatClient.isLoading,
+                    isStopping: chatClient.isStoppingSubagents || chatClient.isStoppingResponse,
+                    onOpenThread: { childID in
+                        openSessionByID(childID)
+                    },
+                    onStopSubagent: { childID in
+                        Task { await chatClient.stopSubagent(childSessionID: childID) }
+                    },
+                    onStopAll: {
+                        Task { await chatClient.stopAllCurrentSessionAgents() }
+                    }
+                )
+                .presentationDetents([.medium, .large])
+                .adaptiveSheetDragIndicator()
+                .presentationBackground(Color.appBackground)
+            }
+    }
+
+    private func openSessionByID(_ sessionID: String) {
+        guard !sessionID.isEmpty, router != nil else { return }
+        if let cached = sessionsService.session(withID: sessionID) {
+            chatClient.prepareForOpeningSession(cached)
+            router?.selectChatSession(cached)
+            return
+        }
+        Task {
+            do {
+                let resolved = try await sessionsService.resolveSessionForOpening(id: sessionID)
+                chatClient.prepareForOpeningSession(resolved)
+                router?.selectChatSession(resolved)
+            } catch {
+                chatClient.errorMessage = "Failed to open thread: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func withInteractionSheets<Content: View>(_ content: Content) -> some View {
@@ -671,28 +749,31 @@ struct ChatView: View {
 
     @ViewBuilder
     private var responseStatusOverlay: some View {
-        if let label = responseStatusLabel(for: displayedResponseState) {
-            ResponseStatusSiriIndicator(
-                state: displayedResponseState,
-                label: label,
-                icon: responseStatusIcon(for: displayedResponseState),
-                color: responseStatusColor(for: displayedResponseState),
-                isRetroChat: isRetroChat
-            )
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(label)
-            .allowsHitTesting(false)
-            .transition(
-                .asymmetric(
-                    insertion: .move(edge: .top)
-                        .combined(with: .opacity)
-                        .combined(with: .scale(scale: 0.92)),
-                    removal: .opacity
-                        .combined(with: .scale(scale: 0.86))
-                )
-            )
-        } else if !chatClient.activeBackgroundWatchers.isEmpty {
-            backgroundWatcherOverlayPill
+        let subagents = chatClient.isOfflinePreviewMode ? [] : chatClient.currentSessionSubagents()
+        let runningSubagents = subagents.filter(\.isRunning)
+        let shellWatchers = chatClient.activeBackgroundWatchers.filter { $0.kind == .shell }
+
+        VStack(spacing: 6) {
+            if let label = responseStatusLabel(for: displayedResponseState) {
+                Button {
+                    if chatClient.currentActivity != nil {
+                        chatClient.showActivityCard = true
+                    }
+                } label: {
+                    ResponseStatusSiriIndicator(
+                        state: displayedResponseState,
+                        label: label,
+                        activityDetail: chatClient.currentActivity?.currentLabel.nilIfBlank,
+                        startDate: chatClient.activeTurnStartDate,
+                        icon: responseStatusIcon(for: displayedResponseState),
+                        color: responseStatusColor(for: displayedResponseState),
+                        isRetroChat: isRetroChat
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(chatClient.currentActivity == nil)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
                 .transition(
                     .asymmetric(
                         insertion: .move(edge: .top)
@@ -702,90 +783,34 @@ struct ChatView: View {
                             .combined(with: .scale(scale: 0.86))
                     )
                 )
-        }
-    }
-
-    private var backgroundWatcherOverlayPill: some View {
-        let watchers = chatClient.activeBackgroundWatchers
-        let summaryLabel = watchers.count == 1
-            ? "Watching · \(watchers[0].title)"
-            : "Watching \(watchers.count) background tasks"
-        let isRemindArmed = chatClient.isCurrentSessionReminderArmed
-
-        return HStack(spacing: 8) {
-            Button {
-                showBackgroundWatchersPopover.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "clock.arrow.2.circlepath")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.appAccent)
-                        .symbolEffect(.pulse)
-                    Text(summaryLabel)
-                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(primaryTextColor)
-                        .lineLimit(1)
-                }
             }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showBackgroundWatchersPopover, arrowEdge: .top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Active Background Watchers")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(secondaryTextColor)
-                    ForEach(watchers) { item in
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: item.kind == .shell ? "terminal" : "person.2.wave.2")
-                                .font(.caption)
-                                .foregroundStyle(Color.appAccent)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title)
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(primaryTextColor)
-                                    .lineLimit(2)
-                                if let detail = item.detail {
-                                    Text(detail)
-                                        .font(.caption2)
-                                        .foregroundStyle(secondaryTextColor)
-                                }
-                            }
-                        }
+
+            if !runningSubagents.isEmpty || !shellWatchers.isEmpty {
+                LiveAgentsControlBar(
+                    runningSubagents: runningSubagents,
+                    shellWatchers: shellWatchers,
+                    isStoppingAll: chatClient.isStoppingSubagents,
+                    isRemindArmed: chatClient.isCurrentSessionReminderArmed,
+                    isRetroChat: isRetroChat,
+                    onOpenThreadsSheet: { showSubagentThreadsSheet = true },
+                    onStopAll: {
+                        Task { await chatClient.stopAllCurrentSessionAgents() }
+                    },
+                    onToggleReminder: {
+                        chatClient.toggleCurrentSessionReminder()
                     }
-                }
-                .padding(12)
-                .frame(maxWidth: 300, alignment: .leading)
-                .presentationCompactAdaptation(.popover)
+                )
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: .top)
+                            .combined(with: .opacity)
+                            .combined(with: .scale(scale: 0.92)),
+                        removal: .opacity
+                            .combined(with: .scale(scale: 0.86))
+                    )
+                )
             }
-
-            Divider()
-                .frame(height: 14)
-
-            Button {
-                chatClient.toggleCurrentSessionReminder()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: isRemindArmed ? "bell.fill" : "bell")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text(isRemindArmed ? "Remind on" : "Remind me")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                }
-                .foregroundStyle(isRemindArmed ? Color.appAccent : secondaryTextColor)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isRemindArmed ? "Disable completion reminder" : "Notify when background task finishes")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(
-            isRetroChat ? RetroChatStyle.paperWarm : Color.appSurface,
-            in: Capsule()
-        )
-        .overlay {
-            Capsule()
-                .stroke(Color.appAccent.opacity(0.35), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 2)
-        .padding(.horizontal, 16)
     }
 
     private func updateDisplayedResponseState(_ state: ChatResponseState) {
@@ -2859,6 +2884,8 @@ private struct SkillMentionPicker: View {
 private struct ResponseStatusSiriIndicator: View {
     let state: ChatResponseState
     let label: String
+    var activityDetail: String? = nil
+    var startDate: Date? = nil
     let icon: String
     let color: Color
     let isRetroChat: Bool
@@ -2874,14 +2901,35 @@ private struct ResponseStatusSiriIndicator: View {
         state == .stopped || state == .failed
     }
 
+    private var hasRichStatusMetadata: Bool {
+        isAnimatedState && (activityDetail != nil || startDate != nil)
+    }
+
     var body: some View {
         ZStack {
             capsuleBackground
 
             if isAnimatedState {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || scenePhase != .active)) { timeline in
-                    animatedBars(time: reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate)
+                HStack(spacing: 8) {
+                    TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || scenePhase != .active)) { timeline in
+                        animatedBars(time: reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate)
+                    }
+
+                    if let detail = activityDetail {
+                        Text(detail)
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
+                            .lineLimit(1)
+                            .frame(maxWidth: 190, alignment: .leading)
+                    }
+
+                    if let startDate {
+                        ElapsedDurationText(startDate: startDate)
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                    }
                 }
+                .padding(.horizontal, hasRichStatusMetadata ? 12 : 0)
             } else if showsTextLabel {
                 Text(label)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
@@ -2894,7 +2942,9 @@ private struct ResponseStatusSiriIndicator: View {
                     .contentTransition(.symbolEffect(.replace))
             }
         }
-        .frame(width: showsTextLabel ? 74 : 62, height: 34)
+        .frame(minWidth: showsTextLabel ? 74 : 62)
+        .frame(height: 34)
+        .fixedSize(horizontal: true, vertical: false)
         .clipShape(Capsule(style: .continuous))
         .shadow(color: .black.opacity(isRetroChat ? 0 : 0.1), radius: 12, y: 5)
         .animation(.easeInOut(duration: 0.18), value: state)

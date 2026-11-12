@@ -7,6 +7,7 @@ struct SessionContextTimelineRow: View {
     let entry: SessionContextEntry
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.onOpenSubagentSession) private var onOpenSubagentSession
     @State private var isExpanded = false
     @State private var selectableDetails: SelectableDetails?
 
@@ -35,15 +36,28 @@ struct SessionContextTimelineRow: View {
                             .foregroundStyle(ink)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
-                        if previewInfo.isTruncated {
-                            Button {
-                                selectableDetails = SelectableDetails(text: entry.details)
-                            } label: {
-                                Label("Read full output", systemImage: "arrow.up.left.and.arrow.down.right")
-                                    .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.semibold))
-                                    .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                        HStack(spacing: 14) {
+                            if previewInfo.isTruncated {
+                                Button {
+                                    selectableDetails = SelectableDetails(text: entry.details)
+                                } label: {
+                                    Label("Read full output", systemImage: "arrow.up.left.and.arrow.down.right")
+                                        .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.semibold))
+                                        .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
+
+                            if let childID = entry.subagentResult?.childID, let onOpenSubagentSession {
+                                Button {
+                                    onOpenSubagentSession(childID)
+                                } label: {
+                                    Label("Open subagent thread", systemImage: "bubble.left.and.bubble.right")
+                                        .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.semibold))
+                                        .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     .padding(.top, 6)
@@ -107,6 +121,22 @@ struct SessionContextTimelineRow: View {
                         .foregroundStyle(ink)
                         .multilineTextAlignment(.leading)
                         .lineLimit(3)
+                }
+                if !isExpanded, let childID = entry.subagentResult?.childID, let onOpenSubagentSession {
+                    Button {
+                        onOpenSubagentSession(childID)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bubble.left.and.bubble.right")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("Open subagent thread")
+                                .font(isRetroChat ? RetroChatStyle.smallFont : .caption.weight(.semibold))
+                        }
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                        .padding(.top, 2)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("context.openSubagentThread.\(childID)")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

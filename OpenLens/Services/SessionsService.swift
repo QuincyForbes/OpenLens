@@ -36,6 +36,7 @@ final class SessionsService {
     @ObservationIgnored private weak var inFlightCatalogClient: OpenCodeClient?
     private var liveStateClientID: ObjectIdentifier?
     private var storedCachedSessions: [OCSession] = []
+    private var storedChildSessionsByID: [String: OCSession] = [:]
     private var storedServerStatuses: [String: OCSessionStatus] = [:]
     private var clientObservedActiveSessionIDs: Set<String> = []
     @ObservationIgnored private var pendingCanonicalRefreshIDs: Set<String> = []
@@ -47,6 +48,59 @@ final class SessionsService {
     var cachedSessions: [OCSession] {
         guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
         return storedCachedSessions
+    }
+
+    var cachedChildSessions: [OCSession] {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
+        return storedChildSessionsByID.values.sorted {
+            $0.updatedAt == $1.updatedAt ? $0.id < $1.id : $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    func session(withID sessionID: String) -> OCSession? {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return nil }
+        if let root = storedCachedSessions.first(where: { $0.id == sessionID }) {
+            return root
+        }
+        return storedChildSessionsByID[sessionID]
+    }
+
+    func childSessions(forParentID parentID: String) -> [OCSession] {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
+        return storedChildSessionsByID.values
+            .filter { $0.parentID == parentID }
+            .sorted { $0.updatedAt == $1.updatedAt ? $0.id < $1.id : $0.updatedAt > $1.updatedAt }
+    }
+
+    func activeChildCountsByParentID(statuses: [String: OCSessionStatus]? = nil) -> [String: Int] {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [:] }
+        let resolvedStatuses = statuses ?? effectiveStatuses
+        var counts: [String: Int] = [:]
+        for (sessionID, status) in resolvedStatuses where SessionListOrganization.isWorking(status) {
+            if let child = storedChildSessionsByID[sessionID],
+               let parentID = child.parentID?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !parentID.isEmpty {
+                counts[parentID, default: 0] += 1
+            }
+        }
+        return counts
+    }
+
+    func activeSubagentSessions(statuses: [String: OCSessionStatus]? = nil) -> [OCSession] {
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
+        let resolvedStatuses = statuses ?? effectiveStatuses
+        return storedChildSessionsByID.values
+            .filter { SessionListOrganization.isWorking(resolvedStatuses[$0.id]) }
+            .sorted { $0.updatedAt == $1.updatedAt ? $0.id < $1.id : $0.updatedAt > $1.updatedAt }
+    }
+
+    func resolveSessionForOpening(id sessionID: String) async throws -> OCSession {
+        if let cached = session(withID: sessionID) {
+            return cached
+        }
+        let fetched = try await getSession(id: sessionID)
+        upsertCachedSession(fetched)
+        return fetched
     }
 
     var effectiveStatuses: [String: OCSessionStatus] {
@@ -135,6 +189,7 @@ final class SessionsService {
         if liveStateClientID != id {
             liveStateClientID = id
             storedCachedSessions = []
+            storedChildSessionsByID = [:]
             storedServerStatuses = [:]
             clientObservedActiveSessionIDs = []
             pendingCanonicalRefreshIDs = []
@@ -196,7 +251,8 @@ final class SessionsService {
             if storedServerStatuses[sessionID] != nextStatus {
                 storedServerStatuses[sessionID] = nextStatus
             }
-            if !storedCachedSessions.contains(where: { $0.id == sessionID }) {
+            if !storedCachedSessions.contains(where: { $0.id == sessionID }),
+               storedChildSessionsByID[sessionID] == nil {
                 refreshSingleCanonicalSessionInBackground(id: sessionID)
             }
         case let .ended(sessionID):
@@ -215,14 +271,17 @@ final class SessionsService {
             clientObservedActiveSessionIDs.remove(sessionID)
             pendingCanonicalRefreshIDs.remove(sessionID)
             storedCachedSessions.removeAll { $0.id == sessionID }
+            storedChildSessionsByID.removeValue(forKey: sessionID)
         }
     }
 
     private func upsertCachedSession(_ session: OCSession) {
         guard ensureLiveStateScope() != nil else { return }
-        // Ignore child subagent sessions in the root session catalog.
-        guard session.parentID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return }
         let resolved = applyingConfirmedViewedMarkers(to: [resolvingProjectDirectory(for: session)]).first ?? session
+        if let parentID = resolved.parentID?.trimmingCharacters(in: .whitespacesAndNewlines), !parentID.isEmpty {
+            storedChildSessionsByID[resolved.id] = resolved
+            return
+        }
         if let index = storedCachedSessions.firstIndex(where: { $0.id == resolved.id }) {
             storedCachedSessions[index] = resolved
         } else {
@@ -327,13 +386,21 @@ final class SessionsService {
                 self.catalogProjects = projects
                 self.projectsClient = client
             }
-            let resolved = self.visibleSessions(
-                from: Self.applyingProjectDirectories(sessions, projects: projects ?? self.repositoryProjects)
-            )
+            let withDirectories = Self.applyingProjectDirectories(sessions, projects: projects ?? self.repositoryProjects)
+            let resolved = self.visibleSessions(from: withDirectories)
             if generation == self.catalogGeneration, self.ensureLiveStateScope() === client {
                 let updated = self.applyingConfirmedViewedMarkers(to: resolved)
                 if self.storedCachedSessions != updated {
                     self.storedCachedSessions = updated
+                }
+                var nextChildren: [String: OCSession] = [:]
+                for item in SessionListOrganization.uniqueSessions(withDirectories) {
+                    if let parentID = item.parentID?.trimmingCharacters(in: .whitespacesAndNewlines), !parentID.isEmpty {
+                        nextChildren[item.id] = item
+                    }
+                }
+                if self.storedChildSessionsByID != nextChildren {
+                    self.storedChildSessionsByID = nextChildren
                 }
             }
             return resolved
@@ -677,6 +744,75 @@ final class SessionsService {
             throw OpenCodeError.notConnected
         }
         let _ = try await client.abortSession(id: id)
+        if ensureLiveStateScope() === client {
+            storedServerStatuses.removeValue(forKey: id)
+            clientObservedActiveSessionIDs.remove(id)
+            pendingCanonicalRefreshIDs.insert(id)
+        }
+    }
+
+    /// Concurrently aborts multiple sessions/subagents and updates shared live state.
+    @discardableResult
+    func abortSessions(ids: [String]) async -> (stopped: Int, failed: Int) {
+        let uniqueIDs = Array(Set(ids.filter { !$0.isEmpty }))
+        guard !uniqueIDs.isEmpty else { return (0, 0) }
+        guard let client = connection.client else { return (0, uniqueIDs.count) }
+
+        let outcomes = await withTaskGroup(of: (String, Bool).self) { group in
+            for sessionID in uniqueIDs {
+                group.addTask {
+                    do {
+                        _ = try await client.abortSession(id: sessionID)
+                        return (sessionID, true)
+                    } catch {
+                        return (sessionID, false)
+                    }
+                }
+            }
+            var stoppedIDs: [String] = []
+            var failed = 0
+            for await (sessionID, ok) in group {
+                if ok {
+                    stoppedIDs.append(sessionID)
+                } else {
+                    failed += 1
+                }
+            }
+            return (stoppedIDs, failed)
+        }
+
+        if connection.client === client, ensureLiveStateScope() === client {
+            for sessionID in outcomes.0 {
+                storedServerStatuses.removeValue(forKey: sessionID)
+                clientObservedActiveSessionIDs.remove(sessionID)
+                pendingCanonicalRefreshIDs.insert(sessionID)
+                refreshSingleCanonicalSessionInBackground(id: sessionID)
+            }
+        }
+        return (outcomes.0.count, outcomes.1)
+    }
+
+    /// Aborts either all active child subagents of `parentID` (plus `extraSessionIDs`),
+    /// or every working session & subagent across the server when `parentID` is nil.
+    @discardableResult
+    func abortAllActiveSessions(
+        forParentID parentID: String? = nil,
+        extraSessionIDs: [String] = []
+    ) async -> (stopped: Int, failed: Int) {
+        let statuses = effectiveStatuses
+        var targetIDs = Set(extraSessionIDs.filter { !$0.isEmpty })
+        if let parentID, !parentID.isEmpty {
+            for (sessionID, status) in statuses where SessionListOrganization.isWorking(status) {
+                if storedChildSessionsByID[sessionID]?.parentID == parentID {
+                    targetIDs.insert(sessionID)
+                }
+            }
+        } else {
+            for (sessionID, status) in statuses where SessionListOrganization.isWorking(status) {
+                targetIDs.insert(sessionID)
+            }
+        }
+        return await abortSessions(ids: Array(targetIDs))
     }
 
     // MARK: - Status

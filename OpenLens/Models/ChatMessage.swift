@@ -424,6 +424,7 @@ final class ChatMessage: Identifiable {
 
     struct PersistedSubagentStep: Identifiable {
         let id: String
+        let childSessionID: String?
         let agentName: String?
         let title: String
         let detail: String
@@ -432,6 +433,30 @@ final class ChatMessage: Identifiable {
         let isError: Bool
         let cost: Double?
         var resultState: SubagentResultState? = nil
+
+        init(
+            id: String,
+            childSessionID: String? = nil,
+            agentName: String?,
+            title: String,
+            detail: String,
+            prompt: String?,
+            isCompleted: Bool,
+            isError: Bool,
+            cost: Double?,
+            resultState: SubagentResultState? = nil
+        ) {
+            self.id = id
+            self.childSessionID = childSessionID
+            self.agentName = agentName
+            self.title = title
+            self.detail = detail
+            self.prompt = prompt
+            self.isCompleted = isCompleted
+            self.isError = isError
+            self.cost = cost
+            self.resultState = resultState
+        }
 
         /// A task/subagent card should animate only while it is actively working.
         /// Completed and failed work stays visually stable in the timeline.
@@ -2137,6 +2162,7 @@ final class ChatMessage: Identifiable {
         let result = childID.flatMap { subagentResultsByChildID[$0] }
         return PersistedSubagentStep(
             id: part.id,
+            childSessionID: childID,
             agentName: agentName,
             title: title,
             detail: detail,
@@ -2368,15 +2394,14 @@ enum ChatTimeline {
         contextEntries: [SessionContextEntry] = [],
         entryOrder: [String] = []
     ) -> [ChatTimelineItem] {
-        let animatedSubagent = messages.reversed().lazy.compactMap { message -> (messageID: String, segmentID: String)? in
-            guard let segment = message.assistantSegments.reversed().first(where: { segment in
-                guard case .subagent(let step) = segment.kind else { return false }
-                return step.isActive
-            }) else {
-                return nil
+        var animatedSubagentKeys = Set<String>()
+        for message in messages.reversed() where animatedSubagentKeys.count < 8 {
+            for segment in message.assistantSegments.reversed() where animatedSubagentKeys.count < 8 {
+                if case .subagent(let step) = segment.kind, step.isActive {
+                    animatedSubagentKeys.insert("\(message.id)::\(segment.id)")
+                }
             }
-            return (message.id, segment.id)
-        }.first
+        }
 
         let chatItems = messages.flatMap { message -> [ChatTimelineItem] in
             guard message.role == .assistant else {
@@ -2399,8 +2424,7 @@ enum ChatTimeline {
                     ChatTimelineItem(
                         id: "message-\(message.id)-part-\(segment.id)",
                         content: .assistantSegment(message: message, segment: segment),
-                        animatesSubagentStatus: animatedSubagent?.messageID == message.id
-                            && animatedSubagent?.segmentID == segment.id
+                        animatesSubagentStatus: animatedSubagentKeys.contains("\(message.id)::\(segment.id)")
                     )
                 }
 

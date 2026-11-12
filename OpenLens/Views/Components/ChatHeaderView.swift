@@ -18,7 +18,12 @@ struct ChatHeaderToolbar: ToolbarContent {
     var onSyncSession: (() -> Void)? = nil
     var onScrollToBottom: (() -> Void)? = nil
     var onSwitchSession: (() -> Void)? = nil
+    var onShowSubagents: (() -> Void)? = nil
+    var onStopAllInChat: (() -> Void)? = nil
+    var onCopyLastReply: (() -> Void)? = nil
     var otherActiveSessionCount: Int = 0
+    var subagentCount: Int = 0
+    var runningSubagentCount: Int = 0
 
     private var statusColor: Color {
         if visualMode.isRetro {
@@ -171,6 +176,19 @@ struct ChatHeaderToolbar: ToolbarContent {
                             Label("Switch Session", systemImage: "bubble.left.and.bubble.right")
                         }
                     }
+                    if let onShowSubagents, subagentCount > 0 {
+                        Button(action: onShowSubagents) {
+                            let badge = runningSubagentCount > 0
+                                ? "Subagent Threads (\(runningSubagentCount) running)"
+                                : "Subagent Threads (\(subagentCount))"
+                            Label(badge, systemImage: "person.2.wave.2")
+                        }
+                    }
+                    if let onCopyLastReply {
+                        Button(action: onCopyLastReply) {
+                            Label("Copy Last Reply", systemImage: "doc.on.doc")
+                        }
+                    }
                     if let onShowInsights {
                         Button(action: onShowInsights) {
                             Label("Session Insights", systemImage: "chart.bar.xaxis")
@@ -205,6 +223,15 @@ struct ChatHeaderToolbar: ToolbarContent {
                     if let onScrollToBottom {
                         Button(action: onScrollToBottom) {
                             Label("Jump to Latest", systemImage: "arrow.down.to.line")
+                        }
+                    }
+                    if let onStopAllInChat {
+                        Divider()
+                        Button(role: .destructive, action: onStopAllInChat) {
+                            Label(
+                                runningSubagentCount > 0 ? "Stop Chat & Subagents" : "Stop Running Turn",
+                                systemImage: "stop.circle"
+                            )
                         }
                     }
                 } label: {

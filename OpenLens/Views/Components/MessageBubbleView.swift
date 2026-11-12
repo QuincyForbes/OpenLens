@@ -18,6 +18,8 @@ struct MessageBubbleView: View {
     @Environment(\.openLensTheme) private var theme
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.onOpenSubagentSession) private var onOpenSubagentSession
+    @Environment(\.onStopSubagentSession) private var onStopSubagentSession
 
     init(
         message: ChatMessage,
@@ -467,7 +469,10 @@ struct MessageBubbleView: View {
     }
 
     private func subagentSegment(_ step: ChatMessage.PersistedSubagentStep) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let canOpenThread = step.childSessionID != nil && onOpenSubagentSession != nil
+        let canStopChild = step.isActive && step.childSessionID != nil && onStopSubagentSession != nil
+
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: subagentIconName(for: step))
                     .font(.system(size: 14, weight: .semibold))
@@ -482,6 +487,22 @@ struct MessageBubbleView: View {
 
                 subagentStatusView(for: step)
                     .fixedSize(horizontal: true, vertical: false)
+
+                if canStopChild, let childID = step.childSessionID {
+                    Button {
+                        onStopSubagentSession?(childID)
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(isRetroChat ? RetroChatStyle.danger : Color.appDanger)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Stop \(subagentTitle(for: step))")
+                } else if canOpenThread {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
+                }
             }
 
             if !step.detail.isEmpty {
@@ -490,8 +511,54 @@ struct MessageBubbleView: View {
                     .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            if canOpenThread, let childID = step.childSessionID {
+                Button {
+                    onOpenSubagentSession?(childID)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(step.isActive ? "View live thread" : "View subagent thread")
+                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("subagent.openThread.\(childID)")
+            }
         }
         .padding(12)
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            if let childID = step.childSessionID, let onOpenSubagentSession {
+                onOpenSubagentSession(childID)
+            }
+        }
+        .contextMenu {
+            if let childID = step.childSessionID, let onOpenSubagentSession {
+                Button {
+                    onOpenSubagentSession(childID)
+                } label: {
+                    Label("View Subagent Thread", systemImage: "bubble.left.and.bubble.right")
+                }
+            }
+            if let prompt = step.prompt?.nilIfBlank ?? step.detail.nilIfBlank {
+                Button {
+                    UIPasteboard.general.string = prompt
+                } label: {
+                    Label("Copy Task Description", systemImage: "doc.on.doc")
+                }
+            }
+            if step.isActive, let childID = step.childSessionID, let onStopSubagentSession {
+                Divider()
+                Button(role: .destructive) {
+                    onStopSubagentSession(childID)
+                } label: {
+                    Label("Stop Subagent", systemImage: "stop.circle")
+                }
+            }
+        }
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(subagentCardFill(for: step))
@@ -501,7 +568,7 @@ struct MessageBubbleView: View {
                 .stroke(subagentCardStroke(for: step), lineWidth: isRetroChat ? 1.5 : 1)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(subagentTranscriptText(step))
     }
 

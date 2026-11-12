@@ -107,6 +107,9 @@ struct ConnectedRootView: View {
         .task(id: chatClient.isLoading) {
             await recoverSessionStateWhileLoading()
         }
+        .task(id: chatClient.hasActiveBackgroundWork && !chatClient.isLoading) {
+            await recoverBackgroundWatchersWhileIdle()
+        }
         .task(id: inboxRefreshKey) {
             // Permissions, questions and forms for sessions that are not open
             // never reach the chat. Surface their count on the Review tab,
@@ -173,6 +176,21 @@ struct ConnectedRootView: View {
                 async let formRefresh = chatClient.recoverPendingForms()
                 _ = await (statusRefresh, permissionRefresh, questionRefresh, formRefresh)
             }
+        }
+    }
+
+    private func recoverBackgroundWatchersWhileIdle() async {
+        guard !chatClient.isLoading, chatClient.hasActiveBackgroundWork else { return }
+
+        while !Task.isCancelled, !chatClient.isLoading, chatClient.hasActiveBackgroundWork {
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled, !chatClient.isLoading, chatClient.hasActiveBackgroundWork else { return }
+
+            async let messagesRefresh = chatClient.loadMessages(syncModelSelection: false)
+            async let permissionRefresh = chatClient.recoverPendingPermission()
+            async let questionRefresh = chatClient.recoverPendingQuestions()
+            async let formRefresh = chatClient.recoverPendingForms()
+            _ = await (messagesRefresh, permissionRefresh, questionRefresh, formRefresh)
         }
     }
 

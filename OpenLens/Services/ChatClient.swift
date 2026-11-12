@@ -213,6 +213,56 @@ final class ChatClient: SSEEventHandlerDelegate {
         let kind: Kind
         let title: String
         let detail: String?
+        let childSessionID: String?
+
+        init(
+            id: String,
+            kind: Kind,
+            title: String,
+            detail: String?,
+            childSessionID: String? = nil
+        ) {
+            self.id = id
+            self.kind = kind
+            self.title = title
+            self.detail = detail
+            self.childSessionID = childSessionID
+        }
+    }
+
+    struct SubagentThreadItem: Identifiable, Equatable, Sendable {
+        let id: String
+        let childSessionID: String?
+        let title: String
+        let agentName: String?
+        let detail: String?
+        let isRunning: Bool
+        let stateLabel: String
+        let isError: Bool
+        let startedAt: Date?
+    }
+
+    private(set) var isStoppingSubagents: Bool = false
+    private(set) var locallyStoppedSubagentIDs: Set<String> = []
+
+    var activeTurnStartDate: Date? {
+        guard isLoading else { return nil }
+        if let session = currentSession,
+           let busyMs = session.time.busy,
+           busyMs.isFinite,
+           busyMs > 0,
+           (session.time.idle ?? 0) < busyMs {
+            return Date(timeIntervalSince1970: busyMs / 1_000)
+        }
+        return responseStartDate
+    }
+
+    var hasActiveBackgroundWork: Bool {
+        if !activeBackgroundWatchers.isEmpty {
+            return true
+        }
+        guard let sessionID = currentSession?.id, let sessionsService else { return false }
+        return (sessionsService.activeChildCountsByParentID()[sessionID] ?? 0) > 0
     }
 
     private(set) var activeBackgroundWatchers: [BackgroundWatcherItem] = [] {
@@ -1026,14 +1076,19 @@ final class ChatClient: SSEEventHandlerDelegate {
     private func rebuildDisplayedMessages() {
         // Match each launch to the nearest later result for its child in
         // canonical order. Earlier outcomes cannot finish a reused session.
-        if contextEntries.contains(where: { $0.subagentResult != nil }) {
+        if contextEntries.contains(where: { $0.subagentResult != nil }) || !locallyStoppedSubagentIDs.isEmpty {
             let contextsByID = Dictionary(contextEntries.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
             var messagesByID = Dictionary(grouping: messages, by: \.id)
             if let pending = pendingAssistantMessage { messagesByID[pending.id, default: []].append(pending) }
             var seen = Set<String>()
             let order = (transcriptEntryOrder + messages.map(\.id) + (pendingAssistantMessage.map { [$0.id] } ?? []))
                 .filter { seen.insert($0).inserted }
-            var childResults: [String: SubagentResultState] = [:]
+            let activeStatuses = sessionsService?.effectiveStatuses ?? [:]
+            var childResults: [String: SubagentResultState] = Dictionary(
+                uniqueKeysWithValues: locallyStoppedSubagentIDs
+                    .filter { !SessionListOrganization.isWorking(activeStatuses[$0]) }
+                    .map { ($0, .cancelled) }
+            )
             for id in order.reversed() {
                 if let result = contextsByID[id]?.subagentResult, let childID = result.childID, let state = result.state {
                     childResults[childID] = state
@@ -1122,7 +1177,8 @@ final class ChatClient: SSEEventHandlerDelegate {
                                     id: step.id,
                                     kind: .subagent,
                                     title: step.title,
-                                    detail: step.agentName
+                                    detail: step.detail.nilIfBlank ?? step.agentName,
+                                    childSessionID: step.childSessionID
                                 )
                             )
                         )
@@ -5325,6 +5381,159 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     // MARK: - Abort
 
+    func currentSessionSubagents() -> [SubagentThreadItem] {
+        guard let sessionID = currentSession?.id else { return [] }
+        let statuses = sessionsService?.effectiveStatuses ?? [:]
+        let childSessions = sessionsService?.childSessions(forParentID: sessionID) ?? []
+        let childrenByID = Dictionary(uniqueKeysWithValues: childSessions.map { ($0.id, $0) })
+
+        var itemsByKey: [String: SubagentThreadItem] = [:]
+        var keyOrder: [String] = []
+
+        func upsert(_ item: SubagentThreadItem) {
+            let key = item.childSessionID ?? item.id
+            if itemsByKey[key] == nil {
+                keyOrder.append(key)
+            }
+            itemsByKey[key] = item
+        }
+
+        var allMessages = messages
+        if let pending = pendingAssistantMessage, !allMessages.contains(where: { $0.id == pending.id }) {
+            allMessages.append(pending)
+        }
+
+        for message in allMessages where message.role == .assistant {
+            for segment in message.assistantSegments {
+                guard case let .subagent(step) = segment.kind else { continue }
+                let childID = step.childSessionID
+                let childSession = childID.flatMap { childrenByID[$0] }
+                let serverWorking = childID.map { SessionListOrganization.isWorking(statuses[$0]) } ?? false
+                let locallyStopped = childID.map { locallyStoppedSubagentIDs.contains($0) } ?? false
+                let isRunning = !locallyStopped && (serverWorking || step.isActive)
+                let stateLabel: String = {
+                    if isRunning { return "Running" }
+                    if locallyStopped || step.resultState == .cancelled { return "Cancelled" }
+                    if step.isError { return "Failed" }
+                    return "Done"
+                }()
+                let resolvedTitle = childSession?.title.nilIfBlank
+                    ?? step.detail.nilIfBlank
+                    ?? step.title
+                upsert(
+                    SubagentThreadItem(
+                        id: childID ?? step.id,
+                        childSessionID: childID,
+                        title: resolvedTitle,
+                        agentName: step.agentName ?? childSession?.agent,
+                        detail: step.detail.nilIfBlank,
+                        isRunning: isRunning,
+                        stateLabel: stateLabel,
+                        isError: !isRunning && step.isError,
+                        startedAt: childSession.flatMap(ElapsedDurationFormatter.activeStartDate(for:)) ?? message.createdAt
+                    )
+                )
+            }
+        }
+
+        for entry in contextEntries {
+            guard let result = entry.subagentResult, let childID = result.childID else { continue }
+            let childSession = childrenByID[childID]
+            let serverWorking = SessionListOrganization.isWorking(statuses[childID])
+            let locallyStopped = locallyStoppedSubagentIDs.contains(childID)
+            let isRunning = !locallyStopped && serverWorking
+            let stateLabel: String = {
+                if isRunning { return "Running" }
+                if locallyStopped || result.state == .cancelled { return "Cancelled" }
+                if result.state == .error { return "Failed" }
+                return "Done"
+            }()
+            let existing = itemsByKey[childID]
+            upsert(
+                SubagentThreadItem(
+                    id: childID,
+                    childSessionID: childID,
+                    title: childSession?.title.nilIfBlank ?? existing?.title ?? entry.summary.nilIfBlank ?? result.agent ?? "Subagent",
+                    agentName: result.agent ?? existing?.agentName ?? childSession?.agent,
+                    detail: existing?.detail ?? entry.resultPreview.nilIfBlank,
+                    isRunning: isRunning,
+                    stateLabel: stateLabel,
+                    isError: !isRunning && result.state == .error,
+                    startedAt: childSession.flatMap(ElapsedDurationFormatter.activeStartDate(for:)) ?? existing?.startedAt
+                )
+            )
+        }
+
+        for child in childSessions where itemsByKey[child.id] == nil {
+            let serverWorking = SessionListOrganization.isWorking(statuses[child.id])
+            let locallyStopped = locallyStoppedSubagentIDs.contains(child.id)
+            let isRunning = !locallyStopped && serverWorking
+            let outcome = child.executionOutcome
+            let stateLabel: String = {
+                if isRunning { return "Running" }
+                if locallyStopped || outcome == .interrupted { return "Cancelled" }
+                if outcome == .failed { return "Failed" }
+                return "Done"
+            }()
+            upsert(
+                SubagentThreadItem(
+                    id: child.id,
+                    childSessionID: child.id,
+                    title: child.title.nilIfBlank ?? child.agent ?? "Subagent",
+                    agentName: child.agent,
+                    detail: nil,
+                    isRunning: isRunning,
+                    stateLabel: stateLabel,
+                    isError: !isRunning && outcome == .failed,
+                    startedAt: ElapsedDurationFormatter.activeStartDate(for: child)
+                )
+            )
+        }
+
+        return keyOrder.reversed().compactMap { itemsByKey[$0] }
+    }
+
+    func stopSubagent(childSessionID: String) async {
+        guard !childSessionID.isEmpty, let sessionsService else { return }
+        isStoppingSubagents = true
+        defer { isStoppingSubagents = false }
+
+        let result = await sessionsService.abortSessions(ids: [childSessionID])
+        if result.stopped > 0 {
+            locallyStoppedSubagentIDs.insert(childSessionID)
+            rebuildDisplayedMessages()
+            contentVersion &+= 1
+            _ = await loadMessages(syncModelSelection: false)
+        }
+    }
+
+    func stopAllCurrentSessionAgents() async {
+        guard let sessionID = currentSession?.id else { return }
+        isStoppingSubagents = true
+        defer { isStoppingSubagents = false }
+
+        if isLoading, !isStoppingResponse {
+            abort()
+        }
+
+        let runningChildIDs = currentSessionSubagents()
+            .filter(\.isRunning)
+            .compactMap(\.childSessionID)
+
+        if let sessionsService {
+            let outcome = await sessionsService.abortAllActiveSessions(
+                forParentID: sessionID,
+                extraSessionIDs: runningChildIDs
+            )
+            if outcome.stopped > 0 {
+                locallyStoppedSubagentIDs.formUnion(runningChildIDs)
+                rebuildDisplayedMessages()
+                contentVersion &+= 1
+                _ = await loadMessages(syncModelSelection: false)
+            }
+        }
+    }
+
     func abort() {
         guard responseState != .stopping else { return }
 
@@ -6511,6 +6720,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         hiddenTodoCount = 0
         cancelInteractiveRequestTimeout()
         responseStartDate = nil
+        locallyStoppedSubagentIDs.removeAll()
+        isStoppingSubagents = false
     }
 
     /// Finalizes the visible projection into the immutable transcript. The

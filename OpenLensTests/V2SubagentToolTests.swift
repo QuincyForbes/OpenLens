@@ -31,9 +31,11 @@ struct V2SubagentToolTests {
                 return
             }
             if status == "running" {
+                #expect(step.childSessionID == "ses_child")
                 #expect(step.isActive)
                 #expect(!step.isCompleted)
             } else {
+                #expect(step.childSessionID == "ses_child")
                 #expect(step.isCompleted)
                 #expect(!step.isActive)
             }
@@ -232,6 +234,32 @@ struct V2SubagentToolTests {
         #expect(part.state?.metadata?["sessionID"]?.value as? String == "ses_child")
         #expect(part.state?.metadata?["status"]?.value as? String == "running")
         try expectWorking(ChatMessage(id: "msg_parent", role: .assistant, content: "", parts: [part]))
+    }
+
+    @Test func parallelActiveSubagentsAllAnimateAndFormatElapsedDurations() throws {
+        let parts = (1...4).map { idx -> OCPart in
+            let ev = OCEvent(type: "message.part.updated", properties: AnyCodable(["part": [
+                "id": "call_\(idx)", "sessionID": "ses_parent", "messageID": "msg_parent", "type": "tool",
+                "tool": "subagent", "state": [
+                    "status": "completed",
+                    "metadata": ["sessionID": "ses_child_\(idx)", "status": "running"],
+                    "input": ["agent": "general", "description": "Task \(idx)"]
+                ]
+            ]]))
+            guard case let .partUpdated(part, _, _, _) = SSEInboundEvent.prepare(ev, retainingRawEvent: false) else {
+                fatalError("Expected prepared part")
+            }
+            return part
+        }
+        let message = ChatMessage(id: "msg_parent", role: .assistant, content: "", parts: parts)
+        let items = ChatTimeline.items(from: [message], showsThinking: true)
+        #expect(items.count == 4)
+        #expect(items.allSatisfy(\.animatesSubagentStatus))
+
+        let origin = Date(timeIntervalSince1970: 1_000)
+        #expect(ElapsedDurationFormatter.string(from: origin, to: origin.addingTimeInterval(8)) == "0:08")
+        #expect(ElapsedDurationFormatter.string(from: origin, to: origin.addingTimeInterval(125)) == "2m 05s")
+        #expect(ElapsedDurationFormatter.string(from: origin, to: origin.addingTimeInterval(3_840)) == "1h 04m")
     }
 
     private func expectWorking(_ message: ChatMessage) throws {

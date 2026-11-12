@@ -68,6 +68,8 @@ struct SessionsListView: View {
     @State private var attentionSessionIDs: Set<String> = []
     @State private var attentionLabels: [String: String] = [:]
     @State private var isMarkingAllRead = false
+    @State private var showStopAllConfirmation = false
+    @State private var isStoppingSessions = false
     @State private var isOnScreen = true
     @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
@@ -139,6 +141,22 @@ struct SessionsListView: View {
         return sessions.filter { projectGroupID(for: $0) == selectedRepositoryID }
     }
 
+    private var activeChildCountsByParent: [String: Int] {
+        sessionsService.activeChildCountsByParentID(statuses: sessionStatuses)
+    }
+
+    private var scopedActiveSubagents: [OCSession] {
+        let activeChildren = sessionsService.activeSubagentSessions(statuses: sessionStatuses)
+        guard let selectedRepositoryID else { return activeChildren }
+        return activeChildren.filter { child in
+            if let parentID = child.parentID,
+               let parent = sessions.first(where: { $0.id == parentID }) {
+                return projectGroupID(for: parent) == selectedRepositoryID
+            }
+            return projectGroupID(for: child) == selectedRepositoryID
+        }
+    }
+
     private struct SessionFilterCounts {
         var running = 0
         var unread = 0
@@ -146,19 +164,7 @@ struct SessionsListView: View {
     }
 
     private var filterCounts: SessionFilterCounts {
-        var counts = SessionFilterCounts()
-        for session in repositorySessions {
-            let isBusy = SessionListOrganization.isWorking(sessionStatuses[session.id])
-            if isBusy {
-                counts.running += 1
-            } else if session.hasUnreadResult {
-                counts.unread += 1
-            }
-            if attentionSessionIDs.contains(session.id) {
-                counts.attention += 1
-            }
-        }
-        return counts
+        filterCounts(in: repositorySessions)
     }
 
     private var unreadSessionCount: Int {
@@ -181,13 +187,23 @@ struct SessionsListView: View {
 
     private func filteredSessions(from scopedSessions: [OCSession]) -> [OCSession] {
         let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        return scopedSessions.filter { session in
-            let isBusy = sessionStatuses[session.id]?.type == .busy || sessionStatuses[session.id]?.type == .retry
+        let childCounts = activeChildCountsByParent
+        let candidateSessions: [OCSession]
+        if sessionFilter == .running {
+            var seen = Set(scopedSessions.map(\.id))
+            let extraChildren = scopedActiveSubagents.filter { seen.insert($0.id).inserted }
+            candidateSessions = scopedSessions + extraChildren
+        } else {
+            candidateSessions = scopedSessions
+        }
+        return candidateSessions.filter { session in
+            let isBusy = SessionListOrganization.isWorking(sessionStatuses[session.id])
+            let hasRunningSubagents = (childCounts[session.id] ?? 0) > 0
             switch sessionFilter {
             case .all:
                 break
             case .running:
-                guard isBusy else { return false }
+                guard isBusy || hasRunningSubagents else { return false }
             case .unread:
                 guard !isBusy && session.hasUnreadResult else { return false }
             case .attention:
@@ -207,32 +223,46 @@ struct SessionsListView: View {
 
     private func filterCounts(in scopedSessions: [OCSession]) -> SessionFilterCounts {
         var counts = SessionFilterCounts()
+        let childCounts = activeChildCountsByParent
         for session in scopedSessions {
             let isBusy = SessionListOrganization.isWorking(sessionStatuses[session.id])
             if isBusy {
                 counts.running += 1
-            } else if session.hasUnreadResult {
+            } else if session.hasUnreadResult, (childCounts[session.id] ?? 0) == 0 {
                 counts.unread += 1
             }
             if attentionSessionIDs.contains(session.id) {
                 counts.attention += 1
             }
         }
+        counts.running += scopedActiveSubagents.count
         return counts
     }
 
+    private var organizationStatuses: [String: OCSessionStatus] {
+        let childCounts = activeChildCountsByParent
+        guard !childCounts.isEmpty else { return sessionStatuses }
+        var merged = sessionStatuses
+        for (parentID, count) in childCounts where count > 0 {
+            if !SessionListOrganization.isWorking(merged[parentID]) {
+                merged[parentID] = OCSessionStatus(type: .busy, attempt: nil, message: nil, next: nil)
+            }
+        }
+        return merged
+    }
+
     private var groupedSessions: [SessionProjectGroup] {
-        SessionListOrganization.groups(from: filteredSessions, statuses: sessionStatuses, sortOrder: sortOrder, repositoryIndex: repositoryIndex)
+        SessionListOrganization.groups(from: filteredSessions, statuses: organizationStatuses, sortOrder: sortOrder, repositoryIndex: repositoryIndex)
     }
 
     private var timelineSections: [SessionTimelineSection] {
         if layout == .focus {
             return SessionListOrganization.focus(
-                from: filteredSessions, statuses: sessionStatuses,
+                from: filteredSessions, statuses: organizationStatuses,
                 attentionIDs: attentionSessionIDs, pinnedIDs: sessionsService.pinnedSessionIDs
             )
         }
-        return SessionListOrganization.timeline(from: filteredSessions, statuses: sessionStatuses)
+        return SessionListOrganization.timeline(from: filteredSessions, statuses: organizationStatuses)
     }
 
     private var repositories: [SessionProjectGroup] {
@@ -254,7 +284,7 @@ struct SessionsListView: View {
     }
 
     private var alwaysVisibleSessionIDs: Set<String> {
-        Set(sessionStatuses.filter { SessionListOrganization.isWorking($0.value) }.map(\.key))
+        Set(organizationStatuses.filter { SessionListOrganization.isWorking($0.value) }.map(\.key))
             .union(attentionSessionIDs)
             .union(sessionsService.pinnedSessionIDs)
     }
@@ -284,6 +314,18 @@ struct SessionsListView: View {
             Button(AppText.cancel, role: .cancel) {}
         } message: { _ in
             Text(AppText.deleteSessionMessage)
+        }
+        .confirmationDialog(
+            "Stop all running agents?",
+            isPresented: $showStopAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Stop All Running Agents", role: .destructive) {
+                stopAllRunningSessions()
+            }
+            Button(AppText.cancel, role: .cancel) {}
+        } message: {
+            Text("This interrupts all currently active chats and background subagents on the connected server.")
         }
         .alert(
             "Rename Session",
@@ -554,49 +596,86 @@ struct SessionsListView: View {
             organizationBar(repositories: repositories)
             sessionFilterBar(scopedSessions: scopedSessions)
 
-            let runningSessions = scopedSessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }
-            if !runningSessions.isEmpty, (layout != .focus || sessionFilter != .all) {
-                Button {
-                    if runningSessions.count == 1, let onlyActive = runningSessions.first {
-                        openedSessionIDs.insert(onlyActive.id)
-                        onSelect(onlyActive)
-                    } else {
-                        withAnimation(.snappy(duration: 0.2)) {
-                            sessionFilter = sessionFilter == .running ? .all : .running
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(Color.appAccent)
-                            .frame(width: 8, height: 8)
-                            .symbolEffect(.pulse)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(runningSessions.count == 1 ? "1 agent active now" : "\(runningSessions.count) agents active now")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(Color.appPrimary)
-                            if let primary = runningSessions.first {
-                                Text(primary.title.isEmpty ? AppText.titleUntitled : primary.title)
-                                    .font(.caption2)
-                                    .foregroundStyle(Color.appSecondary)
-                                    .lineLimit(1)
+            let runningRootSessions = scopedSessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }
+            let runningSubagents = scopedActiveSubagents
+            let allRunningSessions = runningRootSessions + runningSubagents
+            if !allRunningSessions.isEmpty {
+                HStack(spacing: 8) {
+                    Button {
+                        if allRunningSessions.count == 1, let onlyActive = allRunningSessions.first {
+                            openedSessionIDs.insert(onlyActive.id)
+                            onSelect(onlyActive)
+                        } else {
+                            withAnimation(.snappy(duration: 0.2)) {
+                                sessionFilter = sessionFilter == .running ? .all : .running
                             }
                         }
-                        Spacer()
-                        Text(runningSessions.count == 1 ? "Open" : (sessionFilter == .running ? "Show all" : "Show running"))
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.appAccent)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(Color.appAccent)
+                                .frame(width: 8, height: 8)
+                                .symbolEffect(.pulse)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(activeBannerSummary(rootCount: runningRootSessions.count, subagentCount: runningSubagents.count))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.appPrimary)
+                                if let primary = allRunningSessions.first {
+                                    HStack(spacing: 4) {
+                                        Text(primary.title.isEmpty ? AppText.titleUntitled : primary.title)
+                                            .lineLimit(1)
+                                        if let start = ElapsedDurationFormatter.activeStartDate(for: primary) {
+                                            Text("·")
+                                            ElapsedDurationText(startDate: start)
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.appSecondary)
+                                }
+                            }
+                            Spacer(minLength: 4)
+                            Text(allRunningSessions.count == 1 ? "Open" : (sessionFilter == .running ? "Show all" : "View all"))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.appAccent)
+                        }
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.appAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("sessions.activeAgentsBanner")
+
+                    Divider()
+                        .frame(height: 18)
+
+                    Button {
+                        showStopAllConfirmation = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isStoppingSessions {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                            Text("Stop all")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .foregroundStyle(Color.appDanger)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.appDanger.opacity(0.12), in: Capsule())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(isStoppingSessions)
+                    .accessibilityIdentifier("sessions.stopAllActive")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("sessions.activeAgentsBanner")
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.appAccent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
+                }
             }
 
             if let nextWaiting = scopedSessions.first(where: { attentionSessionIDs.contains($0.id) }) {
@@ -921,7 +1000,20 @@ struct SessionsListView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            if !SessionListOrganization.isWorking(sessionStatuses[session.id]), session.hasUnreadResult {
+            let isBusy = SessionListOrganization.isWorking(sessionStatuses[session.id])
+            let runningChildCount = activeChildCountsByParent[session.id] ?? 0
+            if isBusy || runningChildCount > 0 {
+                Button(role: .destructive) {
+                    stopSingleSessionAndChildren(session)
+                } label: {
+                    Label(
+                        runningChildCount > 0 ? "Stop Session & Subagents" : "Stop Agent",
+                        systemImage: "stop.circle"
+                    )
+                }
+                Divider()
+            }
+            if !isBusy, session.hasUnreadResult {
                 Button {
                     markSessionsAsRead([session])
                 } label: {
@@ -965,6 +1057,12 @@ struct SessionsListView: View {
     private func sessionRow(_ session: OCSession, showsRepository: Bool) -> some View {
         let statusType = sessionStatuses[session.id]?.type
         let isBusy = statusType == .busy || statusType == .retry
+        let runningSubagentCount = activeChildCountsByParent[session.id] ?? 0
+        let isChildSubagent = session.parentID?.nilIfBlank != nil
+        let parentTitle = session.parentID.flatMap { parentID in
+            sessions.first(where: { $0.id == parentID })?.title.nilIfBlank
+                ?? sessionsService.session(withID: parentID)?.title.nilIfBlank
+        }
         let isSelected = selectedSessionID == session.id
         let showsListExecutionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
             || ScreenshotFixtures.showsExecutionOutcomes
@@ -973,9 +1071,20 @@ struct SessionsListView: View {
             VStack(alignment: .leading, spacing: 4) {
                 SessionWorkingTitle(
                     title: session.title.isEmpty ? AppText.titleUntitled : session.title,
-                    isWorking: isBusy,
+                    isWorking: isBusy || runningSubagentCount > 0,
                     lineLimit: 2
                 )
+
+                if isChildSubagent {
+                    HStack(spacing: 4) {
+                        Image(systemName: "person.2.fill")
+                            .font(.system(size: 10))
+                        Text(parentTitle.map { "Subagent · \($0)" } ?? "Subagent thread")
+                            .lineLimit(1)
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.appAccent)
+                }
 
                 if let attention = attentionLabels[session.id] {
                     Text(attention)
@@ -992,7 +1101,7 @@ struct SessionsListView: View {
                         .truncationMode(.middle)
                 }
 
-                if !isBusy, showsListExecutionOutcomes,
+                if !isBusy, runningSubagentCount == 0, showsListExecutionOutcomes,
                    let outcome = session.executionOutcomeVisibleOnSessionList() {
                     ExecutionStatusView(state: outcome, idleTime: session.time.idle)
                 }
@@ -1008,6 +1117,19 @@ struct SessionsListView: View {
                                 .frame(width: 6, height: 6)
                             Text(statusType == .retry ? "Retrying" : "Working")
                                 .fontWeight(.semibold)
+                            if let startDate = ElapsedDurationFormatter.activeStartDate(for: session) {
+                                Text("·")
+                                ElapsedDurationText(startDate: startDate)
+                            }
+                        }
+                        .foregroundStyle(Color.appAccent)
+                    } else if runningSubagentCount > 0 {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.appAccent)
+                                .frame(width: 6, height: 6)
+                            Text(runningSubagentCount == 1 ? "1 subagent running" : "\(runningSubagentCount) subagents running")
+                                .fontWeight(.semibold)
                         }
                         .foregroundStyle(Color.appAccent)
                     }
@@ -1019,6 +1141,20 @@ struct SessionsListView: View {
             }
 
             Spacer(minLength: 8)
+
+            if sessionFilter == .running, (isBusy || runningSubagentCount > 0) {
+                Button {
+                    stopSingleSessionAndChildren(session)
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.appDanger)
+                }
+                .buttonStyle(.plain)
+                .disabled(isStoppingSessions)
+                .accessibilityLabel("Stop \(session.title.isEmpty ? AppText.titleUntitled : session.title)")
+                .accessibilityIdentifier("session.stop.\(session.id)")
+            }
 
             if sessionsService.pinnedSessionIDs.contains(session.id) {
                 Image(systemName: "pin.fill")
@@ -1368,6 +1504,65 @@ struct SessionsListView: View {
             } catch {
                 viewState = .error(error.localizedDescription)
             }
+        }
+    }
+
+    private func activeBannerSummary(rootCount: Int, subagentCount: Int) -> String {
+        if rootCount > 0 && subagentCount > 0 {
+            let chatWord = rootCount == 1 ? "chat" : "chats"
+            let subWord = subagentCount == 1 ? "subagent" : "subagents"
+            return "\(rootCount) \(chatWord) · \(subagentCount) \(subWord) active now"
+        }
+        if subagentCount > 0 {
+            return subagentCount == 1 ? "1 subagent active now" : "\(subagentCount) subagents active now"
+        }
+        return rootCount == 1 ? "1 agent active now" : "\(rootCount) agents active now"
+    }
+
+    private func stopAllRunningSessions() {
+        guard !isStoppingSessions else { return }
+        isStoppingSessions = true
+        let scopedRunningIDs = (repositorySessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) } + scopedActiveSubagents)
+            .map(\.id)
+        Task {
+            defer { isStoppingSessions = false }
+            let outcome: (stopped: Int, failed: Int)
+            if selectedRepositoryID != nil {
+                outcome = await sessionsService.abortSessions(ids: scopedRunningIDs)
+            } else {
+                outcome = await sessionsService.abortAllActiveSessions(extraSessionIDs: scopedRunningIDs)
+            }
+            if outcome.stopped > 0 {
+                sessionStatuses = sessionsService.effectiveStatuses
+            }
+            if outcome.failed > 0 {
+                refreshWarning = "Could not stop \(outcome.failed) running agent\(outcome.failed == 1 ? "" : "s")."
+            }
+            await loadSessionStatuses()
+        }
+    }
+
+    private func stopSingleSessionAndChildren(_ session: OCSession) {
+        guard !isStoppingSessions else { return }
+        isStoppingSessions = true
+        var idsToStop: [String] = []
+        if SessionListOrganization.isWorking(sessionStatuses[session.id]) {
+            idsToStop.append(session.id)
+        }
+        let childIDs = sessionsService.childSessions(forParentID: session.id)
+            .filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }
+            .map(\.id)
+        idsToStop.append(contentsOf: childIDs)
+        Task {
+            defer { isStoppingSessions = false }
+            let outcome = await sessionsService.abortSessions(ids: idsToStop)
+            if outcome.stopped > 0 {
+                sessionStatuses = sessionsService.effectiveStatuses
+            }
+            if outcome.failed > 0 {
+                refreshWarning = "Could not stop \(outcome.failed) agent\(outcome.failed == 1 ? "" : "s")."
+            }
+            await loadSessionStatuses()
         }
     }
 
