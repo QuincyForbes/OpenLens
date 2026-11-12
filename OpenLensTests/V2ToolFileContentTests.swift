@@ -184,6 +184,19 @@ struct V2ToolFileContentTests {
             )
         }
         #expect(await server.recordedPaths().filter { $0.hasPrefix("/api/fs/read") } == ["/api/fs/read/notes.md"])
+
+        let windowsContent = try await workspace.loadToolResultFile(
+            ToolResultFile(file: OCToolFile(uri: "file:///C:/work/notes.md", mime: "text/markdown", name: #"C:\work\notes.md"#), id: "win"),
+            sessionDirectory: #"C:\work"#
+        )
+        guard case let .text(winText) = windowsContent else { Issue.record("Expected Windows text"); return }
+        #expect(winText == "# Notes")
+        await #expect(throws: ToolResultFileError.outsideSession) {
+            try await workspace.loadToolResultFile(
+                ToolResultFile(file: OCToolFile(uri: "file:///D:/work/notes.md", mime: "text/markdown"), id: "win-outside"),
+                sessionDirectory: #"C:\work"#
+            )
+        }
     }
 
     // MARK: - Transport

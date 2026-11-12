@@ -120,7 +120,7 @@ struct SessionRepositoryIndex {
 
     /// Lexical server-path comparison: do not resolve symlinks on the phone.
     /// Windows drive/UNC paths compare case-insensitively; POSIX paths retain case.
-    static func pathKey(_ value: String?) -> String? {
+    nonisolated static func pathKey(_ value: String?) -> String? {
         guard var path = value?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { return nil }
         if path.hasPrefix("/"), WorkspaceSelectionBuilder.isWindowsAbsolutePath(String(path.dropFirst())) {
             path.removeFirst()

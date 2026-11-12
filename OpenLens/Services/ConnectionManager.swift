@@ -21,6 +21,16 @@ final class ConnectionManager: ConnectionProviding {
     private(set) var projectName: String?
     private(set) var branch: String?
     private(set) var selectedProjectDirectory: String?
+
+    var windowsSystemDrive: String? {
+        serverCapabilities?.windowsSystemDrive
+            ?? WorkspaceSelectionBuilder.windowsDrivePrefix(in: selectedProjectDirectory)
+            ?? WorkspaceSelectionBuilder.windowsDrivePrefix(in: currentProject?.worktree)
+    }
+
+    var defaultServerRootDirectory: String {
+        windowsSystemDrive.map { "\($0)\\" } ?? "/"
+    }
     private(set) var projectContextRevision: UInt = 0
     private var projectContextGeneration: UInt = 0
     @ObservationIgnored private var globalFormRecoveryDirectories: Set<String> = []
@@ -202,7 +212,14 @@ final class ConnectionManager: ConnectionProviding {
             globalFormRecoveryDirectories = []
             cachedProjectMetadataByDirectory = [:]
             self.serverURL = baseURL
-            self.selectedProjectDirectory = restoredProjectDirectory?.nilIfBlank
+            let healedRestoredDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+                restoredProjectDirectory,
+                windowsDrive: capabilities.windowsSystemDrive
+            )
+            if healedRestoredDirectory != restoredProjectDirectory {
+                await apiClient.updateContextDirectory(healedRestoredDirectory)
+            }
+            self.selectedProjectDirectory = healedRestoredDirectory?.nilIfBlank
 
             SharedConnectionStore.save(
                 baseURL: baseURL.absoluteString, authHeader: authHeader,
@@ -354,7 +371,10 @@ final class ConnectionManager: ConnectionProviding {
     func setProjectContext(directory: String?) async {
         projectContextGeneration &+= 1
         let generation = projectContextGeneration
-        let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let normalizedDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+            directory,
+            windowsDrive: windowsSystemDrive
+        )
         Logger.connection.debug("OpenLens changing active project directory from \(self.selectedProjectDirectory ?? "nil", privacy: .public) to \(normalizedDirectory ?? "nil", privacy: .public)")
         guard let client else {
             selectedProjectDirectory = normalizedDirectory
@@ -414,16 +434,19 @@ final class ConnectionManager: ConnectionProviding {
         guard let client else { throw OpenCodeError.notConnected }
         let generation = projectContextGeneration
         guard WorkspaceSelectionBuilder.isAbsoluteServerDirectory(directory),
-              let normalized = WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+              let normalized = WorkspaceSelectionBuilder.healServerDirectory(directory, windowsDrive: windowsSystemDrive) else {
             throw OpenCodeError.invalidPayload("The session's new location is not an absolute directory.")
         }
         let location = try await client.resolveLocation(directory: normalized)
         try Task.checkCancellation()
         guard generation == projectContextGeneration, isCurrent() else { throw CancellationError() }
-        guard WorkspaceSelectionBuilder.normalizedDirectory(location.directory) == normalized else {
+        let drive = location.resolvedWindowsDrive ?? windowsSystemDrive
+        let resolvedNormalized = WorkspaceSelectionBuilder.healServerDirectory(location.directory, windowsDrive: drive)
+        let expectedNormalized = WorkspaceSelectionBuilder.healServerDirectory(normalized, windowsDrive: drive)
+        guard WorkspaceSelectionBuilder.sameServerDirectory(resolvedNormalized, expectedNormalized) else {
             throw OpenCodeError.invalidPayload("The server resolved a different session location.")
         }
-        await setProjectContext(directory: normalized)
+        await setProjectContext(directory: resolvedNormalized ?? normalized)
     }
 
     /// Recovery can retry a cancelled metadata load. For an already committed

@@ -82,7 +82,7 @@ private struct RepositoryFolderList: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.appBackground)
-            .navigationTitle(relativePath.isEmpty ? AppText.repositoryFiles : (relativePath as NSString).lastPathComponent)
+            .navigationTitle(relativePath.isEmpty ? AppText.repositoryFiles : WorkspaceSelectionBuilder.lastPathComponent(of: relativePath))
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchQuery, prompt: "Filter files")
             .task { await load() }

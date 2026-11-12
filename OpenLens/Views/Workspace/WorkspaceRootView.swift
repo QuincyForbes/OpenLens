@@ -654,8 +654,8 @@ struct WorkspaceRootView: View {
     private var activeWorktree: String? {
         guard let worktree = snapshot.pathInfo?.worktree?.nilIfBlank else { return nil }
         let dir = snapshot.pathInfo?.directory?.nilIfBlank
-        guard worktree != dir else { return nil }
-        return (worktree as NSString).lastPathComponent
+        guard !WorkspaceSelectionBuilder.sameServerDirectory(worktree, dir) else { return nil }
+        return WorkspaceSelectionBuilder.displayName(for: worktree)
     }
 
     private var currentWorktreePath: String? {
@@ -872,7 +872,8 @@ struct WorkspaceRootView: View {
         if browserPath == "." {
             return
         }
-        let path = browserPath.hasSuffix("/") ? String(browserPath.dropLast()) : browserPath
+        var path = browserPath.replacingOccurrences(of: "\\", with: "/")
+        while path.hasSuffix("/") { path.removeLast() }
         let parent = (path as NSString).deletingLastPathComponent
         self.browserPath = parent.nilIfBlank ?? "."
     }
@@ -970,7 +971,7 @@ struct WorkspaceRootView: View {
     private func rememberActiveWorkspace() {
         guard let connectionID = savedConnections.activeConnectionID,
               let directory = WorkspaceSelectionBuilder.normalizedDirectory(snapshot.pathInfo?.directory),
-              directory != "/" else { return }
+              !WorkspaceSelectionBuilder.isRootDirectory(directory) else { return }
         savedConnections.updateProjectSelection(connectionID: connectionID, directory: directory)
     }
 }

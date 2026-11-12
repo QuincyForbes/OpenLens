@@ -13,6 +13,7 @@ actor OpenCodeClient {
     private var contextDirectory: String?
     private var contextRevision: UInt = 0
     private var knownV1Worktrees: Set<String> = []
+    private var detectedWindowsDrive: String?
     private(set) var capabilities: OpenCodeServerCapabilities?
 
     init(
@@ -23,7 +24,9 @@ actor OpenCodeClient {
     ) {
         self.baseURL = baseURL
         self.authHeader = authHeader
-        self.contextDirectory = contextDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let normalized = WorkspaceSelectionBuilder.normalizedDirectory(contextDirectory)
+        self.detectedWindowsDrive = WorkspaceSelectionBuilder.windowsDrivePrefix(in: normalized)
+        self.contextDirectory = normalized
         self.transport = transport ?? DirectOpenCodeTransport()
         self.capabilities = nil
     }
@@ -32,7 +35,8 @@ actor OpenCodeClient {
         contextRevision &+= 1
         self.baseURL = baseURL
         self.authHeader = authHeader
-        let normalized = contextDirectory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let normalized = WorkspaceSelectionBuilder.normalizedDirectory(contextDirectory)
+        self.detectedWindowsDrive = WorkspaceSelectionBuilder.windowsDrivePrefix(in: normalized)
         self.contextDirectory = normalized
         self.knownV1Worktrees = normalized.map { [$0] } ?? []
         self.capabilities = nil
@@ -42,7 +46,13 @@ actor OpenCodeClient {
     func updateContextDirectory(_ directory: String?) -> String? {
         let previousDirectory = contextDirectory
         contextRevision &+= 1
-        let normalizedDirectory = directory?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        if let drive = WorkspaceSelectionBuilder.windowsDrivePrefix(in: directory) {
+            detectedWindowsDrive = drive
+        }
+        let normalizedDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+            directory,
+            windowsDrive: detectedWindowsDrive
+        )
         if let normalizedDirectory {
             knownV1Worktrees.insert(normalizedDirectory)
         }
@@ -53,6 +63,15 @@ actor OpenCodeClient {
 
     func currentContextDirectory() -> String? {
         contextDirectory
+    }
+
+    private func rememberWindowsDrive(from path: String?) {
+        if let drive = WorkspaceSelectionBuilder.windowsDrivePrefix(in: path) {
+            detectedWindowsDrive = drive
+            if let current = contextDirectory {
+                contextDirectory = WorkspaceSelectionBuilder.healServerDirectory(current, windowsDrive: drive)
+            }
+        }
     }
 
     // MARK: - Health
@@ -77,6 +96,7 @@ actor OpenCodeClient {
 
             let capabilities = OpenCodeServerCapabilities.v2(info)
             self.capabilities = capabilities
+            rememberWindowsDrive(from: capabilities.windowsSystemDrive)
             Logger.api.info("Negotiated OpenCode v2 protocol (server \(info.version, privacy: .public))")
             return capabilities
         } catch {
@@ -232,9 +252,13 @@ actor OpenCodeClient {
             // only a no-content acknowledgement. Parent sessions are a legacy
             // creation concern and are not part of the v2 create contract.
             let sessionID = "ses_\(UUID().uuidString)"
+            let sessionDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+                contextDirectory,
+                windowsDrive: detectedWindowsDrive
+            )
             let body = OCV2CreateSessionInput(
                 id: sessionID, title: title,
-                location: contextDirectory.map { OCV2LocationInfo(directory: $0, project: nil) },
+                location: sessionDirectory.map { OCV2LocationInfo(directory: $0, project: nil) },
                 model: model
             )
             let data = try await sendV2RequestData(
@@ -1030,17 +1054,29 @@ actor OpenCodeClient {
     /// A directory override applies only to this request, so a folder picker
     /// can browse without changing the active chat or workspace context.
     func listFiles(path: String? = nil, directory: String? = nil) async throws -> [OCWorkspaceFileEntry] {
+        let resolvedDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+            directory,
+            windowsDrive: detectedWindowsDrive
+        )
         if usesV2 {
             let response: OCV2Located<[OCV2FileSystemEntry]> = try await getV2Located(
                 "/api/fs/list",
                 path: path,
-                queryItems: directory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
-                includesLocation: directory == nil
+                queryItems: resolvedDirectory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
+                includesLocation: resolvedDirectory == nil
             )
+            rememberWindowsDrive(from: response.location.resolvedWindowsDrive)
+            let isWindowsLocation = response.location.resolvedWindowsDrive != nil || detectedWindowsDrive != nil
             return response.data.map { entry in
-                OCWorkspaceFileEntry(
-                    name: (entry.path as NSString).lastPathComponent,
-                    path: entry.path,
+                var cleanPath = isWindowsLocation
+                    ? entry.path.replacingOccurrences(of: "\\", with: "/")
+                    : entry.path
+                while cleanPath.count > 1 && cleanPath.hasSuffix("/") {
+                    cleanPath.removeLast()
+                }
+                return OCWorkspaceFileEntry(
+                    name: WorkspaceSelectionBuilder.lastPathComponent(of: cleanPath),
+                    path: cleanPath,
                     absolute: nil,
                     type: entry.type,
                     ignored: false
@@ -1054,8 +1090,8 @@ actor OpenCodeClient {
             urlPath += "?path=\(path.addingPercentEncoding(withAllowedCharacters: safeAllowed) ?? path)"
         }
         var request = makeRequest(path: urlPath, method: "GET")
-        if let directory {
-            request.setValue(directory, forHTTPHeaderField: "x-opencode-directory")
+        if let resolvedDirectory {
+            request.setValue(resolvedDirectory, forHTTPHeaderField: "x-opencode-directory")
         }
         let (data, response) = try await transport.data(for: request)
         try validateResponse(response, data: data)
@@ -1102,20 +1138,34 @@ actor OpenCodeClient {
     /// Resolve a destination without changing the active request context.
     func resolveLocation(directory: String) async throws -> OCV2LocationInfo {
         guard usesV2 else { throw OpenCodeError.invalidPayload("Location resolution requires OpenCode v2.") }
-        return try await getV2("/api/location", queryItems: [
-            URLQueryItem(name: "location[directory]", value: directory)
+        let target = WorkspaceSelectionBuilder.healServerDirectory(
+            directory,
+            windowsDrive: detectedWindowsDrive
+        ) ?? directory
+        let location: OCV2LocationInfo = try await getV2("/api/location", queryItems: [
+            URLQueryItem(name: "location[directory]", value: target)
         ], includesLocation: false)
+        rememberWindowsDrive(from: location.resolvedWindowsDrive)
+        return OCV2LocationInfo(
+            directory: location.canonicalDirectory(fallbackWindowsDrive: detectedWindowsDrive),
+            project: location.project
+        )
     }
 
     func listProjects() async throws -> [OCProject] {
         if usesV2 {
-            return try await getV2("/api/project")
+            let projects: [OCProject] = try await getV2("/api/project")
+            for worktree in projects.compactMap(\.worktree) {
+                rememberWindowsDrive(from: worktree)
+            }
+            return projects
         }
 
         let projects: [OCProject] = try await get("/project")
         for worktree in projects.compactMap(\.worktree) {
             if let clean = worktree.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
                 knownV1Worktrees.insert(clean)
+                rememberWindowsDrive(from: clean)
             }
         }
         return projects
@@ -1130,20 +1180,25 @@ actor OpenCodeClient {
                   !Task.isCancelled, contextRevision == revision else {
                 return (nil, nil)
             }
-            contextDirectory = location.directory
+            rememberWindowsDrive(from: location.resolvedWindowsDrive)
+            let canonicalDir = location.canonicalDirectory(fallbackWindowsDrive: detectedWindowsDrive)
+            contextDirectory = canonicalDir
+            let projectDir = location.project.map { $0.canonical ?? $0.directory }
             let pathInfo = OCPathInfo(
                 state: nil,
                 config: nil,
-                worktree: location.project?.directory ?? location.directory,
-                directory: location.directory
+                worktree: projectDir ?? canonicalDir,
+                directory: canonicalDir
             )
-            let project = location.project.map { OCProject(id: $0.id, worktree: $0.directory) }
+            let project = location.project.map { OCProject(id: $0.id, worktree: $0.canonical ?? $0.directory) }
             return (pathInfo, project)
         }
 
         async let pathTask: OCPathInfo? = try? get("/path")
         async let projectTask: OCProject? = try? get("/project/current")
-        return await (pathTask, projectTask)
+        let (pathInfo, project) = await (pathTask, projectTask)
+        rememberWindowsDrive(from: pathInfo?.directory ?? project?.worktree)
+        return (pathInfo, project)
     }
 
     func getCurrentProject() async throws -> OCProject {
@@ -1151,14 +1206,17 @@ actor OpenCodeClient {
             let revision = contextRevision
             let location: OCV2LocationInfo = try await getV2("/api/location")
             guard !Task.isCancelled, contextRevision == revision else { throw CancellationError() }
-            contextDirectory = location.directory
+            rememberWindowsDrive(from: location.resolvedWindowsDrive)
+            contextDirectory = location.canonicalDirectory(fallbackWindowsDrive: detectedWindowsDrive)
             guard let project = location.project else {
                 throw OpenCodeError.invalidPayload("The v2 location response did not contain a project.")
             }
-            return OCProject(id: project.id, worktree: project.directory)
+            return OCProject(id: project.id, worktree: project.canonical ?? project.directory)
         }
 
-        return try await get("/project/current")
+        let project: OCProject = try await get("/project/current")
+        rememberWindowsDrive(from: project.worktree)
+        return project
     }
 
     func getPath() async throws -> OCPathInfo {
@@ -1166,16 +1224,20 @@ actor OpenCodeClient {
             let revision = contextRevision
             let location: OCV2LocationInfo = try await getV2("/api/location")
             guard !Task.isCancelled, contextRevision == revision else { throw CancellationError() }
-            contextDirectory = location.directory
+            rememberWindowsDrive(from: location.resolvedWindowsDrive)
+            let canonicalDir = location.canonicalDirectory(fallbackWindowsDrive: detectedWindowsDrive)
+            contextDirectory = canonicalDir
             return OCPathInfo(
                 state: nil,
                 config: nil,
-                worktree: location.project?.directory ?? location.directory,
-                directory: location.directory
+                worktree: (location.project?.canonical ?? location.project?.directory) ?? canonicalDir,
+                directory: canonicalDir
             )
         }
 
-        return try await get("/path")
+        let pathInfo: OCPathInfo = try await get("/path")
+        rememberWindowsDrive(from: pathInfo.directory)
+        return pathInfo
     }
 
     func getVCS() async throws -> OCVCSInfo {
@@ -1770,11 +1832,18 @@ actor OpenCodeClient {
     }
 
     private func readV2FileData(path: String, directory: String?) async throws -> (Data, String?) {
+        let resolvedDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+            directory,
+            windowsDrive: detectedWindowsDrive
+        )
+        let normalizedPath = (detectedWindowsDrive != nil || resolvedDirectory.map(WorkspaceSelectionBuilder.isWindowsAbsolutePath) == true)
+            ? path.replacingOccurrences(of: "\\", with: "/")
+            : path
         let request = makeV2Request(
             path: "/api/fs/read",
-            pathParameter: path,
-            queryItems: directory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
-            includesLocation: directory == nil
+            pathParameter: normalizedPath,
+            queryItems: resolvedDirectory.map { [URLQueryItem(name: "location[directory]", value: $0)] } ?? [],
+            includesLocation: resolvedDirectory == nil
         )
         let (data, response) = try await transport.data(for: request)
         try validateResponse(response, data: data)

@@ -2205,10 +2205,29 @@ nonisolated struct OCV2LocationInfo: Codable, Sendable {
     nonisolated struct Project: Codable, Sendable {
         let id: String
         let directory: String
+        let canonical: String?
+
+        init(id: String, directory: String, canonical: String? = nil) {
+            self.id = id
+            self.directory = directory
+            self.canonical = canonical
+        }
     }
 
     let directory: String
     let project: Project?
+
+    var resolvedWindowsDrive: String? {
+        WorkspaceSelectionBuilder.windowsDrivePrefix(in: directory)
+            ?? WorkspaceSelectionBuilder.windowsDrivePrefix(in: project?.canonical)
+            ?? WorkspaceSelectionBuilder.windowsDrivePrefix(in: project?.directory)
+    }
+
+    func canonicalDirectory(fallbackWindowsDrive: String? = nil) -> String {
+        let drive = resolvedWindowsDrive ?? fallbackWindowsDrive
+        return WorkspaceSelectionBuilder.healServerDirectory(directory, windowsDrive: drive)
+            ?? directory
+    }
 }
 
 nonisolated struct OCV2Located<Value: Decodable & Sendable>: Decodable, Sendable {

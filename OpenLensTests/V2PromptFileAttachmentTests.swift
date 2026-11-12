@@ -66,6 +66,44 @@ struct V2PromptFileAttachmentTests {
         }
     }
 
+    @Test func windowsSessionRepositoryReferencesUseStandardFileURIsAndRefuseEscape() throws {
+        let sessionDir = #"C:\Users\Admin\Desktop\OpenLens"#
+        let joined = ServerFileReference.path(#"OpenLens\Services\ChatClient.swift"#, in: sessionDir)
+        let ref = try ServerFileReference(
+            path: joined,
+            sessionDirectory: sessionDir,
+            lines: .init(start: 10, end: 25)
+        )
+        #expect(ref.uri == "file:///C:/Users/Admin/Desktop/OpenLens/OpenLens/Services/ChatClient.swift?start=10&end=25")
+        #expect(ref.displayName == "ChatClient.swift:10–25")
+        #expect(ref.relativePath(in: sessionDir) == "OpenLens/Services/ChatClient.swift")
+
+        let entries = WorkspaceService.repositoryEntries(
+            from: [
+                OCWorkspaceFileEntry(name: #"OpenLens\Services\"#, path: #"OpenLens\Services\"#, absolute: nil, type: "directory", ignored: false),
+                OCWorkspaceFileEntry(name: "README.md", path: "README.md", absolute: nil, type: "file", ignored: false),
+                OCWorkspaceFileEntry(name: ".git", path: #".git\"#, absolute: nil, type: "directory", ignored: false),
+            ],
+            directory: sessionDir
+        )
+        #expect(entries.map(\.path) == ["OpenLens/Services", "README.md"])
+        #expect(entries.map(\.name) == ["Services", "README.md"])
+        #expect(entries.map(\.isDirectory) == [true, false])
+
+        let invalidWindowsPaths = [
+            #"C:\Users\Admin\Desktop\Other\a.swift"#,
+            #"C:\Users\Admin\Desktop\OpenLensOther\a.swift"#,
+            #"C:\Users\Admin\Desktop\OpenLens\..\secrets.txt"#,
+            #"D:\Users\Admin\Desktop\OpenLens\a.swift"#,
+            "/workspace/app/a.swift",
+        ]
+        for invalid in invalidWindowsPaths {
+            #expect(throws: PromptAttachmentError.fileOutsideSession, "\(invalid)") {
+                try ServerFileReference(path: invalid, sessionDirectory: sessionDir)
+            }
+        }
+    }
+
     @Test func lineRangesMustStartAtOneAndNotRunBackwards() {
         #expect(throws: PromptAttachmentError.invalidLineRange) { try ServerFileReference.LineRange(start: 0) }
         #expect(throws: PromptAttachmentError.invalidLineRange) { try ServerFileReference.LineRange(start: 20, end: 12) }

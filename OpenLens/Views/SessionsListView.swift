@@ -1679,7 +1679,10 @@ private struct NewSessionSheet: View {
 
             Button {
                 folderBrowserRequest = FolderBrowserRequest(
-                    directory: selectedWorkspace?.directory ?? connection.selectedProjectDirectory ?? "/"
+                    directory: selectedWorkspace?.directory
+                        ?? connection.selectedProjectDirectory
+                        ?? workspaceOptions.compactMap(\.directory).first
+                        ?? connection.defaultServerRootDirectory
                 )
             } label: {
                 Label(AppText.browseFolders, systemImage: "folder.badge.plus")

@@ -50,6 +50,10 @@ nonisolated struct OCV2ServerInfo: Codable, Equatable, Sendable {
         !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var windowsSystemDrive: String? {
+        WorkspaceSelectionBuilder.windowsDrivePrefix(in: paths?.temporaryDirectory)
+    }
+
     enum CodingKeys: String, CodingKey {
         case version, pid, urls, paths
     }
@@ -94,6 +98,10 @@ nonisolated struct OpenCodeServerCapabilities: Equatable, Sendable {
     let evidence: OpenCodeCapabilityEvidence
     let serverInfo: OCV2ServerInfo?
     let health: OCHealthResponse?
+
+    var windowsSystemDrive: String? {
+        serverInfo?.windowsSystemDrive
+    }
 
     static func v2(_ info: OCV2ServerInfo) -> Self {
         Self(

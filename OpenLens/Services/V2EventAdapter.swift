@@ -245,7 +245,7 @@ nonisolated struct V2EventAdapter {
         if let cached = cachedContextDirectory, cached.raw == raw {
             return cached.normalized
         }
-        let normalized = WorkspaceSelectionBuilder.normalizedDirectory(raw)
+        let normalized = SessionRepositoryIndex.pathKey(raw) ?? WorkspaceSelectionBuilder.normalizedDirectory(raw)
         cachedContextDirectory = (raw, normalized)
         return normalized
     }
@@ -254,7 +254,7 @@ nonisolated struct V2EventAdapter {
         if let cached = cachedEventDirectory, cached.raw == raw {
             return cached.normalized
         }
-        let normalized = WorkspaceSelectionBuilder.normalizedDirectory(raw)
+        let normalized = SessionRepositoryIndex.pathKey(raw) ?? WorkspaceSelectionBuilder.normalizedDirectory(raw)
         cachedEventDirectory = (raw, normalized)
         return normalized
     }

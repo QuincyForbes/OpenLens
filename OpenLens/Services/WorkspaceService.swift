@@ -231,7 +231,10 @@ final class WorkspaceService {
 
     func loadFolders(in directory: String) async throws -> WorkspaceFolderSnapshot {
         guard WorkspaceSelectionBuilder.isAbsoluteServerDirectory(directory),
-              let directory = WorkspaceSelectionBuilder.normalizedDirectory(directory) else {
+              let directory = WorkspaceSelectionBuilder.healServerDirectory(
+                  directory,
+                  windowsDrive: connection.windowsSystemDrive
+              ) else {
             throw OpenCodeError.invalidPayload("Choose an absolute folder path on the connected computer.")
         }
 
@@ -246,27 +249,32 @@ final class WorkspaceService {
         // Listing "." in a per-request context also supports servers that
         // only accept workspace-relative file paths.
         let entries = try await client.listFiles(path: ".", directory: directory)
+        let resolvedDirectory = WorkspaceSelectionBuilder.healServerDirectory(
+            directory,
+            windowsDrive: connection.windowsSystemDrive
+        ) ?? directory
         return WorkspaceFolderSnapshot(
-            directory: directory,
-            folders: Self.folderItems(from: entries, directory: directory)
+            directory: resolvedDirectory,
+            folders: Self.folderItems(from: entries, directory: resolvedDirectory)
         )
     }
 
     static func folderItems(from entries: [OCWorkspaceFileEntry], directory: String) -> [WorkspaceFileItem] {
+        guard let normalizedBase = WorkspaceSelectionBuilder.normalizedDirectory(directory) else { return [] }
         var seen = Set<String>()
         return entries.compactMap { entry in
             guard entry.type?.lowercased() == "directory" else { return nil }
             let rawPath: String
-            if let absolute = entry.absolute, absolute.hasPrefix("/") {
+            if let absolute = entry.absolute, WorkspaceSelectionBuilder.isAbsoluteServerDirectory(absolute) {
                 rawPath = absolute
             } else {
                 rawPath = entry.path
             }
-            let absolutePath = rawPath.hasPrefix("/")
+            let resolvedPath = WorkspaceSelectionBuilder.isAbsoluteServerDirectory(rawPath)
                 ? rawPath
-                : URL(fileURLWithPath: directory).appendingPathComponent(rawPath).path
-            guard let path = WorkspaceSelectionBuilder.normalizedDirectory(absolutePath),
-                  path != directory,
+                : WorkspaceSelectionBuilder.appendingSubpath(rawPath, to: normalizedBase)
+            guard let path = WorkspaceSelectionBuilder.normalizedDirectory(resolvedPath),
+                  !WorkspaceSelectionBuilder.sameServerDirectory(path, normalizedBase),
                   !WorkspaceSelectionBuilder.displayName(for: path).hasPrefix("."),
                   seen.insert(path).inserted else { return nil }
             return WorkspaceFileItem(
@@ -331,15 +339,41 @@ final class WorkspaceService {
     }
 
     static func repositoryEntries(from entries: [OCWorkspaceFileEntry], directory: String) -> [RepositoryEntry] {
-        let root = directory.hasSuffix("/") ? String(directory.dropLast()) : directory
+        let isWindows = WorkspaceSelectionBuilder.isWindowsAbsolutePath(directory)
+        let normalizedRoot: String = {
+            if isWindows {
+                var r = directory.replacingOccurrences(of: "\\", with: "/")
+                while r.count > 3 && r.hasSuffix("/") { r.removeLast() }
+                return r
+            }
+            return directory.hasSuffix("/") && directory.count > 1 ? String(directory.dropLast()) : directory
+        }()
         var seen = Set<String>()
         return entries.compactMap { entry in
-            var path = entry.absolute.flatMap { $0.hasPrefix(root + "/") ? String($0.dropFirst(root.count + 1)) : nil }
-                ?? entry.path
-            let isDirectory = entry.type?.lowercased() == "directory" || path.hasSuffix("/")
+            let strippedAbsolute: String? = entry.absolute.flatMap { abs in
+                let normalizedAbs = isWindows ? abs.replacingOccurrences(of: "\\", with: "/") : abs
+                let prefix = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
+                if isWindows {
+                    guard normalizedAbs.lowercased().hasPrefix(prefix.lowercased()) else { return nil }
+                    return String(normalizedAbs.dropFirst(prefix.count))
+                }
+                guard normalizedAbs.hasPrefix(prefix) else { return nil }
+                return String(normalizedAbs.dropFirst(prefix.count))
+            }
+            var path = strippedAbsolute ?? entry.path
+            let isDirectory = entry.type?.lowercased() == "directory"
+                || path.hasSuffix("/")
+                || (isWindows && path.hasSuffix("\\"))
+            if isWindows {
+                path = path.replacingOccurrences(of: "\\", with: "/")
+            }
             while path.hasSuffix("/") { path.removeLast() }
-            let name = (path as NSString).lastPathComponent
-            guard !path.isEmpty, !path.hasPrefix("/"), path != ".", !name.hasPrefix("."),
+            let name = WorkspaceSelectionBuilder.lastPathComponent(of: path)
+            guard !path.isEmpty,
+                  !path.hasPrefix("/"),
+                  !WorkspaceSelectionBuilder.isWindowsAbsolutePath(path),
+                  path != ".",
+                  !name.hasPrefix("."),
                   seen.insert(path).inserted else { return nil }
             return RepositoryEntry(path: path, name: name, isDirectory: isDirectory)
         }

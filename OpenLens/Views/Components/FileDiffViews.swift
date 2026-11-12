@@ -228,7 +228,8 @@ struct FileDiffDetailView: View {
     }
 
     private var fileTitle: String {
-        (file.path as NSString).lastPathComponent
+        let candidate = WorkspaceSelectionBuilder.lastPathComponent(of: file.path)
+        return candidate.isEmpty ? file.path : candidate
     }
 
     private var availableModes: [DisplayMode] {

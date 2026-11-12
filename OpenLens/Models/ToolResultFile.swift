@@ -31,7 +31,7 @@ nonisolated struct ToolResultFile: Identifiable, Hashable, Sendable {
         self.id = id
         self.mime = file.mime
         self.kind = Self.kind(forMIME: file.mime)
-        self.title = file.name.flatMap { ($0 as NSString).lastPathComponent.nilIfEmpty } ?? file.mime
+        self.title = file.name.flatMap { WorkspaceSelectionBuilder.lastPathComponent(of: $0).nilIfEmpty } ?? file.mime
         self.source = Self.source(for: file.uri)
     }
 

@@ -22,7 +22,9 @@ struct WorkspaceFolderBrowser: View {
     }
 
     private var loadedDirectory: String? {
-        guard case .loaded(let snapshot) = loadState, snapshot.directory == directory else { return nil }
+        guard case .loaded(let snapshot) = loadState,
+              WorkspaceSelectionBuilder.sameServerDirectory(snapshot.directory, directory),
+              !WorkspaceSelectionBuilder.isRootDirectory(snapshot.directory) else { return nil }
         return snapshot.directory
     }
 
@@ -70,12 +72,12 @@ struct WorkspaceFolderBrowser: View {
                 .accessibilityIdentifier("folderBrowser.currentPath")
 
             Button {
-                navigate(to: URL(fileURLWithPath: directory).deletingLastPathComponent().path)
+                navigate(to: WorkspaceSelectionBuilder.parentDirectory(of: directory))
             } label: {
                 Label(AppText.parentFolder, systemImage: "arrow.up")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
             }
-            .disabled(directory == "/")
+            .disabled(WorkspaceSelectionBuilder.isRootDirectory(directory))
             .accessibilityLabel("Go to parent folder")
             .accessibilityIdentifier("folderBrowser.up")
         }
@@ -147,6 +149,7 @@ struct WorkspaceFolderBrowser: View {
             let snapshot = try await workspaceService.loadFolders(in: requestedDirectory)
             try Task.checkCancellation()
             guard directory == requestedDirectory else { return }
+            directory = snapshot.directory
             loadState = .loaded(snapshot)
         } catch {
             guard !Task.isCancelled, directory == requestedDirectory else { return }

@@ -184,26 +184,29 @@ nonisolated struct ServerFileReference: Identifiable, Hashable, Sendable {
     /// the session runs in on the server. Phone paths, URLs, and paths that
     /// step outside the folder are refused.
     init(id: String = UUID().uuidString, path: String, sessionDirectory: String, lines: LineRange? = nil) throws {
-        guard let directory = Self.normalizedAbsolutePath(sessionDirectory),
-              let path = Self.normalizedAbsolutePath(path),
-              path.hasPrefix(directory == "/" ? "/" : directory + "/"),
-              path != directory
+        let isWindowsSession = Self.isWindowsServerPath(sessionDirectory)
+        guard let directory = Self.normalizedURLPath(sessionDirectory, allowWindows: isWindowsSession),
+              let urlPath = Self.normalizedURLPath(path, allowWindows: isWindowsSession),
+              Self.isInsideSession(urlPath: urlPath, directoryURLPath: directory, caseInsensitiveDrive: isWindowsSession)
         else {
             throw PromptAttachmentError.fileOutsideSession
         }
         self.id = id
-        self.path = path
+        self.path = urlPath
         self.lines = lines
     }
 
-    var name: String { (path as NSString).lastPathComponent }
+    var name: String { WorkspaceSelectionBuilder.lastPathComponent(of: path) }
 
     /// `path` relative to `sessionDirectory`, the folder it was checked against.
     func relativePath(in sessionDirectory: String) -> String? {
-        guard let directory = Self.normalizedAbsolutePath(sessionDirectory) else { return nil }
-        let prefix = directory == "/" ? "/" : directory + "/"
-        guard path.hasPrefix(prefix) else { return nil }
-        return String(path.dropFirst(prefix.count))
+        let isWindowsSession = Self.isWindowsServerPath(sessionDirectory)
+        guard let directory = Self.normalizedURLPath(sessionDirectory, allowWindows: isWindowsSession),
+              Self.isInsideSession(urlPath: path, directoryURLPath: directory, caseInsensitiveDrive: isWindowsSession) else {
+            return nil
+        }
+        let prefixCount = directory == "/" ? 1 : directory.count + 1
+        return String(path.dropFirst(prefixCount))
     }
 
     var displayName: String {
@@ -228,14 +231,58 @@ nonisolated struct ServerFileReference: Identifiable, Hashable, Sendable {
 
     /// The absolute path of `relativePath` inside `directory`.
     static func path(_ relativePath: String, in directory: String) -> String {
+        if isWindowsServerPath(directory) {
+            var base = directory.replacingOccurrences(of: "\\", with: "/")
+            if base.hasPrefix("/") { base.removeFirst() }
+            while base.count > 2, base.hasSuffix("/") { base.removeLast() }
+            let cleanRelative = relativePath.replacingOccurrences(of: "\\", with: "/")
+            return base + "/" + cleanRelative
+        }
         var base = directory
         while base.count > 1, base.hasSuffix("/") { base.removeLast() }
         return base == "/" ? "/" + relativePath : base + "/" + relativePath
     }
 
-    private static func normalizedAbsolutePath(_ path: String) -> String? {
-        guard path.hasPrefix("/"), !path.contains("\0"), !path.contains("\\") else { return nil }
-        var trimmed = path
+    private static func isWindowsServerPath(_ value: String) -> Bool {
+        if WorkspaceSelectionBuilder.isWindowsAbsolutePath(value) {
+            return true
+        }
+        if value.hasPrefix("/"), WorkspaceSelectionBuilder.isWindowsAbsolutePath(String(value.dropFirst())) {
+            return true
+        }
+        return false
+    }
+
+    private static func isInsideSession(
+        urlPath: String,
+        directoryURLPath: String,
+        caseInsensitiveDrive: Bool
+    ) -> Bool {
+        let prefix = directoryURLPath == "/" ? "/" : directoryURLPath + "/"
+        guard urlPath != directoryURLPath else { return false }
+        if caseInsensitiveDrive {
+            return urlPath.lowercased().hasPrefix(prefix.lowercased())
+        }
+        return urlPath.hasPrefix(prefix)
+    }
+
+    private static func normalizedURLPath(_ rawPath: String, allowWindows: Bool) -> String? {
+        guard !rawPath.contains("\0") else { return nil }
+        if allowWindows && isWindowsServerPath(rawPath) {
+            var working = rawPath.replacingOccurrences(of: "\\", with: "/")
+            if working.hasPrefix("/") { working.removeFirst() }
+            guard WorkspaceSelectionBuilder.isWindowsAbsolutePath(working) else { return nil }
+            let drive = String(working.prefix(1)).uppercased()
+            var trimmed = "/\(drive):" + working.dropFirst(2)
+            while trimmed.count > 3, trimmed.hasSuffix("/") { trimmed.removeLast() }
+            let components = trimmed.split(separator: "/", omittingEmptySubsequences: false).dropFirst(2)
+            guard trimmed.count == 3 || components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+                return nil
+            }
+            return trimmed
+        }
+        guard !allowWindows, rawPath.hasPrefix("/"), !rawPath.contains("\\") else { return nil }
+        var trimmed = rawPath
         while trimmed.count > 1, trimmed.hasSuffix("/") { trimmed.removeLast() }
         let components = trimmed.split(separator: "/", omittingEmptySubsequences: false).dropFirst()
         guard trimmed == "/" || components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {

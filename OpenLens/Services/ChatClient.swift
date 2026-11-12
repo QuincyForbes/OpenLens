@@ -2083,7 +2083,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             inputText = restored.text
             composerPastedSnippets = restored.pastedSnippets
             let nextDirectory = WorkspaceSelectionBuilder.normalizedDirectory(session.directory)
-            if restored.directory == nil || nextDirectory == nil || restored.directory == nextDirectory {
+            if restored.directory == nil || nextDirectory == nil || WorkspaceSelectionBuilder.sameServerDirectory(restored.directory, nextDirectory) {
                 composerAttachments = restored.attachments
             } else {
                 composerAttachments = restored.attachments.filter {
@@ -2202,7 +2202,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         // opened from another directory does not inherit the previously viewed
         // project's name, branch, commands, or files.
         if reopeningCurrentSession,
-           WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory) != WorkspaceSelectionBuilder.normalizedDirectory(session.directory)
+           !WorkspaceSelectionBuilder.sameServerDirectory(currentSession?.directory, session.directory)
             || sessionLocationState != .ready {
             do {
                 try await applyRecoveredSession(session, generation: generation)
@@ -2292,7 +2292,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             session = currentSession
         }
         guard let directory = WorkspaceSelectionBuilder.normalizedDirectory(session.directory),
-              WorkspaceSelectionBuilder.normalizedDirectory(connection?.selectedProjectDirectory) != directory else { return }
+              !WorkspaceSelectionBuilder.sameServerDirectory(connection?.selectedProjectDirectory, directory) else { return }
         await connection?.setProjectContext(directory: directory)
     }
 
@@ -2353,7 +2353,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         if let previousDirectory,
            let directory = session.directory,
-           WorkspaceSelectionBuilder.normalizedDirectory(previousDirectory) != WorkspaceSelectionBuilder.normalizedDirectory(directory) {
+           !WorkspaceSelectionBuilder.sameServerDirectory(previousDirectory, directory) {
             sessionLocationState = .rebinding
             do {
                 try await connection?.rebindProjectContext(directory: directory, isCurrent: isCurrent)
@@ -4465,7 +4465,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     func attachComposerServerFile(relativePath: String, lines: ServerFileReference.LineRange? = nil) {
         guard canAttachFiles else { return }
         do {
-            guard let directory = sessionDirectory, !relativePath.hasPrefix("/") else {
+            guard let directory = sessionDirectory,
+                  !relativePath.hasPrefix("/"),
+                  !relativePath.hasPrefix("\\"),
+                  !WorkspaceSelectionBuilder.isWindowsAbsolutePath(relativePath) else {
                 throw PromptAttachmentError.fileOutsideSession
             }
             let reference = try ServerFileReference(
@@ -5022,7 +5025,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         try Task.checkCancellation()
         guard isCurrentWork(context) else { throw CancellationError() }
         guard canCompose,
-              WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory) == WorkspaceSelectionBuilder.normalizedDirectory(context.session.directory),
+              WorkspaceSelectionBuilder.sameServerDirectory(currentSession?.directory, context.session.directory),
               connection?.projectContextRevision == context.projectRevision else {
             throw SessionMovedBeforeSend()
         }
@@ -5040,7 +5043,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             }
         }
         if restoresText, composerAttachments.isEmpty {
-            let locationUnchanged = canCompose && currentSession?.directory == context.session.directory
+            let locationUnchanged = canCompose && WorkspaceSelectionBuilder.sameServerDirectory(currentSession?.directory, context.session.directory)
                 && connection?.projectContextRevision == context.projectRevision
             composerAttachments = attachments.filter {
                 if case .serverFile = $0 { return locationUnchanged }

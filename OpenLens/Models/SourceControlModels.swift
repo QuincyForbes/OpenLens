@@ -216,7 +216,7 @@ nonisolated struct TurnFileChangeSummary: Identifiable, Hashable, Sendable {
     var id: String { path }
 
     var filename: String {
-        let candidate = (path as NSString).lastPathComponent
+        let candidate = WorkspaceSelectionBuilder.lastPathComponent(of: path)
         return candidate.isEmpty ? path : candidate
     }
 

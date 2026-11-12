@@ -86,9 +86,11 @@ enum ToolLabelFormatter {
     }
 
     private static func compactPath(_ path: String) -> String {
-        let parts = path.split(separator: "/").map(String.init)
+        let usesBackslash = WorkspaceSelectionBuilder.isWindowsAbsolutePath(path) || (path.contains("\\") && !path.contains("/"))
+        let separator: Character = usesBackslash ? "\\" : "/"
+        let parts = path.split { $0 == "/" || $0 == "\\" }.map(String.init)
         guard parts.count > 3 else { return path }
-        return parts.suffix(3).joined(separator: "/")
+        return parts.suffix(3).joined(separator: String(separator))
     }
 
     private static func compactScope(_ path: String?) -> String {
@@ -101,7 +103,7 @@ enum ToolLabelFormatter {
         }
 
         let compact = compactPath(path)
-        let last = (compact as NSString).lastPathComponent
+        let last = WorkspaceSelectionBuilder.lastPathComponent(of: compact)
         return last.isEmpty ? compact : last
     }
 

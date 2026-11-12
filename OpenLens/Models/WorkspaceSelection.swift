@@ -71,10 +71,12 @@ enum WorkspaceSelectionBuilder {
 
         for reported in reportedDirectories(in: snapshot) {
             // Folders outside a git repository belong to the server's `global`
-            // project, rooted at `/`. That is a placeholder, not a workspace to
-            // open; the folder browser refuses `/` for the same reason.
-            guard normalizedDirectory(reported.directory) != "/" else { continue }
-            rememberCandidate(directory: reported.directory, projectID: reported.projectID)
+            // project, rooted at `/` (or a Windows drive root). That is a
+            // placeholder, not a workspace to open; the folder browser refuses
+            // filesystem roots for the same reason.
+            guard let normalized = normalizedDirectory(reported.directory),
+                  !isRootDirectory(normalized) else { continue }
+            rememberCandidate(directory: normalized, projectID: reported.projectID)
         }
 
         rememberCurrentDirectory(snapshot.currentProject?.worktree)
@@ -165,12 +167,34 @@ enum WorkspaceSelectionBuilder {
         return isDriveLetter && bytes[1] == 58 && (bytes[2] == 47 || bytes[2] == 92)
     }
 
+    nonisolated static func windowsDrivePrefix(in value: String?) -> String? {
+        guard var trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        if trimmed.hasPrefix("/"), isWindowsAbsolutePath(String(trimmed.dropFirst())) {
+            trimmed.removeFirst()
+        }
+        let bytes = Array(trimmed.utf8)
+        guard bytes.count >= 2 else { return nil }
+        let first = bytes[0]
+        let isDriveLetter = (first >= 65 && first <= 90) || (first >= 97 && first <= 122)
+        guard isDriveLetter && bytes[1] == 58 else { return nil }
+        guard bytes.count == 2 || bytes[2] == 47 || bytes[2] == 92 else { return nil }
+        return "\(String(trimmed.prefix(1)).uppercased()):"
+    }
+
     nonisolated static func isAbsoluteServerDirectory(_ value: String?) -> Bool {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else {
             return false
         }
         return trimmed.hasPrefix("/") || isWindowsAbsolutePath(trimmed)
+    }
+
+    nonisolated static func isRootDirectory(_ value: String?) -> Bool {
+        guard let normalized = normalizedDirectory(value) else { return false }
+        return normalized == "/" || (isWindowsAbsolutePath(normalized) && normalized.utf8.count == 3)
     }
 
     nonisolated static func normalizedDirectory(_ value: String?) -> String? {
@@ -185,17 +209,91 @@ enum WorkspaceSelectionBuilder {
         }
 
         if isWindowsAbsolutePath(trimmed) {
-            var normalized = trimmed.replacingOccurrences(of: "/", with: "\\")
-            while normalized.count > 3 && normalized.hasSuffix("\\") {
-                normalized.removeLast()
+            let drive = String(trimmed.prefix(1))
+            var stack: [Substring] = []
+            for component in trimmed.dropFirst(2).split(whereSeparator: { $0 == "/" || $0 == "\\" }) {
+                if component == "." { continue }
+                if component == ".." {
+                    if !stack.isEmpty { stack.removeLast() }
+                } else {
+                    stack.append(component)
+                }
             }
-            return normalized
+            return stack.isEmpty ? "\(drive):\\" : "\(drive):\\" + stack.joined(separator: "\\")
         }
 
-        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+        // Heal hybrid POSIX/backslash strings produced when Windows `/api/fs/list`
+        // entries like `"Users\\"` were joined onto `"/"` on iOS.
+        let posixCleaned = trimmed.hasPrefix("/") && !trimmed.hasPrefix("\\\\")
+            ? trimmed.replacingOccurrences(of: "\\", with: "/")
+            : trimmed
+        return URL(fileURLWithPath: posixCleaned).standardizedFileURL.path
+    }
+
+    /// Restores the Windows drive prefix when a drive-less POSIX path (`/` or
+    /// `/Users/...`) targets a server known to run on Windows.
+    nonisolated static func healServerDirectory(_ value: String?, windowsDrive: String?) -> String? {
+        guard let normalized = normalizedDirectory(value) else { return nil }
+        guard let drive = windowsDrivePrefix(in: windowsDrive),
+              normalized.hasPrefix("/"),
+              !normalized.hasPrefix("//") else {
+            return normalized
+        }
+        if normalized == "/" {
+            return "\(drive)\\"
+        }
+        return normalizedDirectory("\(drive)\(normalized)")
+    }
+
+    nonisolated static func sameServerDirectory(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhsKey = SessionRepositoryIndex.pathKey(lhs),
+              let rhsKey = SessionRepositoryIndex.pathKey(rhs) else {
+            return normalizedDirectory(lhs) == normalizedDirectory(rhs)
+        }
+        return lhsKey == rhsKey
+    }
+
+    nonisolated static func parentDirectory(of directory: String) -> String {
+        guard let normalized = normalizedDirectory(directory) else { return "/" }
+        if isWindowsAbsolutePath(normalized) {
+            guard normalized.count > 3, let slash = normalized.lastIndex(of: "\\") else {
+                return String(normalized.prefix(3))
+            }
+            let prefix = String(normalized[..<slash])
+            return prefix.count == 2 ? "\(prefix)\\" : prefix
+        }
+        guard normalized != "/", let slash = normalized.lastIndex(of: "/") else {
+            return "/"
+        }
+        let prefix = String(normalized[..<slash])
+        return prefix.isEmpty ? "/" : prefix
+    }
+
+    nonisolated static func appendingSubpath(_ subpath: String, to directory: String) -> String {
+        let parts = subpath
+            .split { $0 == "/" || $0 == "\\" }
+            .filter { !$0.isEmpty && $0 != "." }
+        guard let base = normalizedDirectory(directory) else { return subpath }
+        guard !parts.isEmpty else { return base }
+        if isWindowsAbsolutePath(base) {
+            let sep = base.hasSuffix("\\") ? "" : "\\"
+            return normalizedDirectory(base + sep + parts.joined(separator: "\\")) ?? base
+        }
+        let sep = base == "/" ? "" : "/"
+        return normalizedDirectory(base + sep + parts.joined(separator: "/")) ?? base
+    }
+
+    nonisolated static func lastPathComponent(of path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let parts = trimmed.split { $0 == "/" || $0 == "\\" }
+        return parts.last.map(String.init) ?? trimmed
     }
 
     nonisolated static func displayName(for directory: String) -> String {
+        if isWindowsAbsolutePath(directory), let normalized = normalizedDirectory(directory), normalized.utf8.count == 3 {
+            return normalized
+        }
         let normalized = directory.replacingOccurrences(of: "\\", with: "/")
         let lastComponent = (normalized as NSString).lastPathComponent
         let trimmed = lastComponent.trimmingCharacters(in: .whitespacesAndNewlines)
