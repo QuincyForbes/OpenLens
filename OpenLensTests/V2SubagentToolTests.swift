@@ -254,7 +254,7 @@ struct V2SubagentToolTests {
         let message = ChatMessage(id: "msg_parent", role: .assistant, content: "", parts: parts)
         let items = ChatTimeline.items(from: [message], showsThinking: true)
         #expect(items.count == 4)
-        #expect(items.allSatisfy(\.animatesSubagentStatus))
+        #expect(items.map(\.animatesSubagentStatus) == [true, true, true, true])
 
         let origin = Date(timeIntervalSince1970: 1_000)
         #expect(ElapsedDurationFormatter.string(from: origin, to: origin.addingTimeInterval(8)) == "0:08")
