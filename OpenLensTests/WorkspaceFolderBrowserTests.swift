@@ -108,11 +108,22 @@ struct WorkspaceFolderBrowserTests {
         }
         """#.utf8)
         let sessionJSON = #"{"data":{"id":"ses_win","location":{"directory":"C:\\Users\\Admin\\Desktop\\Projects\\dayzero-monolith"}}}"#
-        let transport = OpenCodeContractTransport(routes: [
-            "/api/info": .init(statusCode: 200, body: windowsInfo),
-            "/api/fs/list": .init(statusCode: 200, body: listResponse),
-            "/api/session": .init(statusCode: 200, body: Data(sessionJSON.utf8)),
-        ])
+        let transport = OpenCodeContractTransport(
+            routes: [
+                "/api/info": .init(statusCode: 200, body: windowsInfo),
+                "/api/fs/list": .init(statusCode: 200, body: listResponse),
+            ],
+            responder: { request in
+                guard request.url?.path == "/api/session", request.httpMethod == "POST" else { return nil }
+                guard let body = request.httpBody,
+                      let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+                      let location = json["location"] as? [String: Any],
+                      location["directory"] as? String == #"C:\Users\Admin\Desktop\Projects\dayzero-monolith"# else {
+                    return .init(statusCode: 400, body: Data(#"{"message":"Unexpected location directory"}"#.utf8))
+                }
+                return .init(statusCode: 200, body: Data(sessionJSON.utf8))
+            }
+        )
         let client = OpenCodeClient(
             baseURL: try #require(URL(string: "http://opencode.example.com")),
             contextDirectory: "/Users//Admin//Desktop//Projects//dayzero-monolith/",
@@ -146,9 +157,8 @@ struct WorkspaceFolderBrowserTests {
         #expect(connection.selectedProjectDirectory == #"C:\Users\Admin\Desktop\Projects\dayzero-monolith"#)
 
         let requests = await transport.recordedRequests()
-        let createReq = try #require(requests.first { $0.path == "/api/session" && $0.method == "POST" })
-        let createBody = try #require(JSONSerialization.jsonObject(with: try #require(createReq.body)) as? [String: Any])
-        let location = try #require(createBody["location"] as? [String: Any])
-        #expect(location["directory"] as? String == #"C:\Users\Admin\Desktop\Projects\dayzero-monolith"#)
+        let listReq = try #require(requests.first { $0.path == "/api/fs/list" })
+        #expect(listReq.queryItems["location[directory]"] == #"C:\"#)
+        #expect(requests.contains { $0.path == "/api/session" })
     }
 }
