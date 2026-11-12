@@ -70,7 +70,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
             id: id, projectID: projectID, directory: directory, parentID: parentID,
             title: title, version: version,
             time: .init(created: time.created, updated: time.updated, compacting: time.compacting,
-                        idle: time.idle, viewed: max(time.viewed ?? 0, viewed)),
+                        idle: time.idle, viewed: max(time.viewed ?? 0, viewed), busy: time.busy),
             share: share, revert: revert, agent: agent, model: model, outcome: outcome
         )
     }
@@ -156,6 +156,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
             && lhs.outcome == rhs.outcome
             && lhs.time.idle == rhs.time.idle
             && lhs.time.viewed == rhs.time.viewed
+            && lhs.time.busy == rhs.time.busy
     }
 
     /// Returns a copy with v2 canonical selection fields replaced.
@@ -222,13 +223,22 @@ nonisolated struct OCSessionTime: Codable, Hashable, Sendable {
     let compacting: Double?
     let idle: Double?
     let viewed: Double?
+    let busy: Double?
 
-    init(created: Double, updated: Double, compacting: Double? = nil, idle: Double? = nil, viewed: Double? = nil) {
+    init(
+        created: Double,
+        updated: Double,
+        compacting: Double? = nil,
+        idle: Double? = nil,
+        viewed: Double? = nil,
+        busy: Double? = nil
+    ) {
         self.created = created
         self.updated = updated
         self.compacting = compacting
         self.idle = idle
         self.viewed = viewed
+        self.busy = busy
     }
 
     init(from decoder: Decoder) throws {
@@ -238,10 +248,11 @@ nonisolated struct OCSessionTime: Codable, Hashable, Sendable {
         compacting = try container.decodeIfPresent(Double.self, forKey: .compacting)
         idle = try? container.decodeIfPresent(Double.self, forKey: .idle)
         viewed = try? container.decodeIfPresent(Double.self, forKey: .viewed)
+        busy = try? container.decodeIfPresent(Double.self, forKey: .busy)
     }
 
     enum CodingKeys: String, CodingKey {
-        case created, updated, compacting, idle, viewed
+        case created, updated, compacting, idle, viewed, busy
     }
 }
 
