@@ -337,7 +337,7 @@ struct ChatView: View {
                     onShowSubagents: !subagents.isEmpty ? {
                         showSubagentThreadsSheet = true
                     } : nil,
-                    onShowActiveAgents: !chatClient.isOfflinePreviewMode ? {
+                    onShowActiveAgents: (!chatClient.isOfflinePreviewMode || ScreenshotFixtures.opensActiveAgentsPopover) ? {
                         showActiveAgentsPopover = true
                     } : nil,
                     onStopAllInChat: (!chatClient.isOfflinePreviewMode && (chatClient.isLoading || runningSubagents > 0)) ? {
@@ -348,14 +348,14 @@ struct ChatView: View {
                             UIPasteboard.general.string = latestCompletedReply
                         }
                     } : nil,
-                    otherActiveSessionCount: chatClient.isOfflinePreviewMode
-                        ? 0
-                        : sessionsService.activeSessionCount(excluding: headerSession?.id),
+                    otherActiveSessionCount: ScreenshotFixtures.opensActiveAgentsPopover
+                        ? sessionsService.activeSessionCount(excluding: nil)
+                        : (chatClient.isOfflinePreviewMode ? 0 : sessionsService.activeSessionCount(excluding: headerSession?.id)),
                     subagentCount: subagents.count,
                     runningSubagentCount: runningSubagents,
-                    activeAgentsPopover: !chatClient.isOfflinePreviewMode ? AnyView(
+                    activeAgentsPopover: (!chatClient.isOfflinePreviewMode || ScreenshotFixtures.opensActiveAgentsPopover) ? AnyView(
                         ActiveAgentsPopoverView(
-                            currentSession: headerSession,
+                            currentSession: ScreenshotFixtures.opensActiveAgentsPopover ? nil : headerSession,
                             isCurrentSessionGenerating: chatClient.isLoading,
                             currentActivityLabel: chatClient.currentActivity?.currentLabel,
                             currentTurnStartDate: chatClient.activeTurnStartDate,
@@ -384,6 +384,7 @@ struct ChatView: View {
                 isOnScreen = true
                 displayedResponseState = chatClient.responseState
                 if ScreenshotFixtures.opensActiveContext { showContextStatus = true }
+                if ScreenshotFixtures.opensActiveAgentsPopover { showActiveAgentsPopover = true }
                 #if targetEnvironment(macCatalyst)
                 if (initialSession != nil || chatClient.currentSession != nil), !chatClient.isOfflinePreviewMode {
                     isInputFocused = true

@@ -397,6 +397,14 @@ enum ScreenshotFixtures {
         isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_INBOX")
     }
 
+    static var opensActiveAgentsPopover: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_ACTIVE_AGENTS_POPOVER")
+    }
+
+    static var exportsDesktopSidebarSnapshot: Bool {
+        isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_EXPORT_DESKTOP_SIDEBAR")
+    }
+
     static var opensGlobalFormSheet: Bool {
         isEnabled && ProcessInfo.processInfo.arguments.contains("SCREENSHOT_GLOBAL_FORM_SHEET")
     }

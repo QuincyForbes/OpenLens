@@ -1,6 +1,7 @@
 import AppIntents
 import StoreKit
 import SwiftUI
+import UIKit
 import os
 
 private enum BuiltinChatPreview {
@@ -307,7 +308,9 @@ struct OpenLensApp: App {
         if screenshotModeEnabled,
            ScreenshotFixtures.opensDefaultChatSession
             || ScreenshotFixtures.opensPermissionSheet
-            || ScreenshotFixtures.opensFormSheet {
+            || ScreenshotFixtures.opensFormSheet
+            || ScreenshotFixtures.opensActiveAgentsPopover
+            || ScreenshotFixtures.exportsDesktopSidebarSnapshot {
             initialRouter.selectedTab = .chat
             initialRouter.chatPath = [.chatSession(session: ScreenshotFixtures.defaultSession)]
         }
@@ -466,6 +469,7 @@ struct OpenLensApp: App {
                         .environment(router)
                         .task {
                             openScreenshotPermissionSheetIfNeeded()
+                            await exportDesktopSidebarScreenshotIfNeeded(initialSessions: initialSessions)
                         }
                         .onChange(of: isOpenCodeV2SupportRequested, initial: true) { _, isRequested in
                             guard isRequested else { return }
@@ -730,6 +734,83 @@ struct OpenLensApp: App {
 
         router.selectedTab = .chat
         router.chatPath = [.chatSession(session: ScreenshotFixtures.defaultSession)]
+    }
+
+    @MainActor
+    private func exportDesktopSidebarScreenshotIfNeeded(initialSessions: SessionsListView.InitialState) async {
+        guard screenshotModeEnabled,
+              ScreenshotFixtures.exportsDesktopSidebarSnapshot,
+              let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+
+        let size = CGSize(width: 1240, height: 820)
+        let desktopRouter = AppRouter()
+        desktopRouter.selectedTab = .chat
+        desktopRouter.chatPath = [.chatSession(session: ScreenshotFixtures.defaultSession)]
+
+        let content = ConnectedRootView(
+            chatClient: chatClient,
+            initialSessions: initialSessions
+        )
+        .environment(\.connection, connection)
+        .environment(desktopRouter)
+        .environment(\.horizontalSizeClass, .regular)
+        .environment(\.liveActivity, liveActivity)
+        .environment(\.savedConnections, savedConnectionsStore)
+        .environment(\.sessionsService, sessionsService)
+        .environment(\.messagesService, messagesService)
+        .environment(\.providersService, providersService)
+        .environment(\.questionService, questionService)
+        .environment(\.reviewService, reviewService)
+        .environment(\.inboxService, inboxService)
+        .environment(\.workspaceService, workspaceService)
+        .environment(\.sessionInsightsService, sessionInsightsService)
+        .environment(\.gitHubStarsService, gitHubStarsService)
+        .environment(\.meridianUsageService, meridianUsageService)
+        .environment(\.recordedReplayStore, recordedReplayStore)
+        .environment(\.chatEasterEgg, chatEasterEgg)
+        .openLensTheme(OpenLensAppearance.midnight.theme)
+        .preferredColorScheme(.dark)
+
+        let container = UIViewController()
+        let host = UIHostingController(rootView: content)
+        container.addChild(host)
+        container.setOverrideTraitCollection(
+            UITraitCollection(traitsFrom: [
+                UITraitCollection(horizontalSizeClass: .regular),
+                UITraitCollection(userInterfaceStyle: .dark)
+            ]),
+            forChild: host
+        )
+        container.view.frame = CGRect(origin: .zero, size: size)
+        host.view.frame = container.view.bounds
+        container.view.addSubview(host.view)
+        container.view.layoutIfNeeded()
+
+        if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+            let offscreenWindow = UIWindow(windowScene: scene)
+            offscreenWindow.frame = CGRect(origin: .zero, size: size)
+            offscreenWindow.overrideUserInterfaceStyle = .dark
+            offscreenWindow.rootViewController = container
+            offscreenWindow.isHidden = false
+            container.view.setNeedsLayout()
+            container.view.layoutIfNeeded()
+            try? await Task.sleep(for: .milliseconds(900))
+            container.view.layoutIfNeeded()
+
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 2.0
+            let renderer = UIGraphicsImageRenderer(size: size, format: format)
+            let image = renderer.image { _ in
+                container.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
+            }
+            if let png = image.pngData() {
+                try? png.write(to: docs.appendingPathComponent("sidebar-desktop-layout.png"), options: [.atomic])
+            }
+            offscreenWindow.isHidden = true
+            offscreenWindow.rootViewController = nil
+        }
     }
 
     private var previewPresentationBinding: Binding<Bool> {

@@ -155,18 +155,16 @@ jobs:
             sleep 3
             xcrun simctl io "$SIMULATOR" screenshot "build/screenshots/sessions-$LAYOUT.png"
           done
-          xcrun simctl terminate "$SIMULATOR" "$BUNDLE_ID"
-
-          IPAD_SIM=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["udid"] for runtime, devices in sorted(d["devices"].items(), reverse=True) if ".iOS-26" in runtime for x in devices if "iPad" in x["name"]), ""))')
-          if [ -n "$IPAD_SIM" ]; then
-            xcrun simctl boot "$IPAD_SIM" || true
-            xcrun simctl bootstatus "$IPAD_SIM" -b || true
-            xcrun simctl install "$IPAD_SIM" "$APP_PATH"
-            xcrun simctl launch --terminate-running-process "$IPAD_SIM" "$BUNDLE_ID" SCREENSHOT_MODE SCREENSHOT_SESSION_ORGANIZATION SCREENSHOT_CHAT_SESSION -sessions.layout Focus
-            sleep 4
-            xcrun simctl io "$IPAD_SIM" screenshot "build/screenshots/sidebar-desktop-layout.png"
-            xcrun simctl shutdown "$IPAD_SIM" || true
+          xcrun simctl launch --terminate-running-process "$SIMULATOR" "$BUNDLE_ID" SCREENSHOT_MODE SCREENSHOT_SESSION_ORGANIZATION SCREENSHOT_ACTIVE_AGENTS_POPOVER
+          sleep 3
+          xcrun simctl io "$SIMULATOR" screenshot "build/screenshots/active-agents-popover.png"
+          xcrun simctl launch --terminate-running-process "$SIMULATOR" "$BUNDLE_ID" SCREENSHOT_MODE SCREENSHOT_SESSION_ORGANIZATION SCREENSHOT_EXPORT_DESKTOP_SIDEBAR -sessions.layout Focus
+          sleep 3
+          DATA_DIR=$(xcrun simctl get_app_container "$SIMULATOR" "$BUNDLE_ID" data)
+          if [ -f "$DATA_DIR/Documents/sidebar-desktop-layout.png" ]; then
+            cp "$DATA_DIR/Documents/sidebar-desktop-layout.png" "build/screenshots/sidebar-desktop-layout.png"
           fi
+          xcrun simctl terminate "$SIMULATOR" "$BUNDLE_ID"
 
       - name: Upload session screenshots
         uses: actions/upload-artifact@v4

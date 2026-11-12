@@ -174,7 +174,15 @@ final class SessionsService {
 
     /// Active root sessions (including idle roots that currently have running subagents).
     func activeRootSessions(excluding excludedSessionID: String? = nil) -> [OCSession] {
-        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else { return [] }
+        guard let client = connection.client, liveStateClientID == ObjectIdentifier(client) else {
+            if ScreenshotFixtures.isEnabled {
+                let statuses = ScreenshotFixtures.sessionStatuses
+                return ScreenshotFixtures.sessions.filter { session in
+                    session.id != excludedSessionID && SessionListOrganization.isWorking(statuses[session.id])
+                }
+            }
+            return []
+        }
         let statuses = effectiveStatuses
         let childCounts = activeChildCountsByParentID(statuses: statuses)
         return storedCachedSessions.filter { session in
