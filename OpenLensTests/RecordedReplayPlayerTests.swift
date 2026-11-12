@@ -23,7 +23,14 @@ struct RecordedReplayPlayerTests {
         let client = ChatClient(recordedReplay: replay, playbackMode: .fast)
 
         await client.ensureSession()
-        await waitForMainQueue(milliseconds: 80)
+        for _ in 0..<200 {
+            if !client.isLoading,
+               client.pendingAssistantMessage == nil,
+               client.messages.first?.content == "Hello from replay" {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
 
         #expect(client.currentSession?.title == "Recorded Preview")
         #expect(client.messages.count == 1)
@@ -142,14 +149,5 @@ struct RecordedReplayPlayerTests {
                 "delta": text
             ])
         )
-    }
-
-    @MainActor
-    private func waitForMainQueue(milliseconds: Int) async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(milliseconds)) {
-                continuation.resume()
-            }
-        }
     }
 }
