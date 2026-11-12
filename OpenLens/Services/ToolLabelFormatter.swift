@@ -2,20 +2,32 @@ import Foundation
 
 /// Formats tool names and state into human-readable labels for the activity card
 /// and Live Activity display.
-enum ToolLabelFormatter {
+nonisolated enum ToolLabelFormatter {
 
     private static let maximumInspectedCharacters = 2_048
     private static let maximumPathCharacters = 180
     private static let maximumTitleCharacters = 80
 
-    /// Build a short label describing what the tool is doing (e.g. "Reading main.swift...").
+    /// Build a short label describing what the tool is doing (e.g. "Read main.swift").
     static func label(toolName: String, state: OCToolState) -> String {
+        liveActivityLabel(
+            toolName: toolName,
+            title: state.title,
+            input: state.input?.value as? [String: Any]
+        )
+    }
+
+    /// Thread-safe formatter usable directly from SSE background workers as well as MainActor.
+    static func liveActivityLabel(
+        toolName: String,
+        title: String?,
+        input: [String: Any]?
+    ) -> String {
         // Tool names are ordinarily tiny, but keep the fallback itself bounded
-        // when handling untrusted server payloads on MainActor.
+        // when handling untrusted server payloads.
         let normalizedToolName = String(toolName.prefix(64))
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        let input = state.input?.value as? [String: Any]
 
         switch normalizedToolName {
         case "read":
@@ -44,8 +56,29 @@ enum ToolLabelFormatter {
             if let command = commandPreview(input?["command"] as? String) {
                 return "Bash \(command)"
             }
+        case "shell":
+            if let command = commandPreview(input?["command"] as? String) {
+                return "Shell \(command)"
+            }
+        case "subagent", "task":
+            if let description = boundedPreview(input?["description"] as? String, limit: 56) {
+                return "Subagent · \(description)"
+            }
+            if let agent = boundedPreview(input?["agent"] as? String, limit: 32) {
+                return "Subagent (\(agent))"
+            }
+        case "execute":
+            return "Run code script"
+        case "websearch":
+            if let query = boundedPreview(input?["query"] as? String, limit: 44) {
+                return "Web search \"\(query)\""
+            }
+        case "webfetch":
+            if let url = boundedPreview(input?["url"] as? String, limit: 48) {
+                return "Fetch \(url)"
+            }
         case "question":
-            if let title = boundedPreview(state.title, limit: maximumTitleCharacters) {
+            if let title = boundedPreview(title, limit: maximumTitleCharacters) {
                 return title
             }
             return "Question"
@@ -63,7 +96,7 @@ enum ToolLabelFormatter {
             return "Find \(pattern)"
         }
 
-        if let title = boundedPreview(state.title, limit: maximumTitleCharacters) {
+        if let title = boundedPreview(title, limit: maximumTitleCharacters) {
             return title
         }
         return normalizedToolName

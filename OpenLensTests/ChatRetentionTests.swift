@@ -4,24 +4,26 @@ import Testing
 
 @MainActor
 struct ChatRetentionTests {
-    @Test func switchingSessionsReleasesTranscriptAndRestoresOnlyDrafts() {
-        let chat = makeChat()
+    @Test func switchingSessionsRestoresCachedTranscriptAndEvictsOldestBeyondLRUCap() {
+        let cache = SessionCacheStore(maximumInMemorySessions: 2)
+        let chat = makeChat(cacheStore: cache)
         let first = session("first")
         let second = session("second")
+        let third = session("third")
+        let fourth = session("fourth")
         chat.prepareForOpeningSession(first)
         chat.inputText = "Keep this unsent prompt"
 
         var message: ChatMessage? = ChatMessage(id: "old-reply", role: .assistant, content: "Server history")
-        weak var releasedMessage = message
+        weak var trackedMessage = message
         chat.replaceTranscript(SessionTranscript(
             messages: [message!], contextEntries: [], entryOrder: ["old-reply"], olderCursor: "older-page"
         ))
         message = nil
-        #expect(releasedMessage != nil)
+        #expect(trackedMessage != nil)
         #expect(chat.hasEarlierMessages)
 
         chat.prepareForOpeningSession(second)
-        #expect(releasedMessage == nil)
         #expect(chat.messages.isEmpty)
         #expect(chat.displayedMessages.isEmpty)
         #expect(chat.transcriptEntryOrder.isEmpty)
@@ -29,10 +31,28 @@ struct ChatRetentionTests {
         #expect(!chat.isStreamSynchronized)
         #expect(chat.inputText.isEmpty)
 
+        // Returning to `first` immediately restores its cached transcript and draft on Frame 0,
+        // while still scheduling an authoritative background load.
         chat.prepareForOpeningSession(first)
-        #expect(chat.messages.isEmpty)
+        #expect(chat.messages.map(\.id) == ["old-reply"])
+        #expect(chat.messages.first?.content == "Server history")
+        #expect(chat.hasEarlierMessages)
         #expect(chat.inputText == "Keep this unsent prompt")
         #expect(chat.needsSessionLoad(first))
+
+        // Exceeding the bounded 2-session LRU cap evicts `first` and releases its message objects.
+        chat.prepareForOpeningSession(second)
+        chat.replaceTranscript(SessionTranscript(
+            messages: [ChatMessage(id: "m2", role: .assistant, content: "Two")],
+            contextEntries: [], entryOrder: ["m2"]
+        ))
+        chat.prepareForOpeningSession(third)
+        chat.replaceTranscript(SessionTranscript(
+            messages: [ChatMessage(id: "m3", role: .assistant, content: "Three")],
+            contextEntries: [], entryOrder: ["m3"]
+        ))
+        chat.prepareForOpeningSession(fourth)
+        #expect(trackedMessage == nil)
     }
 
     @Test func returningToCurrentSessionKeepsItsActiveTranscript() {
@@ -141,13 +161,14 @@ struct ChatRetentionTests {
         OCSession(id: id, title: id, time: .init(created: 0, updated: 0))
     }
 
-    private func makeChat() -> ChatClient {
+    private func makeChat(cacheStore: SessionCacheStore? = nil) -> ChatClient {
         let connection = ConnectionManager()
         return ChatClient(
             connection: connection, liveActivity: TestLiveActivityProvider(),
-            sessionsService: SessionsService(connection: connection), messagesService: MessagesService(connection: connection),
+            sessionsService: SessionsService(connection: connection, cacheStore: cacheStore), messagesService: MessagesService(connection: connection),
             providersService: ProvidersService(connection: connection), questionService: QuestionService(connection: connection),
-            savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore()
+            savedConnectionsStore: SavedConnectionsStore(initialConnections: []), recordedReplayStore: RecordedReplayStore(),
+            sessionCacheStore: cacheStore
         )
     }
 }

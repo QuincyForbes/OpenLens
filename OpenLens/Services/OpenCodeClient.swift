@@ -217,6 +217,23 @@ actor OpenCodeClient {
         )
     }
 
+    /// Fetch a single global page of sessions across all directories (v2), newest first.
+    func listAllSessionsPage(cursor: String? = nil, limit: Int = 50) async throws -> OCSessionPage {
+        guard usesV2 else {
+            guard cursor == nil else { return OCSessionPage(sessions: [], nextCursor: nil) }
+            return OCSessionPage(sessions: try await listAllSessions(), nextCursor: nil)
+        }
+        let page: OCV2PageResult<OCSession> = try await getV2Page(
+            endpoint: "/api/session",
+            cursor: cursor,
+            limit: limit,
+            order: "desc",
+            includesLocation: false,
+            queryItems: []
+        )
+        return OCSessionPage(sessions: page.values, nextCursor: page.nextCursor)
+    }
+
     private func listSessions(inDirectory directory: String) async throws -> [OCSession] {
         var request = makeRequest(path: "/session", method: "GET")
         request.setValue(directory, forHTTPHeaderField: "x-opencode-directory")

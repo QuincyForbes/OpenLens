@@ -186,6 +186,7 @@ struct OpenLensApp: App {
     private let gitHubStarsService: GitHubStarsService
     private let meridianUsageService: MeridianUsageService
     private let savedConnectionsStore: SavedConnectionsStore
+    private let sessionCacheStore: SessionCacheStore
     private let recordedReplayStore: RecordedReplayStore
     private let chatEasterEgg: ChatEasterEggController
     private let pendingAppActions: PendingAppActions
@@ -329,7 +330,10 @@ struct OpenLensApp: App {
         let liveActivity = LiveActivityManager()
         ChatNotificationService.shared.configureIfNeeded()
 
-        let sessions = SessionsService(connection: connection)
+        let cacheStore = SessionCacheStore(
+            storageDirectory: SessionCacheStore.defaultProductionDirectory
+        )
+        let sessions = SessionsService(connection: connection, cacheStore: cacheStore)
         let messages = MessagesService(connection: connection)
         let providers = ProvidersService(connection: connection)
         let questions = QuestionService(connection: connection)
@@ -346,6 +350,7 @@ struct OpenLensApp: App {
         AppDependencyManager.shared.add(dependency: pendingAppActions)
 
         self.savedConnectionsStore = savedConnections
+        self.sessionCacheStore = cacheStore
         self.liveActivity = liveActivity
         self.sessionsService = sessions
         self.messagesService = messages
@@ -392,7 +397,8 @@ struct OpenLensApp: App {
                 providersService: providers,
                 questionService: questions,
                 savedConnectionsStore: savedConnections,
-                recordedReplayStore: recordedReplayStore
+                recordedReplayStore: recordedReplayStore,
+                sessionCacheStore: cacheStore
             ))
         }
 
@@ -632,6 +638,14 @@ struct OpenLensApp: App {
         case .connected:
             guard case .idle = initialSessionsReadiness.state else { return }
             let generation = initialSessionsReadiness.beginLoading()
+
+            if let cached = sessionsService.hydrateFromLocalCache(), !cached.isEmpty {
+                initialSessionsReadiness.succeed(with: cached, generation: generation)
+                Task {
+                    _ = try? await sessionsService.listAllSessions(incremental: true)
+                }
+                return
+            }
 
             do {
                 let sessions = try await sessionsService.listAllSessions()

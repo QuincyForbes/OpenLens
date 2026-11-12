@@ -154,8 +154,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     private(set) var displayedEntryOrder: [String] = []
     private var olderTranscriptCursor: String?
     private var isLoadingEarlierHistory = false
-    // Only the active session owns a transcript. Reopening another session
-    // fetches its recent page from the server instead of retaining old chats.
+    @ObservationIgnored let sessionCacheStore: SessionCacheStore
     @ObservationIgnored private var cachedTurnDiffSummariesByMessageID: [String: [TurnFileChangeSummary]] = [:]
     private var activeContextSessionGeneration: UInt = 0
     private var activeContextTranscriptRevision: UInt = 0
@@ -253,6 +252,10 @@ final class ChatClient: SSEEventHandlerDelegate {
            busyMs > 0,
            (session.time.idle ?? 0) < busyMs {
             return Date(timeIntervalSince1970: busyMs / 1_000)
+        }
+        if let sessionID = currentSession?.id,
+           let liveStart = sessionsService?.liveActivity(for: sessionID)?.startedAt {
+            return liveStart
         }
         return responseStartDate
     }
@@ -1127,7 +1130,15 @@ final class ChatClient: SSEEventHandlerDelegate {
         if hasDisplayedMessages != nonEmpty {
             hasDisplayedMessages = nonEmpty
         }
-        let watchers = Self.extractActiveBackgroundWatchers(from: messages, pending: pendingAssistantMessage)
+        let sessionIdleDate = currentSession?.time.idle.flatMap { idleMs in
+            idleMs.isFinite && idleMs > 0 ? Date(timeIntervalSince1970: idleMs / 1_000) : nil
+        }
+        let watchers = Self.extractActiveBackgroundWatchers(
+            from: messages,
+            pending: pendingAssistantMessage,
+            activeStatuses: sessionsService?.effectiveStatuses,
+            sessionIdleDate: sessionIdleDate
+        )
         if activeBackgroundWatchers != watchers {
             activeBackgroundWatchers = watchers
         }
@@ -1137,7 +1148,9 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     static func extractActiveBackgroundWatchers(
         from messages: [ChatMessage],
-        pending: ChatMessage?
+        pending: ChatMessage?,
+        activeStatuses: [String: OCSessionStatus]? = nil,
+        sessionIdleDate: Date? = nil
     ) -> [BackgroundWatcherItem] {
         var allMessages = messages
         if let pending, !allMessages.contains(where: { $0.id == pending.id }) {
@@ -1145,20 +1158,24 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
 
         // First collect lightweight candidate shell launches and active subagents
-        // from bounded segment metadata. In 99.9% of turns no background shell was
-        // launched, so we avoid scanning full message bodies altogether.
+        // from bounded segment metadata. Only inspect the latest assistant turn
+        // for background shells so older historical turns cannot keep a session
+        // permanently marked as active.
         enum Candidate {
             case shell(id: String, title: String)
             case subagent(BackgroundWatcherItem)
         }
         var candidates: [Candidate] = []
         var hasCandidateShell = false
+        let lastAssistantID = allMessages.last(where: { $0.role == .assistant })?.id
 
         for message in allMessages where message.role == .assistant {
+            let isLatestAssistantTurn = message.id == lastAssistantID
             for segment in message.assistantSegments {
                 switch segment.kind {
                 case .tool(let step):
-                    if let output = step.outputPreview,
+                    if isLatestAssistantTurn,
+                       let output = step.outputPreview,
                        let shellID = extractBackgroundShellID(from: output) {
                         let cleanedTitle = step.label.trimmingCharacters(in: .whitespacesAndNewlines)
                         candidates.append(
@@ -1171,6 +1188,16 @@ final class ChatClient: SSEEventHandlerDelegate {
                     }
                 case .subagent(let step):
                     if step.isActive, !message.isStreaming {
+                        // If the parent turn already settled to idle and we have an authoritative
+                        // status map showing the child session is no longer working, ignore stale
+                        // historical `.running` tool parts from interrupted runs.
+                        if let childID = step.childSessionID,
+                           let activeStatuses,
+                           let sessionIdleDate,
+                           message.createdAt <= sessionIdleDate.addingTimeInterval(2),
+                           !SessionListOrganization.isWorking(activeStatuses[childID]) {
+                            continue
+                        }
                         candidates.append(
                             .subagent(
                                 BackgroundWatcherItem(
@@ -1277,7 +1304,15 @@ final class ChatClient: SSEEventHandlerDelegate {
         let wasWorking = oldState == .generating
         guard wasWorking, newState == .idle, let sessionID = currentSession?.id else { return }
 
-        let watchers = Self.extractActiveBackgroundWatchers(from: messages, pending: pendingAssistantMessage)
+        let sessionIdleDate = currentSession?.time.idle.flatMap { idleMs in
+            idleMs.isFinite && idleMs > 0 ? Date(timeIntervalSince1970: idleMs / 1_000) : nil
+        }
+        let watchers = Self.extractActiveBackgroundWatchers(
+            from: messages,
+            pending: pendingAssistantMessage,
+            activeStatuses: sessionsService?.effectiveStatuses,
+            sessionIdleDate: sessionIdleDate
+        )
         if activeBackgroundWatchers != watchers {
             activeBackgroundWatchers = watchers
         }
@@ -1879,7 +1914,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         providersService: ProvidersService,
         questionService: QuestionService,
         savedConnectionsStore: SavedConnectionsStore,
-        recordedReplayStore: RecordedReplayStore
+        recordedReplayStore: RecordedReplayStore,
+        sessionCacheStore: SessionCacheStore? = nil
     ) {
         self.isDemoMode = false
         self.recordedReplay = nil
@@ -1892,6 +1928,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         self.questionService = questionService
         self.savedConnectionsStore = savedConnectionsStore
         self.recordedReplayStore = recordedReplayStore
+        self.sessionCacheStore = sessionCacheStore ?? SessionCacheStore()
 
         let haptics = HapticController()
         let tracker = LiveActivityTracker(
@@ -1980,6 +2017,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         self.questionService = nil
         self.savedConnectionsStore = nil
         self.recordedReplayStore = nil
+        self.sessionCacheStore = SessionCacheStore()
         self.liveActivityTracker = nil
         self.sseHandler = nil
         self.recordedReplayPlayer = nil
@@ -2003,6 +2041,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         self.questionService = nil
         self.savedConnectionsStore = nil
         self.recordedReplayStore = nil
+        self.sessionCacheStore = SessionCacheStore()
 
         let haptics = HapticController()
         let tracker = LiveActivityTracker(liveActivity: NoopLiveActivityProvider())
@@ -2096,26 +2135,63 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
     }
 
+    private var serverCacheScope: String? {
+        connection?.serverURL?.absoluteString
+    }
+
+    func saveCurrentTranscriptToCache() {
+        guard !isOfflinePreviewMode,
+              !isDemoMode,
+              !isRecordedReplayMode,
+              let session = currentSession else {
+            return
+        }
+        var snapshotMessages = messages
+        if let pending = pendingAssistantMessage,
+           !snapshotMessages.contains(where: { $0.id == pending.id }) {
+            snapshotMessages.append(pending)
+        }
+        var snapshotOrder = transcriptEntryOrder
+        if let pending = pendingAssistantMessage, !snapshotOrder.contains(pending.id) {
+            snapshotOrder.append(pending.id)
+        }
+        sessionCacheStore.saveTranscript(
+            serverScope: serverCacheScope,
+            session: session,
+            messages: snapshotMessages,
+            contextEntries: contextEntries,
+            entryOrder: snapshotOrder,
+            olderCursor: olderTranscriptCursor,
+            todos: todos,
+            hiddenTodoCount: hiddenTodoCount,
+            turnDiffSummaries: cachedTurnDiffSummariesByMessageID
+        )
+    }
+
     /// Prepares `ChatClient` synchronously before `NavigationStack` pushes `ChatView`
-    /// so Frame 0 already has `session` installed with an empty transcript instead
-    /// of flashing the previous session's messages on the first frame.
+    /// so Frame 0 already has `session` installed — restoring any cached transcript
+    /// and live working status in 0ms while authoritative sync runs in the background.
     func prepareForOpeningSession(_ session: OCSession) {
         resetCachesForConnectionIfNeeded()
         guard !isDemoMode, !isRecordedReplayMode, currentSession?.id != session.id else { return }
-        if (isLoading || !activeBackgroundWatchers.isEmpty), let previous = currentSession {
-            sessionsService?.promoteToBackgroundRunning(sessionID: previous.id, sessionSnapshot: previous)
+
+        let outgoingSession = currentSession
+        let outgoingWasWorking = isLoading || !activeBackgroundWatchers.isEmpty
+        if outgoingSession != nil {
+            saveCurrentTranscriptToCache()
         }
-        if isLoading, currentSession?.id != nil {
+        if isLoading, outgoingSession?.id != nil {
             liveActivityTracker?.dismiss()
         }
+
         // A half-typed prompt belongs to the session it was typed in. Park it
         // and bring back whatever was drafted for the session being opened.
-        if let previousID = currentSession?.id {
+        if let previousID = outgoingSession?.id {
             let draft = SessionComposerDraft(
                 text: ComposerPasteExtractor.sanitizedInput(inputText),
                 pastedSnippets: composerPastedSnippets,
                 attachments: composerAttachments,
-                directory: WorkspaceSelectionBuilder.normalizedDirectory(currentSession?.directory)
+                directory: WorkspaceSelectionBuilder.normalizedDirectory(outgoingSession?.directory)
             )
             composerDraftOrder.removeAll { $0 == previousID }
             if draft.isEmpty {
@@ -2131,7 +2207,19 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         composerPastedSnippets = []
         composerAttachments = []
+
+        // Detach `currentSession` BEFORE `resetSessionState()` so clearing `isLoading`
+        // and `messages` does not emit stale `setClientObservedActive` transitions for
+        // the outgoing session.
+        currentSession = nil
         resetSessionState()
+        if outgoingWasWorking, let outgoingSession {
+            sessionsService?.promoteToBackgroundRunning(
+                sessionID: outgoingSession.id,
+                sessionSnapshot: outgoingSession
+            )
+        }
+
         isStreamSynchronized = false
         currentSession = session
         composerDraftOrder.removeAll { $0 == session.id }
@@ -2151,6 +2239,39 @@ final class ChatClient: SSEEventHandlerDelegate {
             inputText = ""
             composerPastedSnippets = []
         }
+
+        // Restore cached transcript & todos immediately on Frame 0.
+        if let cached = sessionCacheStore.transcript(serverScope: serverCacheScope, sessionID: session.id) {
+            cachedTurnDiffSummariesByMessageID = cached.turnDiffSummariesByMessageID
+            preserveTurnFileChanges(in: cached.messages)
+            todos = cached.todos
+            hiddenTodoCount = cached.hiddenTodoCount
+            replaceTranscript(
+                SessionTranscript(
+                    messages: cached.messages,
+                    contextEntries: cached.contextEntries,
+                    entryOrder: cached.entryOrder,
+                    olderCursor: cached.olderCursor
+                )
+            )
+        }
+
+        // If `SessionsService` already knows this session is working right now,
+        // reflect its live generating state and current tool/step immediately.
+        if let knownStatus = sessionsService?.effectiveStatuses[session.id],
+           SessionListOrganization.isWorking(knownStatus) {
+            sessionStatus = knownStatus
+            responseState = .generating
+            isLoading = true
+            let liveSnapshot = sessionsService?.liveActivity(for: session.id)
+            responseStartDate = liveSnapshot?.startedAt ?? Date()
+            let activity = AgentActivity()
+            activity.currentLabel = liveSnapshot?.statusLabel
+                ?? (knownStatus.type == .retry ? "Retrying…" : "Thinking...")
+            currentActivity = activity
+            reattachInFlightAssistantMessageIfNeeded()
+        }
+
         preparedSessionID = session.id
     }
 
@@ -2166,6 +2287,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         composerDraftsBySessionID.removeAll()
         deferredPermissionIDs.removeAll()
         deferredFormIDs.removeAll()
+        sessionCacheStore.clearMemoryCache()
         resetSessionState()
         currentSession = nil
         inputText = ""
@@ -2532,6 +2654,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 entryOrder: visibleOrder,
                 olderCursor: transcript.olderCursor
             ))
+            saveCurrentTranscriptToCache()
             projectSessionInbox()
             // v2 sessions carry their canonical selection; transcript history
             // and saved defaults must not override it.
@@ -2572,10 +2695,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     func unloadSession(ifMatching sessionID: String) {
         composerDraftsBySessionID.removeValue(forKey: sessionID)
         composerDraftOrder.removeAll { $0 == sessionID }
+        sessionCacheStore.removeSession(serverScope: serverCacheScope, sessionID: sessionID)
         guard currentSession?.id == sessionID else { return }
         sessionLoadToken = nil
-        resetSessionState()
         currentSession = nil
+        resetSessionState()
         inputText = ""
         composerPastedSnippets = []
         composerAttachments = []
@@ -5426,11 +5550,12 @@ final class ChatClient: SSEEventHandlerDelegate {
                         childSessionID: childID,
                         title: resolvedTitle,
                         agentName: step.agentName ?? childSession?.agent,
-                        detail: step.detail.nilIfBlank,
+                        detail: (isRunning ? childID.flatMap { sessionsService?.liveActivity(for: $0)?.statusLabel } : nil)
+                            ?? step.detail.nilIfBlank,
                         isRunning: isRunning,
                         stateLabel: stateLabel,
                         isError: !isRunning && step.isError,
-                        startedAt: childSession.flatMap(ElapsedDurationFormatter.activeStartDate(for:)) ?? message.createdAt
+                        startedAt: childSession.flatMap { sessionsService?.activeStartDate(for: $0) ?? ElapsedDurationFormatter.activeStartDate(for: $0) } ?? message.createdAt
                     )
                 )
             }
@@ -5455,11 +5580,13 @@ final class ChatClient: SSEEventHandlerDelegate {
                     childSessionID: childID,
                     title: childSession?.title.nilIfBlank ?? existing?.title ?? entry.summary.nilIfBlank ?? result.agent ?? "Subagent",
                     agentName: result.agent ?? existing?.agentName ?? childSession?.agent,
-                    detail: existing?.detail ?? entry.resultPreview.nilIfBlank,
+                    detail: (isRunning ? sessionsService?.liveActivity(for: childID)?.statusLabel : nil)
+                        ?? existing?.detail
+                        ?? entry.resultPreview.nilIfBlank,
                     isRunning: isRunning,
                     stateLabel: stateLabel,
                     isError: !isRunning && result.state == .error,
-                    startedAt: childSession.flatMap(ElapsedDurationFormatter.activeStartDate(for:)) ?? existing?.startedAt
+                    startedAt: childSession.flatMap { sessionsService?.activeStartDate(for: $0) ?? ElapsedDurationFormatter.activeStartDate(for: $0) } ?? existing?.startedAt
                 )
             )
         }
@@ -5481,11 +5608,11 @@ final class ChatClient: SSEEventHandlerDelegate {
                     childSessionID: child.id,
                     title: child.title.nilIfBlank ?? child.agent ?? "Subagent",
                     agentName: child.agent,
-                    detail: nil,
+                    detail: isRunning ? sessionsService?.liveActivity(for: child.id)?.statusLabel : nil,
                     isRunning: isRunning,
                     stateLabel: stateLabel,
                     isError: !isRunning && outcome == .failed,
-                    startedAt: ElapsedDurationFormatter.activeStartDate(for: child)
+                    startedAt: sessionsService?.activeStartDate(for: child) ?? ElapsedDurationFormatter.activeStartDate(for: child)
                 )
             )
         }
@@ -6898,6 +7025,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             promoteNextQueuedPrompt()
         }
 
+        saveCurrentTranscriptToCache()
         contentVersion &+= 1
     }
 }

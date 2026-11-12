@@ -434,7 +434,7 @@ nonisolated struct OCMessage: Codable, Identifiable, Sendable {
     }
 }
 
- enum OCMessageRole: String, Codable, Sendable {
+nonisolated enum OCMessageRole: String, Codable, Sendable {
     case user
     case assistant
 }

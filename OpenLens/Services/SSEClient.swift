@@ -5,11 +5,72 @@ func isTerminalSSEHTTPStatus(_ statusCode: Int) -> Bool {
     statusCode == 401 || statusCode == 403
 }
 
+nonisolated enum SessionLiveActivityPhase: Sendable, Equatable {
+    case thinking(preview: String? = nil)
+    case tool(name: String, label: String)
+    case writing(preview: String? = nil)
+    case waitingForUser(label: String)
+    case retrying(message: String? = nil)
+
+    var iconName: String {
+        switch self {
+        case .thinking:
+            return "brain"
+        case let .tool(name, _):
+            switch name.lowercased() {
+            case "bash", "shell", "execute":
+                return "terminal"
+            case "read", "glob", "grep":
+                return "doc.text.magnifyingglass"
+            case "edit", "write":
+                return "pencil.line"
+            case "subagent", "task":
+                return "person.2.wave.2"
+            case "websearch", "webfetch":
+                return "globe"
+            default:
+                return "wrench.and.screwdriver"
+            }
+        case .writing:
+            return "sparkles"
+        case .waitingForUser:
+            return "hand.raised.fill"
+        case .retrying:
+            return "arrow.clockwise"
+        }
+    }
+
+    var primaryLabel: String {
+        switch self {
+        case let .thinking(preview):
+            if let preview, !preview.isEmpty {
+                return "Thinking · \(preview)"
+            }
+            return "Thinking…"
+        case let .tool(_, label):
+            return label
+        case let .writing(preview):
+            if let preview, !preview.isEmpty {
+                return preview
+            }
+            return "Writing response…"
+        case let .waitingForUser(label):
+            return label
+        case let .retrying(message):
+            if let message, !message.isEmpty {
+                return "Retrying · \(message)"
+            }
+            return "Retrying…"
+        }
+    }
+}
+
 /// Metadata from `message.updated` decoded before it reaches MainActor. These
 /// updates are usually small, but OpenCode is free to attach a large summary
 /// or model payload, so their JSON work belongs with the SSE reducer too.
 nonisolated enum GlobalSessionActivityEvent: Sendable, Equatable {
-    case busy(sessionID: String, isRetry: Bool)
+    case busy(sessionID: String, isRetry: Bool, message: String? = nil)
+    case progress(sessionID: String, phase: SessionLiveActivityPhase, incrementsStep: Bool = false)
     case ended(sessionID: String)
     case updated(sessionID: String)
     case deleted(sessionID: String)
@@ -821,6 +882,9 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
     private var protocolVersion: OpenCodeProtocol
     private var contextDirectory: String?
     private var v2EventAdapter = V2EventAdapter()
+    private var globalToolNamesByKey: [String: String] = [:]
+    private var lastGlobalProgressUptimeBySessionID: [String: TimeInterval] = [:]
+    private static let globalProgressThrottleInterval: TimeInterval = 0.25
     private var shouldReconnect = true
     private var reconnectDelay: TimeInterval = 2.0
     /// System uptime of the last `onLiveness` delivery; nil forces the next
@@ -1176,6 +1240,8 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         pendingPartUpdateWorkItem = nil
         pendingPartUpdate = nil
         textSnapshotCache.removeAll()
+        globalToolNamesByKey.removeAll()
+        lastGlobalProgressUptimeBySessionID.removeAll()
         isTransportPausedForMainBackpressure = false
         transportTaskSuspendedByBackpressure = false
         bufferedDrainScheduled = false
@@ -2520,12 +2586,10 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
             if let envelope = value as? [String: Any],
                let rawType = envelope["type"] as? String,
                envelope["data"] != nil {
-                if let activity = Self.extractGlobalSessionActivity(
+                recordAndEmitGlobalSessionActivity(
                     type: rawType,
                     payload: envelope["data"] as? [String: Any]
-                ) {
-                    emitGlobalSessionActivity(activity)
-                }
+                )
                 return try v2EventAdapter.event(envelope, directory: contextDirectory)
             }
             if let eventName, !eventName.isEmpty, var payload = value as? [String: Any] {
@@ -2535,23 +2599,56 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
                    let nestedPayload = try? JSONSerialization.jsonObject(with: nestedData) as? [String: Any] {
                     payload = nestedPayload
                 }
-                if let activity = Self.extractGlobalSessionActivity(type: eventName, payload: payload) {
-                    emitGlobalSessionActivity(activity)
-                }
+                recordAndEmitGlobalSessionActivity(type: eventName, payload: payload)
                 return OCEvent(type: eventName, properties: AnyCodable(payload))
             }
         }
         if let legacyEvent = try? JSONDecoder().decode(OCEvent.self, from: data) {
-            if let activity = Self.extractGlobalSessionActivity(
+            recordAndEmitGlobalSessionActivity(
                 type: legacyEvent.type,
                 payload: legacyEvent.properties?.value as? [String: Any]
-            ) {
-                emitGlobalSessionActivity(activity)
-            }
+            )
             return legacyEvent
         }
 
         throw OpenCodeError.invalidPayload("Unsupported SSE event payload.")
+    }
+
+    private func recordAndEmitGlobalSessionActivity(
+        type: String,
+        payload: [String: Any]?
+    ) {
+        guard onGlobalSessionActivity != nil else { return }
+        guard let extracted = extractGlobalSessionActivity(type: type, payload: payload) else { return }
+
+        if extracted.isDeltaProgress {
+            let sessionID: String? = switch extracted.event {
+            case let .progress(id, _, _): id
+            default: nil
+            }
+            if let sessionID {
+                let now = ProcessInfo.processInfo.systemUptime
+                if let last = lastGlobalProgressUptimeBySessionID[sessionID],
+                   now - last < Self.globalProgressThrottleInterval {
+                    return
+                }
+                if lastGlobalProgressUptimeBySessionID.count >= 128,
+                   lastGlobalProgressUptimeBySessionID[sessionID] == nil {
+                    lastGlobalProgressUptimeBySessionID.removeAll(keepingCapacity: true)
+                }
+                lastGlobalProgressUptimeBySessionID[sessionID] = now
+            }
+        } else if case let .ended(sessionID) = extracted.event {
+            lastGlobalProgressUptimeBySessionID.removeValue(forKey: sessionID)
+            let prefix = "\(sessionID)/"
+            globalToolNamesByKey = globalToolNamesByKey.filter { !$0.key.hasPrefix(prefix) }
+        } else if case let .deleted(sessionID) = extracted.event {
+            lastGlobalProgressUptimeBySessionID.removeValue(forKey: sessionID)
+            let prefix = "\(sessionID)/"
+            globalToolNamesByKey = globalToolNamesByKey.filter { !$0.key.hasPrefix(prefix) }
+        }
+
+        emitGlobalSessionActivity(extracted.event)
     }
 
     private func emitGlobalSessionActivity(_ activity: GlobalSessionActivityEvent) {
@@ -2561,18 +2658,33 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
         }
     }
 
-    private static func extractGlobalSessionActivity(
+    private func extractGlobalSessionActivity(
         type: String,
         payload: [String: Any]?
-    ) -> GlobalSessionActivityEvent? {
+    ) -> (event: GlobalSessionActivityEvent, isDeltaProgress: Bool)? {
         let sessionID: String? = {
             if let direct = payload?["sessionID"] as? String, StreamDisplayValue.fitsIdentifier(direct) {
                 return direct
             }
-            if let info = payload?["info"] as? [String: Any],
-               let nested = info["id"] as? String,
-               StreamDisplayValue.fitsIdentifier(nested) {
-                return nested
+            if let part = payload?["part"] as? [String: Any],
+               let partSession = part["sessionID"] as? String,
+               StreamDisplayValue.fitsIdentifier(partSession) {
+                return partSession
+            }
+            if let form = payload?["form"] as? [String: Any],
+               let formSession = form["sessionID"] as? String,
+               StreamDisplayValue.fitsIdentifier(formSession) {
+                return formSession
+            }
+            if let info = payload?["info"] as? [String: Any] {
+                if let nestedSession = info["sessionID"] as? String,
+                   StreamDisplayValue.fitsIdentifier(nestedSession) {
+                    return nestedSession
+                }
+                if let nested = info["id"] as? String,
+                   StreamDisplayValue.fitsIdentifier(nested) {
+                    return nested
+                }
             }
             if let directID = payload?["id"] as? String,
                type.hasPrefix("session."),
@@ -2581,40 +2693,147 @@ final class SSEClient: NSObject, URLSessionDataDelegate {
             }
             return nil
         }()
-        guard let sessionID else { return nil }
+        guard let sessionID, sessionID != "global" else { return nil }
 
         switch type {
         case "session.execution.started":
-            return .busy(sessionID: sessionID, isRetry: false)
+            return (.busy(sessionID: sessionID, isRetry: false, message: nil), false)
         case "session.status":
-            let statusType = ((payload?["status"] as? [String: Any])?["type"] as? String)?.lowercased()
+            let statusDict = payload?["status"] as? [String: Any]
+            let statusType = (statusDict?["type"] as? String)?.lowercased()
                 ?? (payload?["type"] as? String)?.lowercased()
+            let message = Self.singleLinePreview(statusDict?["message"] as? String ?? payload?["message"] as? String, maxBytes: 80)
             switch statusType {
             case "busy":
-                return .busy(sessionID: sessionID, isRetry: false)
+                return (.busy(sessionID: sessionID, isRetry: false, message: nil), false)
             case "retry":
-                return .busy(sessionID: sessionID, isRetry: true)
+                return (.busy(sessionID: sessionID, isRetry: true, message: message), false)
             case "idle":
-                return .ended(sessionID: sessionID)
+                return (.ended(sessionID: sessionID), false)
             default:
                 return nil
             }
+        case "session.step.started":
+            return (.progress(sessionID: sessionID, phase: .thinking(), incrementsStep: false), false)
+        case "session.reasoning.started", "session.reasoning.delta":
+            let preview = Self.singleLinePreview(
+                (payload?["delta"] as? String) ?? (payload?["text"] as? String),
+                maxBytes: 72
+            )
+            return (
+                .progress(sessionID: sessionID, phase: .thinking(preview: preview), incrementsStep: false),
+                type.hasSuffix(".delta")
+            )
+        case "session.tool.input.started":
+            guard let rawName = payload?["name"] as? String else { return nil }
+            let toolID = payload?["id"] as? String
+            if let toolID, StreamDisplayValue.fitsIdentifier(toolID) {
+                if globalToolNamesByKey.count >= 256 {
+                    globalToolNamesByKey.removeAll(keepingCapacity: true)
+                }
+                globalToolNamesByKey["\(sessionID)/\(toolID)"] = rawName
+            }
+            let label = ToolLabelFormatter.liveActivityLabel(
+                toolName: rawName,
+                title: payload?["title"] as? String,
+                input: nil
+            )
+            return (.progress(sessionID: sessionID, phase: .tool(name: rawName, label: label), incrementsStep: false), false)
+        case "session.tool.called", "session.tool.progress":
+            let toolID = payload?["id"] as? String
+            let cachedName = toolID.flatMap { globalToolNamesByKey["\(sessionID)/\($0)"] }
+            let rawName = (payload?["name"] as? String) ?? cachedName ?? "tool"
+            let label = ToolLabelFormatter.liveActivityLabel(
+                toolName: rawName,
+                title: payload?["title"] as? String,
+                input: payload?["input"] as? [String: Any]
+            )
+            return (
+                .progress(
+                    sessionID: sessionID,
+                    phase: .tool(name: rawName, label: label),
+                    incrementsStep: type == "session.tool.called"
+                ),
+                type == "session.tool.progress"
+            )
+        case "session.text.started", "session.text.delta":
+            let preview = Self.singleLinePreview(
+                (payload?["delta"] as? String) ?? (payload?["text"] as? String),
+                maxBytes: 84
+            )
+            return (
+                .progress(sessionID: sessionID, phase: .writing(preview: preview), incrementsStep: false),
+                type.hasSuffix(".delta")
+            )
+        case "permission.asked", "permission.v2.asked":
+            return (.progress(sessionID: sessionID, phase: .waitingForUser(label: "Waiting for permission"), incrementsStep: false), false)
+        case "question.asked":
+            return (.progress(sessionID: sessionID, phase: .waitingForUser(label: "Waiting for your answer"), incrementsStep: false), false)
+        case "form.created", "form.asked":
+            return (.progress(sessionID: sessionID, phase: .waitingForUser(label: "Waiting for form response"), incrementsStep: false), false)
+        case "message.part.updated":
+            guard let part = payload?["part"] as? [String: Any],
+                  let partType = part["type"] as? String else { return nil }
+            switch partType {
+            case "tool":
+                let state = part["state"] as? [String: Any]
+                let status = (state?["status"] as? String)?.lowercased()
+                guard status == "running" || status == "pending" else { return nil }
+                let toolName = (part["tool"] as? String) ?? "tool"
+                let label = ToolLabelFormatter.liveActivityLabel(
+                    toolName: toolName,
+                    title: state?["title"] as? String,
+                    input: state?["input"] as? [String: Any]
+                )
+                return (
+                    .progress(
+                        sessionID: sessionID,
+                        phase: .tool(name: toolName, label: label),
+                        incrementsStep: status == "running"
+                    ),
+                    false
+                )
+            case "reasoning":
+                let preview = Self.singleLinePreview(part["text"] as? String, maxBytes: 72)
+                return (.progress(sessionID: sessionID, phase: .thinking(preview: preview), incrementsStep: false), true)
+            case "text":
+                let preview = Self.singleLinePreview(part["text"] as? String, maxBytes: 84)
+                return (.progress(sessionID: sessionID, phase: .writing(preview: preview), incrementsStep: false), true)
+            default:
+                return nil
+            }
+        case "message.part.delta":
+            let preview = Self.singleLinePreview(payload?["delta"] as? String, maxBytes: 84)
+            return (.progress(sessionID: sessionID, phase: .writing(preview: preview), incrementsStep: false), true)
         case "session.idle",
              "session.execution.succeeded",
              "session.execution.failed",
              "session.execution.interrupted":
-            return .ended(sessionID: sessionID)
+            return (.ended(sessionID: sessionID), false)
         case "session.created",
              "session.renamed",
              "session.updated",
              "session.moved",
              "session.viewed":
-            return .updated(sessionID: sessionID)
+            return (.updated(sessionID: sessionID), false)
         case "session.deleted":
-            return .deleted(sessionID: sessionID)
+            return (.deleted(sessionID: sessionID), false)
         default:
             return nil
         }
+    }
+
+    private static func singleLinePreview(_ raw: String?, maxBytes: Int) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let bounded: String = StreamDisplayValue.preview(raw, maximumBytes: maxBytes * 2)
+        let cleaned = bounded
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        let finalPreview: String = StreamDisplayValue.preview(cleaned, maximumBytes: maxBytes)
+        return finalPreview.isEmpty ? nil : finalPreview
     }
 
     private func extractEventField(from line: String) -> String? {

@@ -2395,11 +2395,14 @@ enum ChatTimeline {
         entryOrder: [String] = []
     ) -> [ChatTimelineItem] {
         var animatedSubagentKeys = Set<String>()
-        for message in messages.reversed() where animatedSubagentKeys.count < 8 {
+        for message in messages.reversed() {
             for segment in message.assistantSegments.reversed() where animatedSubagentKeys.count < 8 {
                 if case .subagent(let step) = segment.kind, step.isActive {
                     animatedSubagentKeys.insert("\(message.id)::\(segment.id)")
                 }
+            }
+            if !animatedSubagentKeys.isEmpty {
+                break
             }
         }
 

@@ -523,6 +523,29 @@ enum ScreenshotFixtures {
     ]
     }
 
+    static var liveActivities: [String: SessionLiveActivitySnapshot] {
+        if outcomeRefreshHasCompleted { return [:] }
+        let start = Date().addingTimeInterval(-42)
+        if showsExecutionOutcomes {
+            return [
+                "session-screenshot-2": SessionLiveActivitySnapshot(
+                    phase: .tool(name: "edit", label: "Edit SessionsService.swift"),
+                    stepCount: 4,
+                    startedAt: start,
+                    lastUpdatedAt: Date()
+                )
+            ]
+        }
+        return [
+            "session-screenshot-1": SessionLiveActivitySnapshot(
+                phase: .tool(name: "edit", label: "Edit ConnectedRootView.swift"),
+                stepCount: 3,
+                startedAt: start,
+                lastUpdatedAt: Date()
+            )
+        ]
+    }
+
     static let savedConnection: SavedConnection = {
         var connection = SavedConnection(
             id: "saved-screenshot-connection",

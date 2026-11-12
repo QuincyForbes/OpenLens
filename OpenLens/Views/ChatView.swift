@@ -40,6 +40,7 @@ struct ChatView: View {
     @State private var renameSessionDraft = ""
     @State private var showTodoList = false
     @State private var showSubagentThreadsSheet = false
+    @State private var showActiveAgentsPopover = false
     @State private var availableSlashActions: [WorkspaceSlashActionItem] = []
     @State private var selectedSlashAction: WorkspaceSlashActionItem?
     @State private var attachedSkills: [WorkspaceSkillItem] = []
@@ -336,6 +337,9 @@ struct ChatView: View {
                     onShowSubagents: !subagents.isEmpty ? {
                         showSubagentThreadsSheet = true
                     } : nil,
+                    onShowActiveAgents: !chatClient.isOfflinePreviewMode ? {
+                        showActiveAgentsPopover = true
+                    } : nil,
                     onStopAllInChat: (!chatClient.isOfflinePreviewMode && (chatClient.isLoading || runningSubagents > 0)) ? {
                         Task { await chatClient.stopAllCurrentSessionAgents() }
                     } : nil,
@@ -348,7 +352,28 @@ struct ChatView: View {
                         ? 0
                         : sessionsService.activeSessionCount(excluding: headerSession?.id),
                     subagentCount: subagents.count,
-                    runningSubagentCount: runningSubagents
+                    runningSubagentCount: runningSubagents,
+                    activeAgentsPopover: !chatClient.isOfflinePreviewMode ? AnyView(
+                        ActiveAgentsPopoverView(
+                            currentSession: headerSession,
+                            isCurrentSessionGenerating: chatClient.isLoading,
+                            currentActivityLabel: chatClient.currentActivity?.currentLabel,
+                            currentTurnStartDate: chatClient.activeTurnStartDate,
+                            currentSubagents: subagents,
+                            currentShellWatchers: chatClient.activeBackgroundWatchers.filter { $0.kind == .shell },
+                            onSelectSession: { target in
+                                chatClient.prepareForOpeningSession(target)
+                                router?.selectChatSession(target)
+                            },
+                            onSelectSessionID: { targetID in
+                                openSessionByID(targetID)
+                            },
+                            onStopCurrentSession: {
+                                Task { await chatClient.stopAllCurrentSessionAgents() }
+                            }
+                        )
+                    ) : nil,
+                    isShowingActiveAgentsPopover: $showActiveAgentsPopover
                 )
             }
     }

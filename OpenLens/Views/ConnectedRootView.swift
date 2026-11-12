@@ -319,8 +319,13 @@ private struct ConnectedSidebarLayout: View {
             ConnectedSidebarNavigation(
                 selectedTab: router.selectedTab,
                 badgeCounts: [.review: inboxPendingCount],
+                onNewSession: { router.requestNewSession() },
                 onToggleSidebar: toggleSidebar,
-                onSelect: { router.selectedTab = $0 }
+                onSelect: { tab in
+                    withAnimation(.snappy(duration: 0.2)) {
+                        router.selectedTab = tab
+                    }
+                }
             )
 
             Rectangle()
@@ -430,24 +435,64 @@ private struct CollapsedSidebarToolbarButton: ViewModifier {
 private struct ConnectedSidebarNavigation: View {
     let selectedTab: AppTab
     var badgeCounts: [AppTab: Int] = [:]
+    var onNewSession: (() -> Void)? = nil
     var onToggleSidebar: (() -> Void)? = nil
     let onSelect: (AppTab) -> Void
 
+    @Environment(\.connection) private var connection
+
+    private var connectionStatusColor: Color {
+        switch connection.state {
+        case .connected: Color.appSuccess
+        case .reconnecting, .connecting: Color.appWarning
+        case .disconnected, .error: Color.appDanger
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Label("OpenLens", systemImage: "circle.hexagongrid.fill")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.appPrimary)
+                HStack(spacing: 7) {
+                    Image(systemName: "circle.hexagongrid.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Color.appAccent)
+                    Text("OpenLens")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.appPrimary)
+                    Circle()
+                        .fill(connectionStatusColor)
+                        .frame(width: 6, height: 6)
+                        .help(connection.serverHostDisplay.map { "Connected to \($0)" } ?? "Server status")
+                }
 
                 Spacer(minLength: 4)
+
+                if let onNewSession {
+                    Button(action: onNewSession) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("New")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.appAccent.opacity(0.14), in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .macHoverHighlight(cornerRadius: 12)
+                    .help("\(AppText.newSession) (⌘N)")
+                    .accessibilityLabel(AppText.newSession)
+                }
 
                 if let onToggleSidebar {
                     Button(action: onToggleSidebar) {
                         Image(systemName: "sidebar.left")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(Color.appSecondary)
-                            .frame(width: 30, height: 30)
+                            .frame(width: 28, height: 28)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -456,56 +501,75 @@ private struct ConnectedSidebarNavigation: View {
                     .accessibilityLabel("Hide Sidebar")
                 }
             }
-            .padding(.leading, 10)
-            .padding(.trailing, 4)
-            .padding(.bottom, 10)
+            .padding(.leading, 6)
+            .padding(.trailing, 2)
 
-            ForEach(Array(AppTab.allCases.enumerated()), id: \.element.id) { index, tab in
-                Button {
-                    onSelect(tab)
-                } label: {
-                    HStack(spacing: 8) {
-                        Label(sidebarTitle(for: tab), systemImage: tab.icon)
-                            .font(.system(size: 15, weight: .medium, design: .rounded))
-                            .foregroundStyle(Color.appPrimary)
-                            .symbolVariant(selectedTab == tab ? .fill : .none)
-                        Spacer(minLength: 0)
-                        if let count = badgeCounts[tab], count > 0 {
-                            Text("\(count)")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                                .foregroundStyle(Color.appOnAccent)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Color.appWarning, in: Capsule())
-                                .accessibilityLabel("\(count) pending")
+            HStack(spacing: 4) {
+                ForEach(Array(AppTab.allCases.enumerated()), id: \.element.id) { index, tab in
+                    let isSelected = selectedTab == tab
+                    let badge = badgeCounts[tab] ?? 0
+
+                    Button {
+                        onSelect(tab)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                                .symbolVariant(isSelected ? .fill : .none)
+                            Text(compactTabTitle(for: tab))
+                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium, design: .rounded))
+                                .lineLimit(1)
+                            if badge > 0 {
+                                Text("\(badge)")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Color.appOnAccent)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Color.appWarning, in: Capsule())
+                                    .accessibilityLabel("\(badge) pending")
+                            }
                         }
-                        #if targetEnvironment(macCatalyst)
-                        Text("⌘\(index + 1)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(Color.appSecondary.opacity(0.65))
-                        #endif
-                    }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12)
-                        .frame(height: 40)
+                        .foregroundStyle(isSelected ? Color.appPrimary : Color.appSecondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 32)
                         .background(
-                            selectedTab == tab ? Color.appTertiary : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            isSelected ? Color.appBackground : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
-                        .macHoverHighlight(cornerRadius: 11)
+                        .overlay {
+                            if isSelected {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.appSeparator, lineWidth: 1)
+                            }
+                        }
                         .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .macHoverHighlight(cornerRadius: 8)
+                    .help("\(sidebarTitle(for: tab)) (⌘\(index + 1))")
+                    .accessibilityLabel(sidebarTitle(for: tab))
+                    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
             }
+            .padding(3)
+            .background(Color.appTertiary.opacity(0.82), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
         .padding(.horizontal, 12)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
     }
 
     private func sidebarTitle(for tab: AppTab) -> String {
         tab == .chat ? "Chat" : tab.title
+    }
+
+    private func compactTabTitle(for tab: AppTab) -> String {
+        switch tab {
+        case .chat: "Chat"
+        case .review: "Review"
+        case .workspace: "Files"
+        case .settings: "Settings"
+        }
     }
 }
 

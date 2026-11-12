@@ -71,7 +71,6 @@ struct SessionsListView: View {
     @State private var showStopAllConfirmation = false
     @State private var isStoppingSessions = false
     @State private var isOnScreen = true
-    @State private var hasRefreshedInitialInactiveOutcomes = false
     @State private var expandedProjectIDs = Set<String>()
 
     let presentationStyle: PresentationStyle
@@ -377,13 +376,14 @@ struct SessionsListView: View {
         }
         .task(id: pollTaskKey) {
             guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
-            let shouldRefreshAllInactive = !hasRefreshedInitialInactiveOutcomes
-            hasRefreshedInitialInactiveOutcomes = true
+            let shouldRefreshAllInactive = sessionsService.consumeInitialInactiveOutcomeRefreshNeeded()
             if shouldRefreshAllInactive {
                 await loadSessionStatuses(refreshInactive: true)
                 await refreshAttentionSessions()
             } else {
-                await loadSessions(silentlyWhenPopulated: true)
+                await loadSessionStatuses()
+                await refreshCatalogSilently()
+                await refreshAttentionSessions()
             }
             let supportsAttentionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
                 || (ScreenshotFixtures.isEnabled && ScreenshotFixtures.showsExecutionOutcomes)
@@ -416,10 +416,7 @@ struct SessionsListView: View {
     @ViewBuilder
     private var presentationContent: some View {
         if isSidebar {
-            VStack(spacing: 0) {
-                SessionsSidebarHeader(onCreate: presentNewSessionSheet, onRefresh: retryLoadingSessions, isRefreshing: isLoading)
-                sessionStateContent
-            }
+            sessionStateContent
         } else {
             sessionStateContent
                 .safeAreaInset(edge: .bottom, alignment: .trailing, spacing: 0) {
@@ -489,10 +486,11 @@ struct SessionsListView: View {
         let repositories = self.repositories
         let scopedSessions = self.repositorySessions
         let visibleMatches = filteredSessions(from: scopedSessions)
+        let resolvedStatuses = self.organizationStatuses
         // Rows only name their repository when the timeline mixes several of them.
         let showsRepositoryOnRows = layout != .repository && selectedRepositoryID == nil && repositories.count > 1
         return ScrollView {
-            LazyVStack(spacing: isSidebar ? 12 : 18) {
+            LazyVStack(spacing: isSidebar ? 10 : 18) {
                 listControls(repositories: repositories, scopedSessions: scopedSessions)
 
                 switch layout {
@@ -500,11 +498,11 @@ struct SessionsListView: View {
                     let sections = layout == .focus
                         ? SessionListOrganization.focus(
                             from: visibleMatches,
-                            statuses: sessionStatuses,
+                            statuses: resolvedStatuses,
                             attentionIDs: attentionSessionIDs,
                             pinnedIDs: sessionsService.pinnedSessionIDs
                         )
-                        : SessionListOrganization.timeline(from: visibleMatches, statuses: sessionStatuses)
+                        : SessionListOrganization.timeline(from: visibleMatches, statuses: resolvedStatuses)
                     if sections.isEmpty {
                         noMatchingSessionsView
                     }
@@ -514,7 +512,7 @@ struct SessionsListView: View {
                 case .repository:
                     let groups = SessionListOrganization.groups(
                         from: visibleMatches,
-                        statuses: sessionStatuses,
+                        statuses: resolvedStatuses,
                         sortOrder: sortOrder,
                         repositoryIndex: repositoryIndex
                     )
@@ -527,7 +525,7 @@ struct SessionsListView: View {
                     }
                 }
             }
-            .padding(.horizontal, isSidebar ? 12 : 20)
+            .padding(.horizontal, isSidebar ? 10 : 20)
             .padding(.top, isSidebar ? 10 : 12)
             .padding(.bottom, 16)
         }
@@ -554,52 +552,110 @@ struct SessionsListView: View {
         repositories: [SessionProjectGroup],
         scopedSessions: [OCSession]
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: isSidebar ? 8 : 10) {
             if isSidebar {
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.appSecondary)
-                    TextField("Search sessions or repos…", text: $searchQuery)
-                        .focused($isSidebarSearchFocused)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .accessibilityIdentifier("sessions.search")
-                    if !searchQuery.isEmpty {
-                        Button {
-                            searchQuery = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 13))
-                                .foregroundStyle(Color.appSecondary)
+                HStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.appSecondary)
+                        TextField("Search chats or repos…", text: $searchQuery)
+                            .focused($isSidebarSearchFocused)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .accessibilityIdentifier("sessions.search")
+                        if !searchQuery.isEmpty {
+                            Button {
+                                searchQuery = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.appSecondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear search")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Clear search")
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(height: 32)
+                    .background(Color.appTertiary.opacity(0.85), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(isSidebarSearchFocused ? Color.appAccent.opacity(0.55) : Color.appSeparator, lineWidth: 1)
+                    }
+
+                    Menu {
+                        Section("Group Chats") {
+                            Picker(AppText.sessionsLayout, selection: $layout) {
+                                ForEach(SessionListOrganization.Layout.allCases) { option in
+                                    Text(option.rawValue).tag(option)
+                                }
+                            }
+                        }
+                        if layout == .repository {
+                            Section(AppText.sessionsSortChats) {
+                                Picker(AppText.sessionsSortChats, selection: $sortOrder) {
+                                    ForEach(SessionListOrganization.SortOrder.allCases) { order in
+                                        Text(order.rawValue).tag(order)
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: layout == .focus ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(layout == .focus ? Color.appSecondary : Color.appAccent)
+                            .frame(width: 30, height: 32)
+                            .background(Color.appTertiary.opacity(0.75), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .macHoverHighlight(cornerRadius: 8)
+                    .help("View mode: \(layout.rawValue)")
+                    .accessibilityLabel("View mode: \(layout.rawValue)")
+                    .accessibilityIdentifier("sessions.layout")
+
+                    Button(action: retryLoadingSessions) {
+                        if isLoading {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .frame(width: 30, height: 32)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Color.appSecondary)
+                                .frame(width: 30, height: 32)
+                                .background(Color.appTertiary.opacity(0.75), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .contentShape(Rectangle())
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoading)
+                    .macHoverHighlight(cornerRadius: 8)
+                    .help("Refresh sessions")
+                    .accessibilityLabel("Refresh sessions")
+                    .accessibilityIdentifier("sessions.refresh")
+                }
+
+                compactSidebarFilterStrip(repositories: repositories, scopedSessions: scopedSessions)
+            } else {
+                Picker(AppText.sessionsLayout, selection: $layout) {
+                    ForEach(SessionListOrganization.Layout.allCases) { option in
+                        Text(option.rawValue).tag(option)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Color.appTertiary.opacity(0.85), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(isSidebarSearchFocused ? Color.appAccent.opacity(0.55) : Color.appSeparator, lineWidth: 1)
-                }
-            }
-            Picker(AppText.sessionsLayout, selection: $layout) {
-                ForEach(SessionListOrganization.Layout.allCases) { option in
-                    Text(option.rawValue).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("sessions.layout")
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("sessions.layout")
 
-            organizationBar(repositories: repositories)
-            sessionFilterBar(scopedSessions: scopedSessions)
+                organizationBar(repositories: repositories)
+                sessionFilterBar(scopedSessions: scopedSessions)
+            }
 
-            let runningRootSessions = scopedSessions.filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }
+            let runningRootSessions = scopedSessions.filter { SessionListOrganization.isWorking(organizationStatuses[$0.id]) }
             let runningSubagents = scopedActiveSubagents
             let allRunningSessions = runningRootSessions + runningSubagents
-            if !allRunningSessions.isEmpty {
+            let showsRunningBanner = !allRunningSessions.isEmpty && (layout != .focus || sessionFilter == .unread)
+            if showsRunningBanner {
                 HStack(spacing: 8) {
                     Button {
                         if allRunningSessions.count == 1, let onlyActive = allRunningSessions.first {
@@ -624,7 +680,11 @@ struct SessionsListView: View {
                                     HStack(spacing: 4) {
                                         Text(primary.title.isEmpty ? AppText.titleUntitled : primary.title)
                                             .lineLimit(1)
-                                        if let start = ElapsedDurationFormatter.activeStartDate(for: primary) {
+                                        if let live = sessionsService.liveActivity(for: primary.id)?.statusLabel {
+                                            Text("· \(live)")
+                                                .lineLimit(1)
+                                        }
+                                        if let start = sessionsService.activeStartDate(for: primary) {
                                             Text("·")
                                             ElapsedDurationText(startDate: start)
                                         }
@@ -678,7 +738,7 @@ struct SessionsListView: View {
                 }
             }
 
-            if let nextWaiting = scopedSessions.first(where: { attentionSessionIDs.contains($0.id) }) {
+            if let nextWaiting = scopedSessions.first(where: { attentionSessionIDs.contains($0.id) }), layout != .focus {
                 Button {
                     openedSessionIDs.insert(nextWaiting.id)
                     onSelect(nextWaiting)
@@ -717,10 +777,129 @@ struct SessionsListView: View {
                         .disabled(isLoading)
                 }
                 .foregroundStyle(Color.appWarning)
-            } else if let lastCatalogRefresh {
+            } else if !isSidebar, let lastCatalogRefresh {
                 Text("Updated \(lastCatalogRefresh.formatted(date: .omitted, time: .shortened))")
                     .font(.caption)
                     .foregroundStyle(Color.appSecondary)
+            }
+        }
+    }
+
+    private func compactSidebarFilterStrip(
+        repositories: [SessionProjectGroup],
+        scopedSessions: [OCSession]
+    ) -> some View {
+        let counts = filterCounts(in: scopedSessions)
+        let ambiguousTitles = ambiguousRepositoryTitles(in: repositories)
+        let selectedRepository = repositories.first { $0.id == selectedRepositoryID }
+
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 5) {
+                ForEach(SessionFilter.allCases) { filter in
+                    let isSelected = sessionFilter == filter
+                    let count: Int? = switch filter {
+                    case .all: nil
+                    case .running: counts.running > 0 ? counts.running : nil
+                    case .unread: counts.unread > 0 ? counts.unread : nil
+                    case .attention: counts.attention > 0 ? counts.attention : nil
+                    }
+                    if filter != .attention || counts.attention > 0 || sessionFilter == .attention {
+                        Button {
+                            withAnimation(.snappy(duration: 0.18)) {
+                                sessionFilter = filter
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                if filter == .running, (count ?? 0) > 0 {
+                                    Circle()
+                                        .fill(isSelected ? Color.appOnAccent : Color.appAccent)
+                                        .frame(width: 5, height: 5)
+                                        .symbolEffect(.pulse)
+                                }
+                                Text(filter.rawValue)
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                if let count {
+                                    Text("\(count)")
+                                        .font(.system(size: 10, weight: .bold, design: .rounded).monospacedDigit())
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(
+                                            isSelected ? Color.white.opacity(0.22) : Color.appAccent.opacity(0.16),
+                                            in: Capsule()
+                                        )
+                                }
+                            }
+                            .foregroundStyle(isSelected ? Color.appOnAccent : Color.appSecondary)
+                            .padding(.horizontal, 9)
+                            .frame(height: 27)
+                            .background(
+                                isSelected ? Color.appAccent : Color.appTertiary.opacity(0.85),
+                                in: Capsule()
+                            )
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+                    }
+                }
+
+                if repositories.count > 1 || selectedRepository != nil {
+                    Menu {
+                        Picker("Repository", selection: $selectedRepositoryID) {
+                            Text(AppText.sessionsAllRepositories).tag(String?.none)
+                            ForEach(repositories) { repository in
+                                let showsPath = ambiguousTitles.contains(repository.title)
+                                Text(showsPath ? (repository.subtitle ?? repository.title) : repository.title)
+                                    .tag(Optional(repository.id))
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(selectedRepository?.title ?? "Repos")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                        .foregroundStyle(selectedRepository != nil ? Color.appOnAccent : Color.appSecondary)
+                        .padding(.horizontal, 9)
+                        .frame(height: 27)
+                        .background(
+                            selectedRepository != nil ? Color.appAccent : Color.appTertiary.opacity(0.85),
+                            in: Capsule()
+                        )
+                        .contentShape(Capsule())
+                    }
+                    .accessibilityIdentifier("sessions.repositoryFilter")
+                }
+
+                if counts.unread > 0 {
+                    Button {
+                        markSessionsAsRead(scopedSessions)
+                    } label: {
+                        HStack(spacing: 3) {
+                            if isMarkingAllRead {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            Text("Read all")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 8)
+                        .frame(height: 27)
+                        .background(Color.appAccent.opacity(0.12), in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isMarkingAllRead)
+                    .accessibilityIdentifier("sessions.markAllRead")
+                }
             }
         }
     }
@@ -924,28 +1103,63 @@ struct SessionsListView: View {
 
     private func timelineSection(_ section: SessionTimelineSection, showsRepository: Bool) -> some View {
         let unreadInSection = section.sessions.filter {
-            !SessionListOrganization.isWorking(sessionStatuses[$0.id]) && $0.hasUnreadResult
+            !SessionListOrganization.isWorking(organizationStatuses[$0.id]) && $0.hasUnreadResult
         }
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        let subagentsInWorkingSection: Int = section.isWorking
+            ? section.sessions.reduce(0) { $0 + (activeChildCountsByParent[$1.id] ?? 0) }
+            : 0
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 6) {
                 if section.isWorking {
-                    Image(systemName: "circle.dotted")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                    Circle()
+                        .fill(Color.appAccent)
+                        .frame(width: 7, height: 7)
+                        .symbolEffect(.pulse)
                 }
 
                 Text(section.title)
-                    .font(.system(size: isSidebar ? 13 : 15, weight: .semibold, design: .rounded))
+                    .font(.system(size: isSidebar ? 12 : 15, weight: .semibold, design: .rounded))
 
                 Text("\u{00B7}")
                     .font(.system(size: 12, design: .rounded))
                     .foregroundStyle(Color.appSecondary)
 
-                Text(AppText.groupedProjectCount(section.sessions.count))
-                    .font(.system(size: 12, design: .rounded))
-                    .foregroundStyle(Color.appSecondary)
+                Text(
+                    subagentsInWorkingSection > 0
+                        ? "\(AppText.groupedProjectCount(section.sessions.count)) · \(subagentsInWorkingSection) \(subagentsInWorkingSection == 1 ? "subagent" : "subagents")"
+                        : AppText.groupedProjectCount(section.sessions.count)
+                )
+                .font(.system(size: 11, design: .rounded))
+                .foregroundStyle(Color.appSecondary)
+                .lineLimit(1)
 
-                if !unreadInSection.isEmpty {
-                    Spacer(minLength: 4)
+                Spacer(minLength: 4)
+
+                if section.isWorking {
+                    Button {
+                        showStopAllConfirmation = true
+                    } label: {
+                        HStack(spacing: 3) {
+                            if isStoppingSessions {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            Text("Stop all")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(Color.appDanger)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.appDanger.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isStoppingSessions)
+                    .accessibilityIdentifier("sessions.stopAllActive")
+                } else if !unreadInSection.isEmpty {
                     Button("Mark read") {
                         markSessionsAsRead(unreadInSection)
                     }
@@ -957,8 +1171,7 @@ struct SessionsListView: View {
             }
             .foregroundStyle(section.isWorking ? Color.appAccent : Color.appPrimary)
             .padding(.horizontal, sectionHeaderInset)
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
+            .accessibilityElement(children: .contain)
 
             sessionCard(section.sessions, showsRepository: showsRepository)
         }
@@ -966,7 +1179,7 @@ struct SessionsListView: View {
 
     /// Rows of one section. Pushed lists get a bordered surface with separators; the sidebar stays flat.
     private func sessionCard(_ sessions: [OCSession], showsRepository: Bool) -> some View {
-        LazyVStack(spacing: 0) {
+        LazyVStack(spacing: isSidebar ? 4 : 0) {
             ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
                 sessionButton(session, showsRepository: showsRepository)
 
@@ -1057,7 +1270,11 @@ struct SessionsListView: View {
     private func sessionRow(_ session: OCSession, showsRepository: Bool) -> some View {
         let statusType = sessionStatuses[session.id]?.type
         let isBusy = statusType == .busy || statusType == .retry
-        let runningSubagentCount = activeChildCountsByParent[session.id] ?? 0
+        let runningChildren = sessionsService.childSessions(forParentID: session.id)
+            .filter { SessionListOrganization.isWorking(sessionStatuses[$0.id]) }
+        let runningSubagentCount = runningChildren.count
+        let isWorkingOrHasSubagents = isBusy || runningSubagentCount > 0
+        let liveSnapshot = sessionsService.liveActivity(for: session.id)
         let isChildSubagent = session.parentID?.nilIfBlank != nil
         let parentTitle = session.parentID.flatMap { parentID in
             sessions.first(where: { $0.id == parentID })?.title.nilIfBlank
@@ -1067,144 +1284,241 @@ struct SessionsListView: View {
         let showsListExecutionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
             || ScreenshotFixtures.showsExecutionOutcomes
 
-        return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                SessionWorkingTitle(
-                    title: session.title.isEmpty ? AppText.titleUntitled : session.title,
-                    isWorking: isBusy || runningSubagentCount > 0,
-                    lineLimit: 2
-                )
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    SessionWorkingTitle(
+                        title: session.title.isEmpty ? AppText.titleUntitled : session.title,
+                        isWorking: isWorkingOrHasSubagents,
+                        lineLimit: isSidebar ? 1 : 2
+                    )
 
-                if isChildSubagent {
-                    HStack(spacing: 4) {
-                        Image(systemName: "person.2.fill")
-                            .font(.system(size: 10))
-                        Text(parentTitle.map { "Subagent · \($0)" } ?? "Subagent thread")
+                    if isChildSubagent {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 10))
+                            Text(parentTitle.map { "Subagent · \($0)" } ?? "Subagent thread")
+                                .lineLimit(1)
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.appAccent)
+                    }
+
+                    if let attention = attentionLabels[session.id] {
+                        Label(attention, systemImage: "exclamationmark.bubble.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.appWarning)
                             .lineLimit(1)
+                    } else if isWorkingOrHasSubagents {
+                        liveSessionActivityLine(
+                            session: session,
+                            statusType: statusType,
+                            isDirectlyBusy: isBusy,
+                            runningSubagentCount: runningSubagentCount,
+                            liveSnapshot: liveSnapshot
+                        )
                     }
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Color.appAccent)
-                }
 
-                if let attention = attentionLabels[session.id] {
-                    Text(attention)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.appWarning)
-                }
-
-                if layout == .repository, let directory = session.directory,
-                   SessionRepositoryIndex.pathKey(directory) != SessionRepositoryIndex.pathKey(repositoryIndex.repository(for: session).directory) {
-                    Text(directory)
-                        .font(.caption)
-                        .foregroundStyle(Color.appSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                if !isBusy, runningSubagentCount == 0, showsListExecutionOutcomes,
-                   let outcome = session.executionOutcomeVisibleOnSessionList() {
-                    ExecutionStatusView(state: outcome, idleTime: session.time.idle)
-                }
-
-                HStack(spacing: 6) {
-                    if showsRepository {
-                        repositoryChip(for: session)
+                    if layout == .repository, let directory = session.directory,
+                       SessionRepositoryIndex.pathKey(directory) != SessionRepositoryIndex.pathKey(repositoryIndex.repository(for: session).directory) {
+                        Text(directory)
+                            .font(.caption)
+                            .foregroundStyle(Color.appSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                    if isBusy {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(Color.appAccent)
-                                .frame(width: 6, height: 6)
-                            Text(statusType == .retry ? "Retrying" : "Working")
-                                .fontWeight(.semibold)
-                            if let startDate = ElapsedDurationFormatter.activeStartDate(for: session) {
-                                Text("·")
-                                ElapsedDurationText(startDate: startDate)
+
+                    if !isWorkingOrHasSubagents, showsListExecutionOutcomes,
+                       let outcome = session.executionOutcomeVisibleOnSessionList() {
+                        ExecutionStatusView(state: outcome, idleTime: session.time.idle)
+                    }
+
+                    HStack(spacing: 6) {
+                        if showsRepository {
+                            repositoryChip(for: session)
+                        }
+                        if isWorkingOrHasSubagents {
+                            if let startDate = sessionsService.activeStartDate(for: session)
+                                ?? runningChildren.compactMap({ sessionsService.activeStartDate(for: $0) }).min() {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "clock")
+                                        .font(.system(size: 9, weight: .semibold))
+                                    ElapsedDurationText(startDate: startDate)
+                                }
+                                .foregroundStyle(Color.appAccent)
                             }
+                        } else {
+                            Text(formattedDate(session.updatedAt))
+                                .foregroundStyle(Color.appSecondary)
                         }
-                        .foregroundStyle(Color.appAccent)
-                    } else if runningSubagentCount > 0 {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(Color.appAccent)
-                                .frame(width: 6, height: 6)
-                            Text(runningSubagentCount == 1 ? "1 subagent running" : "\(runningSubagentCount) subagents running")
-                                .fontWeight(.semibold)
-                        }
-                        .foregroundStyle(Color.appAccent)
                     }
-                    Text(formattedDate(session.updatedAt))
-                        .foregroundStyle(Color.appSecondary)
-                }
-                .font(.caption)
-                .lineLimit(1)
-            }
-
-            Spacer(minLength: 8)
-
-            if sessionFilter == .running, (isBusy || runningSubagentCount > 0) {
-                Button {
-                    stopSingleSessionAndChildren(session)
-                } label: {
-                    Image(systemName: "stop.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(Color.appDanger)
-                }
-                .buttonStyle(.plain)
-                .disabled(isStoppingSessions)
-                .accessibilityLabel("Stop \(session.title.isEmpty ? AppText.titleUntitled : session.title)")
-                .accessibilityIdentifier("session.stop.\(session.id)")
-            }
-
-            if sessionsService.pinnedSessionIDs.contains(session.id) {
-                Image(systemName: "pin.fill")
                     .font(.caption)
-                    .foregroundStyle(Color.appAccent)
-                    .accessibilityLabel("Pinned for follow-up")
+                    .lineLimit(1)
+                }
+
+                Spacer(minLength: 6)
+
+                if isWorkingOrHasSubagents {
+                    Button {
+                        stopSingleSessionAndChildren(session)
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: isSidebar ? 17 : 20))
+                            .foregroundStyle(Color.appDanger.opacity(0.9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isStoppingSessions)
+                    .help("Stop running agent")
+                    .accessibilityLabel("Stop \(session.title.isEmpty ? AppText.titleUntitled : session.title)")
+                    .accessibilityIdentifier("session.stop.\(session.id)")
+                }
+
+                if sessionsService.pinnedSessionIDs.contains(session.id) {
+                    Image(systemName: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.appAccent)
+                        .accessibilityLabel("Pinned for follow-up")
+                }
+
+                if attentionSessionIDs.contains(session.id) {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.appWarning)
+                        .accessibilityLabel("Waiting for your response")
+                        .accessibilityIdentifier("session.needsAttention.\(session.id)")
+                }
+
+                if !isWorkingOrHasSubagents, session.hasUnreadResult, showsListExecutionOutcomes {
+                    Text(AppText.unreadResult)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.appAccent.opacity(0.12), in: Capsule())
+                        .accessibilityLabel(AppText.unreadResultAccessibility)
+                        .accessibilityIdentifier("session.unreadResult.\(session.id)")
+                }
+
+                if !isSidebar {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 18, weight: .light))
+                        .foregroundStyle(Color.appSecondary.opacity(0.7))
+                }
             }
 
-            if attentionSessionIDs.contains(session.id) {
-                Image(systemName: "exclamationmark.bubble.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.appWarning)
-                    .accessibilityLabel("Waiting for your response")
-                    .accessibilityIdentifier("session.needsAttention.\(session.id)")
-            }
-
-            if !isBusy, session.hasUnreadResult, showsListExecutionOutcomes {
-                Text(AppText.unreadResult)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color.appAccent)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.appAccent.opacity(0.12), in: Capsule())
-                    .accessibilityLabel(AppText.unreadResultAccessibility)
-                    .accessibilityIdentifier("session.unreadResult.\(session.id)")
-            }
-
-            if !isSidebar {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 18, weight: .light))
-                    .foregroundStyle(Color.appSecondary.opacity(0.7))
+            if !isChildSubagent, !runningChildren.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(runningChildren.prefix(3)) { child in
+                        nestedSubagentSidebarRow(child)
+                    }
+                    if runningChildren.count > 3 {
+                        Text("+\(runningChildren.count - 3) more subagents running")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color.appSecondary)
+                            .padding(.leading, 14)
+                    }
+                }
+                .padding(.top, 2)
             }
         }
-        .padding(.vertical, compactSessionRows ? 8 : 12)
+        .padding(.vertical, compactSessionRows ? 7 : (isSidebar ? 9 : 12))
         .padding(.horizontal, isSidebar ? 10 : 14)
         .background(
             isSelected
                 ? Color.appTertiary
-                : (isBusy ? Color.appAccent.opacity(0.06) : Color.clear),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                : (isWorkingOrHasSubagents ? Color.appAccent.opacity(0.06) : Color.clear),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
         .overlay {
-            if isBusy && !isSelected {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
+            if isSelected {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color.appAccent.opacity(0.35), lineWidth: 1)
+            } else if isWorkingOrHasSubagents {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color.appAccent.opacity(0.26), lineWidth: 1)
             }
         }
-        .macHoverHighlight(cornerRadius: 12)
+        .macHoverHighlight(cornerRadius: 11)
         .contentShape(Rectangle())
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private func liveSessionActivityLine(
+        session: OCSession,
+        statusType: OCSessionStatusType?,
+        isDirectlyBusy: Bool,
+        runningSubagentCount: Int,
+        liveSnapshot: SessionLiveActivitySnapshot?
+    ) -> some View {
+        let icon: String = {
+            if let liveSnapshot { return liveSnapshot.iconName }
+            if statusType == .retry { return "arrow.clockwise" }
+            if !isDirectlyBusy && runningSubagentCount > 0 { return "person.2.wave.2" }
+            return "sparkles"
+        }()
+        let text: String = {
+            if let liveSnapshot { return liveSnapshot.statusLabel }
+            if statusType == .retry {
+                return sessionStatuses[session.id]?.message?.nilIfBlank ?? "Retrying…"
+            }
+            if !isDirectlyBusy && runningSubagentCount > 0 {
+                return runningSubagentCount == 1 ? "1 subagent working" : "\(runningSubagentCount) subagents working"
+            }
+            return "Working…"
+        }()
+
+        return HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.appAccent)
+                .symbolEffect(.pulse)
+            Text(text)
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(Color.appAccent)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if let step = liveSnapshot?.stepCount, step > 0 {
+                Text("· #\(step)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.appSecondary)
+            }
+        }
+    }
+
+    private func nestedSubagentSidebarRow(_ child: OCSession) -> some View {
+        let childLive = sessionsService.liveActivity(for: child.id)
+        let title = child.title.nilIfBlank ?? child.agent ?? "Subagent"
+        return Button {
+            openedSessionIDs.insert(child.id)
+            onSelect(child)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.appSecondary)
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.appPrimary)
+                    .lineLimit(1)
+                if let stepLabel = childLive?.statusLabel, stepLabel != title {
+                    Text("· \(stepLabel)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.appSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 2)
+                if let start = sessionsService.activeStartDate(for: child) {
+                    ElapsedDurationText(startDate: start)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.appSecondary)
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Color.appBackground.opacity(0.55), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func repositoryChip(for session: OCSession) -> some View {
@@ -1312,7 +1626,7 @@ struct SessionsListView: View {
     private func refreshCatalogSilently() async {
         guard !Task.isCancelled, !isLoading else { return }
         let client = connection.client
-        guard let result = try? await sessionsService.listAllSessions(),
+        guard let result = try? await sessionsService.listAllSessions(incremental: true),
               !Task.isCancelled,
               connection.client === client else {
             return
@@ -1601,48 +1915,6 @@ struct SessionsListView: View {
             self.selectedRepositoryID = nil
         }
         expandedProjectIDs.formIntersection(validIDs)
-    }
-}
-
-private struct SessionsSidebarHeader: View {
-    let onCreate: () -> Void
-    let onRefresh: () -> Void
-    let isRefreshing: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text(AppText.sessions)
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color.appSecondary)
-
-            Spacer()
-
-            Button(action: onRefresh) {
-                if isRefreshing { ProgressView() }
-                else { Image(systemName: "arrow.clockwise") }
-            }
-            .frame(minWidth: 36, minHeight: 36)
-            .disabled(isRefreshing)
-            .macHoverHighlight(cornerRadius: 8)
-            .help("Refresh sessions")
-            .accessibilityLabel("Refresh sessions")
-
-            Button(action: onCreate) {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.appPrimary)
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .macHoverHighlight(cornerRadius: 8)
-            .help("\(AppText.newSession) (⌘N)")
-            .accessibilityLabel(AppText.newSession)
-        }
-        .padding(.leading, 22)
-        .padding(.trailing, 14)
-        .padding(.top, 10)
-        .padding(.bottom, 2)
     }
 }
 

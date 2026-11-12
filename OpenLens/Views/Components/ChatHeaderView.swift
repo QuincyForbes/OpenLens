@@ -19,11 +19,68 @@ struct ChatHeaderToolbar: ToolbarContent {
     var onScrollToBottom: (() -> Void)? = nil
     var onSwitchSession: (() -> Void)? = nil
     var onShowSubagents: (() -> Void)? = nil
+    var onShowActiveAgents: (() -> Void)? = nil
     var onStopAllInChat: (() -> Void)? = nil
     var onCopyLastReply: (() -> Void)? = nil
     var otherActiveSessionCount: Int = 0
     var subagentCount: Int = 0
     var runningSubagentCount: Int = 0
+    var activeAgentsPopover: AnyView? = nil
+    @Binding var isShowingActiveAgentsPopover: Bool
+
+    init(
+        projectName: String?,
+        branch: String?,
+        connectionState: ConnectionManager.State,
+        sessionTitle: String?,
+        showsRecordingControls: Bool,
+        isRecordingStream: Bool,
+        visualMode: ChatVisualMode,
+        onToggleRecording: (() -> Void)?,
+        onShowInsights: (() -> Void)? = nil,
+        onShowSessionReview: (() -> Void)? = nil,
+        onShowMeridianUsage: (() -> Void)? = nil,
+        onShowContext: (() -> Void)? = nil,
+        onRenameSession: (() -> Void)? = nil,
+        onSyncSession: (() -> Void)? = nil,
+        onScrollToBottom: (() -> Void)? = nil,
+        onSwitchSession: (() -> Void)? = nil,
+        onShowSubagents: (() -> Void)? = nil,
+        onShowActiveAgents: (() -> Void)? = nil,
+        onStopAllInChat: (() -> Void)? = nil,
+        onCopyLastReply: (() -> Void)? = nil,
+        otherActiveSessionCount: Int = 0,
+        subagentCount: Int = 0,
+        runningSubagentCount: Int = 0,
+        activeAgentsPopover: AnyView? = nil,
+        isShowingActiveAgentsPopover: Binding<Bool> = .constant(false)
+    ) {
+        self.projectName = projectName
+        self.branch = branch
+        self.connectionState = connectionState
+        self.sessionTitle = sessionTitle
+        self.showsRecordingControls = showsRecordingControls
+        self.isRecordingStream = isRecordingStream
+        self.visualMode = visualMode
+        self.onToggleRecording = onToggleRecording
+        self.onShowInsights = onShowInsights
+        self.onShowSessionReview = onShowSessionReview
+        self.onShowMeridianUsage = onShowMeridianUsage
+        self.onShowContext = onShowContext
+        self.onRenameSession = onRenameSession
+        self.onSyncSession = onSyncSession
+        self.onScrollToBottom = onScrollToBottom
+        self.onSwitchSession = onSwitchSession
+        self.onShowSubagents = onShowSubagents
+        self.onShowActiveAgents = onShowActiveAgents
+        self.onStopAllInChat = onStopAllInChat
+        self.onCopyLastReply = onCopyLastReply
+        self.otherActiveSessionCount = otherActiveSessionCount
+        self.subagentCount = subagentCount
+        self.runningSubagentCount = runningSubagentCount
+        self.activeAgentsPopover = activeAgentsPopover
+        self._isShowingActiveAgentsPopover = isShowingActiveAgentsPopover
+    }
 
     private var statusColor: Color {
         if visualMode.isRetro {
@@ -71,45 +128,80 @@ struct ChatHeaderToolbar: ToolbarContent {
         visualMode.isRetro
     }
 
+    private var activeBadgeText: String? {
+        if otherActiveSessionCount > 0 {
+            return "\(otherActiveSessionCount) active"
+        }
+        if runningSubagentCount > 0 {
+            return runningSubagentCount == 1 ? "1 subagent" : "\(runningSubagentCount) subagents"
+        }
+        return nil
+    }
+
     var body: some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            VStack(alignment: .center, spacing: 0) {
+            VStack(alignment: .center, spacing: 2) {
+                HStack(spacing: 8) {
                     if let onSwitchSession {
                         Button(action: onSwitchSession) {
-                            HStack(spacing: 5) {
+                            HStack(spacing: 4) {
                                 sessionTitleLabel
-                                if otherActiveSessionCount > 0 {
-                                    HStack(spacing: 3) {
-                                        Circle()
-                                            .fill(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                                            .frame(width: 5, height: 5)
-                                        Text("\(otherActiveSessionCount) active")
-                                            .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
-                                            .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                                    }
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(
-                                        (isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent).opacity(0.14),
-                                        in: Capsule()
-                                    )
-                                }
                                 Image(systemName: "chevron.down")
                                     .font(.caption2.weight(.bold))
+                                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
                             }
-                            .frame(minHeight: 44)
+                            .frame(minHeight: 34)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(
-                            otherActiveSessionCount > 0
-                                ? "Switch session, \(resolvedSessionTitle), \(otherActiveSessionCount) other active"
-                                : "Switch session, \(resolvedSessionTitle)"
-                        )
+                        .accessibilityLabel("Switch session, \(resolvedSessionTitle)")
                         .accessibilityIdentifier("chat.switchSession")
                     } else {
                         sessionTitleLabel
                     }
+
+                    if let badgeText = activeBadgeText {
+                        Button {
+                            if let onShowActiveAgents {
+                                onShowActiveAgents()
+                            } else {
+                                onSwitchSession?()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                    .frame(width: 6, height: 6)
+                                    .symbolEffect(.pulse)
+                                Text(badgeText)
+                                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                                    .foregroundStyle(isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                    .lineLimit(1)
+                            }
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                (isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent).opacity(0.14),
+                                in: Capsule()
+                            )
+                            .overlay {
+                                Capsule()
+                                    .stroke((isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent).opacity(0.28), lineWidth: 1)
+                            }
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Inspect running chats and live agent activity")
+                        .accessibilityLabel("View live agent activity, \(badgeText)")
+                        .accessibilityIdentifier("chat.activeAgentsPill")
+                        .popover(isPresented: $isShowingActiveAgentsPopover, arrowEdge: .top) {
+                            if let activeAgentsPopover {
+                                activeAgentsPopover
+                            }
+                        }
+                    }
+                }
 
                 HStack(spacing: 4) {
                     Circle()
@@ -174,6 +266,11 @@ struct ChatHeaderToolbar: ToolbarContent {
                     if let onSwitchSession {
                         Button(action: onSwitchSession) {
                             Label("Switch Session", systemImage: "bubble.left.and.bubble.right")
+                        }
+                    }
+                    if let onShowActiveAgents, (otherActiveSessionCount > 0 || runningSubagentCount > 0) {
+                        Button(action: onShowActiveAgents) {
+                            Label("Live Agent Activity", systemImage: "bolt.horizontal.circle")
                         }
                     }
                     if let onShowSubagents, subagentCount > 0 {

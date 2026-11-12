@@ -22,10 +22,20 @@ nonisolated enum ElapsedDurationFormatter {
     }
 
     static func activeStartDate(for session: OCSession) -> Date? {
-        if let busyMs = session.time.busy, busyMs.isFinite, busyMs > 0 {
+        activeStartDate(for: session, observedStart: nil)
+    }
+
+    static func activeStartDate(for session: OCSession, observedStart: Date?) -> Date? {
+        if let busyMs = session.time.busy,
+           busyMs.isFinite,
+           busyMs > 0,
+           busyMs > (session.time.idle ?? 0) {
             return Date(timeIntervalSince1970: busyMs / 1_000)
         }
-        if session.time.created > 0 {
+        if let observedStart {
+            return observedStart
+        }
+        if session.parentID?.nilIfBlank != nil, session.time.created > 0 {
             return Date(timeIntervalSince1970: session.time.created / 1_000)
         }
         return nil
