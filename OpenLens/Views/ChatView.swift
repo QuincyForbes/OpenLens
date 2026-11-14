@@ -432,7 +432,10 @@ struct ChatView: View {
 
     private func handleScenePhaseChange(_ newPhase: ScenePhase) {
         if newPhase != .active {
-            if backgroundedAt == nil { backgroundedAt = .now }
+            if backgroundedAt == nil {
+                backgroundedAt = .now
+                chatClient.saveCurrentTranscriptToCache()
+            }
             return
         }
         let awayInterval = backgroundedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity

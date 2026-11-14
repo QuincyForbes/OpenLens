@@ -782,7 +782,7 @@ final class SavedConnectionsStore {
         }
 
         for incoming in incomingAlternates {
-            appendCandidate(incoming, allowSameHostEphemeralPort: true)
+            appendCandidate(incoming, allowSameHostEphemeralPort: previousPrimary == nil)
         }
         if let previousPrimary {
             appendCandidate(previousPrimary, allowSameHostEphemeralPort: false)

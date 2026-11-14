@@ -69,6 +69,12 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
         let agent: String?
         let state: SubagentResultState?
 
+        init(childID: String?, agent: String?, state: SubagentResultState?) {
+            self.childID = childID
+            self.agent = agent
+            self.state = state
+        }
+
         init?(metadata: [String: Any]) {
             guard metadata["source"] as? String == "subagent" else { return nil }
             let child = metadata["childID"] as? String
@@ -96,6 +102,30 @@ nonisolated struct SessionContextEntry: Decodable, Identifiable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, type, time, model, previous, agent, location, description, text
         case name, command, status, exit, output, reason, summary, recent, error, outcome, metadata
+    }
+
+    init(
+        id: String,
+        kind: Kind,
+        created: Double?,
+        title: String,
+        summary: String,
+        details: String,
+        resultPreview: String,
+        subagentResult: SubagentResult?,
+        compactionStatus: String?,
+        idleOutcome: String?
+    ) {
+        self.id = id
+        self.kind = kind
+        self.created = created
+        self.title = title
+        self.summary = summary
+        self.details = details
+        self.resultPreview = resultPreview
+        self.subagentResult = subagentResult
+        self.compactionStatus = compactionStatus
+        self.idleOutcome = idleOutcome
     }
 
     init(from decoder: Decoder) throws {

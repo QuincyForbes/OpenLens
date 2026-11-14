@@ -56,6 +56,22 @@ final class MessagesService {
         return Self.transcript(from: page.entries, olderCursor: page.olderCursor)
     }
 
+    /// Fetch only the tail delta needed to catch a locally cached transcript up to the server.
+    func loadDeltaTranscript(
+        sessionID: String,
+        knownEntryIDs: Set<String>
+    ) async throws -> (transcript: SessionTranscript, didOverlap: Bool) {
+        guard let client = connection.client else { throw OpenCodeError.notConnected }
+        let delta = try await client.listRecentTranscriptDelta(
+            sessionID: sessionID,
+            knownEntryIDs: knownEntryIDs
+        )
+        return (
+            transcript: Self.transcript(from: delta.entries, olderCursor: delta.olderCursor),
+            didOverlap: delta.didOverlapKnownHistory
+        )
+    }
+
     /// Share domain conversion across both reads and fixture presentation.
     static func transcript(from entries: [OCTranscriptEntry], olderCursor: String? = nil) -> SessionTranscript {
         return SessionTranscript(
@@ -276,7 +292,8 @@ final class MessagesService {
             modelID: resolvedModelID,
             providerID: resolvedProviderID,
             finish: msg.info.finish,
-            parentUserMessageID: msg.info.parentID
+            parentUserMessageID: msg.info.parentID,
+            hasAuthoritativeServerID: true
         )
     }
 }

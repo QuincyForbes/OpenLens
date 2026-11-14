@@ -196,13 +196,15 @@ final class SessionsService {
         return catalog + (connection.currentProject.map { [$0] } ?? [])
     }
 
-    private var pinScope: String? { connection.serverURL?.absoluteString }
+    private var pinScope: String? { connection.cacheScopeKey }
 
     var pinnedSessionIDs: Set<String> {
         let scope = pinScope
         // Read `pinsByServer` so `@Observable` tracks pin toggles, while caching
         // the constructed `Set` so N rows don't re-hash it N times per render.
-        let list = scope.flatMap { pinsByServer[$0] } ?? []
+        let list = scope.flatMap { pinsByServer[$0] }
+            ?? connection.serverURL?.absoluteString.flatMap { pinsByServer[$0] }
+            ?? []
         if cachedPinnedScope != scope {
             cachedPinnedScope = scope
             cachedPinnedSet = Set(list)
@@ -212,7 +214,10 @@ final class SessionsService {
 
     func togglePin(_ sessionID: String) {
         guard let pinScope else { return }
-        var ids = Set(pinsByServer[pinScope] ?? [])
+        let baseline = pinsByServer[pinScope]
+            ?? connection.serverURL?.absoluteString.flatMap { pinsByServer[$0] }
+            ?? []
+        var ids = Set(baseline)
         if !ids.insert(sessionID).inserted { ids.remove(sessionID) }
         cachedPinnedScope = pinScope
         cachedPinnedSet = ids
@@ -257,8 +262,9 @@ final class SessionsService {
     func hydrateFromLocalCache() -> [OCSession]? {
         guard let client = ensureLiveStateScope(),
               let cacheStore,
-              let scope = connection.serverURL?.absoluteString,
-              let cached = cacheStore.loadCatalog(serverScope: scope),
+              let scope = connection.cacheScopeKey,
+              let cached = cacheStore.loadCatalog(serverScope: scope)
+                ?? connection.serverURL?.absoluteString.flatMap({ cacheStore.loadCatalog(serverScope: $0) }),
               !cached.rootSessions.isEmpty else {
             return nil
         }
@@ -291,7 +297,7 @@ final class SessionsService {
 
     private func persistCatalogToLocalCache() {
         guard let cacheStore,
-              let scope = connection.serverURL?.absoluteString,
+              let scope = connection.cacheScopeKey,
               !ScreenshotFixtures.isEnabled else {
             return
         }
@@ -469,7 +475,7 @@ final class SessionsService {
             pendingCanonicalRefreshIDs.remove(sessionID)
             storedCachedSessions.removeAll { $0.id == sessionID }
             storedChildSessionsByID.removeValue(forKey: sessionID)
-            cacheStore?.removeSession(serverScope: connection.serverURL?.absoluteString, sessionID: sessionID)
+            cacheStore?.removeSession(serverScope: connection.cacheScopeKey, sessionID: sessionID)
             persistCatalogToLocalCache()
         }
     }
@@ -763,7 +769,7 @@ final class SessionsService {
                 storedServerStatuses.removeValue(forKey: session.id)
                 storedLiveActivitiesBySessionID.removeValue(forKey: session.id)
                 clientObservedActiveSessionIDs.remove(session.id)
-                cacheStore?.removeSession(serverScope: connection.serverURL?.absoluteString, sessionID: session.id)
+                cacheStore?.removeSession(serverScope: connection.cacheScopeKey, sessionID: session.id)
                 persistCatalogToLocalCache()
             }
         }

@@ -2453,7 +2453,7 @@ nonisolated struct OCV2SessionMessage: Decodable, Sendable {
         } else {
             parts = content.enumerated().map { index, item in
                 let rawPart = OCPart(
-                    id: item.id ?? "\(id)-\(index)",
+                    id: item.id ?? (item.type == .tool ? item.callID : nil) ?? "\(id)-\(index)",
                     sessionID: sessionID,
                     messageID: id,
                     type: item.type,

@@ -207,7 +207,7 @@ nonisolated struct ReviewFileChange: Identifiable, Hashable, Sendable {
 ///
 /// Full before/after contents are deliberately loaded on demand so a long
 /// transcript does not retain every historical file body in memory.
-nonisolated struct TurnFileChangeSummary: Identifiable, Hashable, Sendable {
+nonisolated struct TurnFileChangeSummary: Codable, Identifiable, Hashable, Sendable {
     let path: String
     let status: String
     let additions: Int

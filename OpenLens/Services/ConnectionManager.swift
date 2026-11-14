@@ -72,6 +72,8 @@ final class ConnectionManager: ConnectionProviding {
     @ObservationIgnored private let localNetworkAccessProbe: any LocalNetworkAccessProbing
     @ObservationIgnored private let lanServerDiscoverer: (any LANServerDiscovering)?
     @ObservationIgnored private var endpointRecoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var contextSwitchGraceTask: Task<Void, Never>?
+    @ObservationIgnored private var isSwitchingProjectContext = false
     @ObservationIgnored private var activeAuthHeader: String?
     @ObservationIgnored private var activeCredentials: (username: String, password: String)?
     private var reconnectingRecoveryInitialDelay: Duration = .milliseconds(2500)
@@ -115,6 +117,15 @@ final class ConnectionManager: ConnectionProviding {
         guard let host = serverURL?.host(percentEncoded: false)?.nilIfBlank else { return nil }
         if let port = serverURL?.port { return "\(host):\(port)" }
         return host
+    }
+
+    /// Stable local-cache scope that survives port changes and LAN/Tailscale endpoint failovers
+    /// on the same saved server connection.
+    var cacheScopeKey: String? {
+        if let activeID = savedConnectionsStore?.activeConnectionID?.nilIfBlank {
+            return "conn:\(activeID)"
+        }
+        return serverURL?.absoluteString
     }
 
     var isConnected: Bool {
@@ -475,6 +486,9 @@ final class ConnectionManager: ConnectionProviding {
         connectionGeneration &+= 1
         projectContextGeneration &+= 1
         projectContextRevision &+= 1
+        contextSwitchGraceTask?.cancel()
+        contextSwitchGraceTask = nil
+        isSwitchingProjectContext = false
         stopEndpointRecovery()
         finishSSEConnectionWait()
         stopHeartbeatWatchdog()
@@ -507,17 +521,20 @@ final class ConnectionManager: ConnectionProviding {
             guard let self, let sse, self.sseClient === sse else { return }
             switch sseState {
             case .connected:
+                self.contextSwitchGraceTask?.cancel()
+                self.contextSwitchGraceTask = nil
+                self.isSwitchingProjectContext = false
                 self.stopEndpointRecovery()
                 self.state = .connected
                 self.startHeartbeatWatchdog()
                 self.startNetworkPathMonitor()
                 self.finishSSEConnectionWait()
             case .connecting:
-                if self.state == .connected {
+                if self.state == .connected, !self.isSwitchingProjectContext {
                     self.enterReconnectingState(trackDisconnection: false)
                 }
             case .disconnected:
-                if self.state == .connected || self.state == .reconnecting {
+                if (self.state == .connected || self.state == .reconnecting), !self.isSwitchingProjectContext {
                     self.enterReconnectingState(trackDisconnection: true)
                 }
             }
@@ -593,17 +610,24 @@ final class ConnectionManager: ConnectionProviding {
         // The actor has already changed request routing. Commit the matching
         // published/SSE context even if the caller was cancelled at this await.
         guard generation == projectContextGeneration else { return }
+        let didChangeDirectory = selectedProjectDirectory != normalizedDirectory
         selectedProjectDirectory = normalizedDirectory
+        if didChangeDirectory, state == .connected, serverCapabilities?.protocolVersion == .v2 {
+            beginContextSwitchGraceWindow()
+        }
         sseClient?.updateContextDirectory(normalizedDirectory)
         projectContextRevision &+= 1
+        let hadCachedMetadata: Bool
         if let normalizedDirectory, let cached = cachedProjectMetadataByDirectory[normalizedDirectory] {
             currentProject = cached.project
             projectName = cached.project?.displayName ?? cached.project?.worktree
             branch = cached.branch
+            hadCachedMetadata = true
         } else {
             currentProject = nil
             projectName = nil
             branch = nil
+            hadCachedMetadata = false
         }
 
         if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
@@ -613,7 +637,36 @@ final class ConnectionManager: ConnectionProviding {
             )
         }
 
-        await refreshProjectMetadata()
+        if hadCachedMetadata {
+            Task { @MainActor [weak self] in
+                await self?.refreshProjectMetadata()
+            }
+        } else {
+            await refreshProjectMetadata()
+        }
+    }
+
+    /// Suppresses brief `.reconnecting` UI flashes when rotating the v2 SSE directory filter,
+    /// falling back to `.reconnecting` only if the new stream has not connected within 2 seconds.
+    private func beginContextSwitchGraceWindow() {
+        isSwitchingProjectContext = true
+        contextSwitchGraceTask?.cancel()
+        let generation = connectionGeneration
+        contextSwitchGraceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.connectionGeneration == generation,
+                  self.isSwitchingProjectContext else { return }
+            self.isSwitchingProjectContext = false
+            self.contextSwitchGraceTask = nil
+            if self.sseClient?.state != .connected && self.state == .connected {
+                self.enterReconnectingState(trackDisconnection: true)
+            }
+        }
     }
 
     func takeGlobalFormRecoveryDirectories(using client: OpenCodeClient) -> Set<String> {

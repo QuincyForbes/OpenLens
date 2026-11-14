@@ -166,9 +166,8 @@ struct ConnectedRootView: View {
             try? await Task.sleep(nanoseconds: interval)
             guard !Task.isCancelled, chatClient.isLoading else { return }
 
-            let needsExternalTranscriptSync = chatClient.pendingAssistantMessage == nil
-                || connection.sseClient?.state != .connected
-            if needsExternalTranscriptSync {
+            let sseCurrentlyHealthy = connection.sseClient?.state == .connected && chatClient.isStreamSynchronized
+            if !sseCurrentlyHealthy {
                 async let messagesRefresh = chatClient.loadMessages(syncModelSelection: false)
                 async let permissionRefresh = chatClient.recoverPendingPermission()
                 async let questionRefresh = chatClient.recoverPendingQuestions()

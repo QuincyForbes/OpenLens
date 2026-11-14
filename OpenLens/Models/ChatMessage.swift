@@ -575,6 +575,9 @@ final class ChatMessage: Identifiable {
     var finish: String?
     private(set) var parentUserMessageID: String?
     private(set) var turnFileChanges: [TurnFileChangeSummary]
+    /// True once this message's `id` came from the OpenCode server rather than an optimistic
+    /// local placeholder, preventing multi-step turns from overwriting an earlier step's ID.
+    @ObservationIgnored private(set) var hasAuthoritativeServerID: Bool
 
     let streamingTextProjection: StreamingTextProjection
     /// Compatibility text without a server `partID` is represented as one
@@ -609,11 +612,13 @@ final class ChatMessage: Identifiable {
         providerID: String? = nil,
         finish: String? = nil,
         parentUserMessageID: String? = nil,
-        turnFileChanges: [TurnFileChangeSummary] = []
+        turnFileChanges: [TurnFileChangeSummary] = [],
+        hasAuthoritativeServerID: Bool = false
     ) {
         self.id = id
         self.role = role
         self.streamingTextProjection = StreamingTextProjection(id: "content-text-\(id)")
+        self.hasAuthoritativeServerID = hasAuthoritativeServerID
         self.content = content
         self.parts = parts
         self.isStreaming = isStreaming
@@ -706,6 +711,11 @@ final class ChatMessage: Identifiable {
     func remapStreamingID(to newID: String) {
         guard isStreaming, id != newID else { return }
         id = newID
+        hasAuthoritativeServerID = true
+    }
+
+    func markAuthoritativeServerID() {
+        hasAuthoritativeServerID = true
     }
 
     /// The active fallback slot is reusable only while it remains the terminal
@@ -749,8 +759,12 @@ final class ChatMessage: Identifiable {
         }
 
         var localPartsByID: [String: OCPart] = [:]
+        var localToolPartsByCallID: [String: OCPart] = [:]
         for part in parts {
             localPartsByID[part.id] = part
+            if part.type == .tool, let callID = part.callID?.nilIfBlank {
+                localToolPartsByCallID[callID] = part
+            }
         }
 
         var merged: [OCPart] = []
@@ -774,8 +788,20 @@ final class ChatMessage: Identifiable {
                     continue
                 }
             }
+            let matchedLocalPart: OCPart? = {
+                if let exact = localPartsByID[serverPart.id], exact.type == serverPart.type {
+                    return exact
+                }
+                if serverPart.type == .tool,
+                   let callID = serverPart.callID?.nilIfBlank,
+                   let byCallID = localToolPartsByCallID[callID] {
+                    return byCallID
+                }
+                return nil
+            }()
             let selectedPart: OCPart
-            if let localPart = localPartsByID[serverPart.id], localPart.type == serverPart.type {
+            if let localPart = matchedLocalPart {
+                includedPartIDs.insert(localPart.id)
                 switch localPart.type {
                 case .text:
                     // A server value extending the local projection is a

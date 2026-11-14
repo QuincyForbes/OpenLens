@@ -327,37 +327,66 @@ final class SSEEventHandler {
             let tokens = update.tokens
 
             if let existing = delegate.pendingAssistantMessage {
-                // Update the pending message in-place (not visible yet).
-                if existing.id != messageID {
-                    if delegate.remapStreamingMessageID(from: existing.id, to: messageID) {
-                        delegate.messageLayoutDidChange()
-                    } else {
-                        // Compatibility fallback for lightweight delegates used
-                        // by previews/tests that do not own a stream buffer.
-                        let replacement = ChatMessage(
+                if existing.id == messageID {
+                    existing.markAuthoritativeServerID()
+                    existing.cost = cost
+                    if let tokens { existing.tokens = tokens }
+                    if let mid = serverModelID { existing.modelID = mid }
+                    if let pid = serverProviderID { existing.providerID = pid }
+                    existing.finish = finish
+                    existing.setParentUserMessageID(update.parentID)
+                } else if delegate.remapStreamingMessageID(from: existing.id, to: messageID) {
+                    delegate.messageLayoutDidChange()
+                    existing.cost = cost
+                    if let tokens { existing.tokens = tokens }
+                    if let mid = serverModelID { existing.modelID = mid }
+                    if let pid = serverProviderID { existing.providerID = pid }
+                    existing.finish = finish
+                    existing.setParentUserMessageID(update.parentID)
+                } else if existing.hasAuthoritativeServerID
+                            || delegate.messages.contains(where: { $0.id == existing.id }) {
+                    // `existing` is an earlier authoritative server step (e.g. reattached on chat
+                    // entry or whose step-end was missed). Finalize it into `messages` and start a
+                    // distinct pending message for the new step instead of merging both steps.
+                    delegate.finishAssistantStep(messageID: existing.id)
+                    if !delegate.messages.contains(where: { $0.id == messageID }) {
+                        delegate.pendingAssistantMessage = ChatMessage(
                             id: messageID,
                             role: .assistant,
-                            content: existing.content,
-                            parts: existing.parts,
+                            content: "",
                             isStreaming: true,
-                            createdAt: existing.createdAt,
                             cost: cost,
-                            tokens: tokens ?? existing.tokens,
-                            modelID: serverModelID ?? existing.modelID,
-                            providerID: serverProviderID ?? existing.providerID,
+                            tokens: tokens,
+                            modelID: serverModelID,
+                            providerID: serverProviderID,
                             finish: finish,
-                            parentUserMessageID: update.parentID ?? existing.parentUserMessageID
+                            parentUserMessageID: update.parentID,
+                            hasAuthoritativeServerID: true
                         )
-                        delegate.pendingAssistantMessage = replacement
+                        if !delegate.isLoading {
+                            delegate.beginExternalResponse()
+                        }
                     }
+                } else {
+                    // Compatibility fallback for lightweight delegates used
+                    // by previews/tests that do not own a stream buffer.
+                    let replacement = ChatMessage(
+                        id: messageID,
+                        role: .assistant,
+                        content: existing.content,
+                        parts: existing.parts,
+                        isStreaming: true,
+                        createdAt: existing.createdAt,
+                        cost: cost,
+                        tokens: tokens ?? existing.tokens,
+                        modelID: serverModelID ?? existing.modelID,
+                        providerID: serverProviderID ?? existing.providerID,
+                        finish: finish,
+                        parentUserMessageID: update.parentID ?? existing.parentUserMessageID,
+                        hasAuthoritativeServerID: true
+                    )
+                    delegate.pendingAssistantMessage = replacement
                 }
-
-                existing.cost = cost
-                if let tokens { existing.tokens = tokens }
-                if let mid = serverModelID { existing.modelID = mid }
-                if let pid = serverProviderID { existing.providerID = pid }
-                existing.finish = finish
-                existing.setParentUserMessageID(update.parentID)
             } else if !delegate.messages.contains(where: { $0.id == messageID }) {
                 // New assistant message — create as pending (hidden from chat).
                 delegate.pendingAssistantMessage = ChatMessage(
@@ -370,7 +399,8 @@ final class SSEEventHandler {
                     modelID: serverModelID,
                     providerID: serverProviderID,
                     finish: finish,
-                    parentUserMessageID: update.parentID
+                    parentUserMessageID: update.parentID,
+                    hasAuthoritativeServerID: true
                 )
                 if !delegate.isLoading {
                     delegate.beginExternalResponse()

@@ -511,6 +511,71 @@ actor OpenCodeClient {
         return (entries, nil)
     }
 
+    /// Fetches only the newest tail entries needed to catch up to an already-cached local
+    /// transcript, avoiding a full 16-message stack download when only 1–5 messages arrived.
+    func listRecentTranscriptDelta(
+        sessionID: String,
+        knownEntryIDs: Set<String>,
+        deltaLimit: Int = 6,
+        fallbackLimit: Int = 12
+    ) async throws -> (entries: [OCTranscriptEntry], olderCursor: String?, didOverlapKnownHistory: Bool) {
+        guard usesV2, !knownEntryIDs.isEmpty else {
+            let full = try await listRecentTranscriptPage(sessionID: sessionID, cursor: nil, limit: deltaLimit + fallbackLimit)
+            let overlapped = full.entries.contains { knownEntryIDs.contains($0.id) }
+            return (full.entries, full.olderCursor, overlapped)
+        }
+
+        let firstPage: OCV2PageResult<OCV2SessionMessage> = try await getV2Page(
+            endpoint: "/api/session/\(sessionID)/message",
+            cursor: nil,
+            limit: deltaLimit,
+            order: "desc",
+            includesLocation: false,
+            queryItems: []
+        )
+
+        var firstValues = firstPage.values
+        let firstWasDescending = firstValues.count >= 2 && Self.isDescendingV2MessageOrder(firstValues)
+        if firstWasDescending {
+            firstValues.reverse()
+        }
+        let firstProjected = OCTranscriptEntry.projectV2(firstValues, sessionID: sessionID)
+        let firstOverlapped = firstProjected.contains { knownEntryIDs.contains($0.id) }
+
+        guard let nextCursor = firstPage.nextCursor, !firstOverlapped else {
+            return (firstProjected, firstPage.nextCursor, firstOverlapped)
+        }
+
+        let secondPage: OCV2PageResult<OCV2SessionMessage> = try await getV2Page(
+            endpoint: "/api/session/\(sessionID)/message",
+            cursor: nextCursor,
+            limit: fallbackLimit,
+            order: "desc",
+            includesLocation: false,
+            queryItems: []
+        )
+
+        var secondValues = secondPage.values
+        if secondValues.count >= 2, Self.isDescendingV2MessageOrder(secondValues) {
+            secondValues.reverse()
+        }
+
+        let combinedValues: [OCV2SessionMessage]
+        if firstWasDescending {
+            combinedValues = secondValues + firstValues
+        } else if let firstEarliest = firstValues.first,
+                  let secondLatest = secondValues.last,
+                  Self.isDescendingV2MessageOrder([firstEarliest, secondLatest]) {
+            combinedValues = secondValues + firstValues
+        } else {
+            combinedValues = firstValues + secondValues
+        }
+
+        let combinedProjected = OCTranscriptEntry.projectV2(combinedValues, sessionID: sessionID)
+        let combinedOverlapped = combinedProjected.contains { knownEntryIDs.contains($0.id) }
+        return (combinedProjected, secondPage.nextCursor, combinedOverlapped)
+    }
+
     private nonisolated static func isDescendingV2MessageOrder(_ entries: [OCV2SessionMessage]) -> Bool {
         guard let first = entries.first, let last = entries.last, first.id != last.id else {
             return false

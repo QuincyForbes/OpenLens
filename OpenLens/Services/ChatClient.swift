@@ -156,6 +156,7 @@ final class ChatClient: SSEEventHandlerDelegate {
     private var isLoadingEarlierHistory = false
     @ObservationIgnored let sessionCacheStore: SessionCacheStore
     @ObservationIgnored private var cachedTurnDiffSummariesByMessageID: [String: [TurnFileChangeSummary]] = [:]
+    @ObservationIgnored private var currentSessionRestoredAuthoritativeUpdatedAt: Double?
     private var activeContextSessionGeneration: UInt = 0
     private var activeContextTranscriptRevision: UInt = 0
     private var activeContextWasV2 = false
@@ -1074,6 +1075,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 olderCursor: older.olderCursor
             )
         )
+        saveCurrentTranscriptToCache()
     }
 
     private func rebuildDisplayedMessages() {
@@ -2136,10 +2138,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private var serverCacheScope: String? {
-        connection?.serverURL?.absoluteString
+        connection?.cacheScopeKey ?? connection?.serverURL?.absoluteString
     }
 
-    func saveCurrentTranscriptToCache() {
+    func saveCurrentTranscriptToCache(
+        isAuthoritative: Bool? = nil,
+        syncedUpdatedAt: Double? = nil
+    ) {
         guard !isOfflinePreviewMode,
               !isDemoMode,
               !isRecordedReplayMode,
@@ -2155,6 +2160,17 @@ final class ChatClient: SSEEventHandlerDelegate {
         if let pending = pendingAssistantMessage, !snapshotOrder.contains(pending.id) {
             snapshotOrder.append(pending.id)
         }
+        let resolvedAuthoritative = isAuthoritative
+            ?? (isStreamSynchronized && !isLoading && pendingAssistantMessage == nil && currentSessionRestoredAuthoritativeUpdatedAt != nil)
+        let resolvedSyncedUpdatedAt: Double?
+        if resolvedAuthoritative {
+            resolvedSyncedUpdatedAt = syncedUpdatedAt
+                ?? currentSessionRestoredAuthoritativeUpdatedAt
+                ?? (session.time.updated > 0 ? session.time.updated : nil)
+            currentSessionRestoredAuthoritativeUpdatedAt = resolvedSyncedUpdatedAt
+        } else {
+            resolvedSyncedUpdatedAt = nil
+        }
         sessionCacheStore.saveTranscript(
             serverScope: serverCacheScope,
             session: session,
@@ -2164,7 +2180,10 @@ final class ChatClient: SSEEventHandlerDelegate {
             olderCursor: olderTranscriptCursor,
             todos: todos,
             hiddenTodoCount: hiddenTodoCount,
-            turnDiffSummaries: cachedTurnDiffSummariesByMessageID
+            turnDiffSummaries: cachedTurnDiffSummariesByMessageID,
+            displayLimit: displayLimit,
+            syncedUpdatedAt: resolvedSyncedUpdatedAt,
+            isAuthoritative: resolvedAuthoritative
         )
     }
 
@@ -2240,12 +2259,22 @@ final class ChatClient: SSEEventHandlerDelegate {
             composerPastedSnippets = []
         }
 
-        // Restore cached transcript & todos immediately on Frame 0.
-        if let cached = sessionCacheStore.transcript(serverScope: serverCacheScope, sessionID: session.id) {
+        // Restore cached transcript, display depth & todos immediately on Frame 0.
+        let cachedSnapshot = sessionCacheStore.transcript(serverScope: serverCacheScope, sessionID: session.id)
+            ?? connection?.serverURL?.absoluteString.flatMap {
+                sessionCacheStore.transcript(serverScope: $0, sessionID: session.id)
+            }
+        let knownStatus = sessionsService?.effectiveStatuses[session.id]
+        let isKnownWorking = SessionListOrganization.isWorking(knownStatus)
+
+        if let cached = cachedSnapshot {
             cachedTurnDiffSummariesByMessageID = cached.turnDiffSummariesByMessageID
             preserveTurnFileChanges(in: cached.messages)
             todos = cached.todos
             hiddenTodoCount = cached.hiddenTodoCount
+            if cached.displayLimit > displayLimit {
+                displayLimit = cached.displayLimit
+            }
             replaceTranscript(
                 SessionTranscript(
                     messages: cached.messages,
@@ -2254,12 +2283,21 @@ final class ChatClient: SSEEventHandlerDelegate {
                     olderCursor: cached.olderCursor
                 )
             )
+            if !isKnownWorking,
+               cached.isAuthoritative,
+               session.time.updated > 0,
+               cached.syncedUpdatedAt == session.time.updated,
+               session.revert == cached.session.revert {
+                currentSessionRestoredAuthoritativeUpdatedAt = cached.syncedUpdatedAt
+                isStreamSynchronized = true
+            }
         }
 
         // If `SessionsService` already knows this session is working right now,
         // reflect its live generating state and current tool/step immediately.
-        if let knownStatus = sessionsService?.effectiveStatuses[session.id],
-           SessionListOrganization.isWorking(knownStatus) {
+        if let knownStatus, isKnownWorking {
+            currentSessionRestoredAuthoritativeUpdatedAt = nil
+            isStreamSynchronized = false
             sessionStatus = knownStatus
             responseState = .generating
             isLoading = true
@@ -2422,18 +2460,66 @@ final class ChatClient: SSEEventHandlerDelegate {
               connection?.client === loadingClient, currentSession?.id == session.id else { return }
         restoredWorkspaceRevision = connection?.projectContextRevision
         let loadedCanonicalSession: OCSession? = usesV2SessionAPI ? session : nil
-        async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
-        async let messagesTask = loadMessages(knownCanonicalSession: loadedCanonicalSession)
-        async let permissionTask = recoverPendingPermission()
-        async let questionTask = recoverPendingQuestions()
-        async let formTask = recoverPendingForms()
-        let (didLoadMessages, permissionRecovered, questionRecovered, formRecovered, _) = await (
-            messagesTask,
-            permissionTask,
-            questionTask,
-            formTask,
-            providersTask
-        )
+        let canUseAuthoritativeWatermarkFastPath = usesV2SessionAPI
+            && !reopeningCurrentSession
+            && session.time.updated > 0
+            && currentSessionRestoredAuthoritativeUpdatedAt == session.time.updated
+            && (!messages.isEmpty || !contextEntries.isEmpty)
+            && session.revert == nil
+            && !isLoading
+            && !SessionListOrganization.isWorking(sessionsService?.effectiveStatuses[session.id])
+            && optimisticV2UserMessageIDs.isEmpty
+            && promptSubmissions.isEmpty
+
+        let didLoadMessages: Bool
+        let permissionRecovered: Bool
+        let questionRecovered: Bool
+        let formRecovered: Bool
+
+        if canUseAuthoritativeWatermarkFastPath {
+            async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
+            async let inboxTask = recoverSessionInbox()
+            async let statusTask = refreshCurrentSessionStatus(knownCanonicalSession: loadedCanonicalSession)
+            async let permissionTask = recoverPendingPermission()
+            async let questionTask = recoverPendingQuestions()
+            async let formTask = recoverPendingForms()
+            let (inboxOutcome, statusRecovered, permOk, questOk, formOk, _) = await (
+                inboxTask,
+                statusTask,
+                permissionTask,
+                questionTask,
+                formTask,
+                providersTask
+            )
+            guard !Task.isCancelled, sessionLoadToken == token,
+                  connection?.client === loadingClient, currentSession?.id == session.id else { return }
+            permissionRecovered = permOk
+            questionRecovered = questOk
+            formRecovered = formOk
+            if inboxOutcome == .current && statusRecovered && !isLoading && sessionInbox.isEmpty {
+                projectSessionInbox()
+                didLoadMessages = true
+            } else {
+                didLoadMessages = await loadMessages(knownCanonicalSession: loadedCanonicalSession)
+            }
+        } else {
+            async let providersTask: Void = shouldLoadV2Providers ? loadProviders() : ()
+            async let messagesTask = loadMessages(knownCanonicalSession: loadedCanonicalSession)
+            async let permissionTask = recoverPendingPermission()
+            async let questionTask = recoverPendingQuestions()
+            async let formTask = recoverPendingForms()
+            let (loadedOk, permOk, questOk, formOk, _) = await (
+                messagesTask,
+                permissionTask,
+                questionTask,
+                formTask,
+                providersTask
+            )
+            didLoadMessages = loadedOk
+            permissionRecovered = permOk
+            questionRecovered = questOk
+            formRecovered = formOk
+        }
         guard !Task.isCancelled, sessionLoadToken == token,
               connection?.client === loadingClient, currentSession?.id == session.id else { return }
         if didLoadMessages, preparedSessionID == session.id {
@@ -2602,16 +2688,29 @@ final class ChatClient: SSEEventHandlerDelegate {
                 _ = await todosTask
                 return false
             }
-            let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 16
             guard let messagesService else {
                 _ = await statusesPrefetch
                 _ = await todosTask
                 return false
             }
-            let rawTranscript = try await messagesService.loadTranscript(
-                sessionID: session.id,
-                limit: fetchLimit
-            )
+            let effectiveRevert = currentSession?.id == session.id
+                ? currentSession?.revert
+                : session.revert
+            let existingKnownIDs = Set(transcriptEntryOrder)
+            let rawTranscript: SessionTranscript
+            if usesV2SessionAPI, !existingKnownIDs.isEmpty, effectiveRevert == nil {
+                let delta = try await messagesService.loadDeltaTranscript(
+                    sessionID: session.id,
+                    knownEntryIDs: existingKnownIDs
+                )
+                rawTranscript = delta.transcript
+            } else {
+                let fetchLimit = (!messages.isEmpty && olderTranscriptCursor != nil) ? 15 : 16
+                rawTranscript = try await messagesService.loadTranscript(
+                    sessionID: session.id,
+                    limit: fetchLimit
+                )
+            }
             guard isCurrent() else {
                 _ = await statusesPrefetch
                 _ = await todosTask
@@ -2689,7 +2788,16 @@ final class ChatClient: SSEEventHandlerDelegate {
             knownCanonicalSession: knownCanonicalSession
         )
         await todosTask
-        return inboxRecovered && statusRecovered && !Task.isCancelled && currentSession?.id == session.id
+        if inboxRecovered && statusRecovered && !Task.isCancelled && currentSession?.id == session.id {
+            let canonicalUpdated = (knownCanonicalSession ?? currentSession)?.time.updated
+            let settledCleanly = !isLoading && pendingAssistantMessage == nil
+            saveCurrentTranscriptToCache(
+                isAuthoritative: settledCleanly,
+                syncedUpdatedAt: settledCleanly ? canonicalUpdated : nil
+            )
+            return true
+        }
+        return false
     }
 
     func unloadSession(ifMatching sessionID: String) {
@@ -2726,10 +2834,30 @@ final class ChatClient: SSEEventHandlerDelegate {
         // Only preserve older in-memory pages when the incoming response is a partial tail page
         // (`incoming.olderCursor != nil`). When `incoming.olderCursor == nil`, the server response
         // contains the complete transcript.
-        guard incoming.olderCursor != nil,
-              let firstIncomingID = incoming.entryOrder.first,
-              let overlapIndex = transcriptEntryOrder.firstIndex(of: firstIncomingID),
-              overlapIndex > 0 else {
+        guard incoming.olderCursor != nil else {
+            return SessionTranscript(
+                messages: reusedMessages,
+                contextEntries: incoming.contextEntries,
+                entryOrder: incoming.entryOrder,
+                olderCursor: nil
+            )
+        }
+
+        let existingIndexByID = Dictionary(
+            transcriptEntryOrder.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        guard let firstOverlapID = incoming.entryOrder.first(where: { existingIndexByID[$0] != nil }),
+              let overlapIndex = existingIndexByID[firstOverlapID] else {
+            return SessionTranscript(
+                messages: reusedMessages,
+                contextEntries: incoming.contextEntries,
+                entryOrder: incoming.entryOrder,
+                olderCursor: incoming.olderCursor
+            )
+        }
+
+        guard overlapIndex > 0 else {
             return SessionTranscript(
                 messages: reusedMessages,
                 contextEntries: incoming.contextEntries,
@@ -2748,7 +2876,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             messages: prefixMessages + reusedMessages,
             contextEntries: prefixContexts + incoming.contextEntries,
             entryOrder: Array(prefixOrder) + incoming.entryOrder,
-            olderCursor: olderTranscriptCursor ?? incoming.olderCursor
+            olderCursor: olderTranscriptCursor
         )
     }
 
@@ -3468,6 +3596,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                     timelineVersion &+= 1
                     contentVersion &+= 1
                 }
+                saveCurrentTranscriptToCache()
                 return
             } catch is CancellationError {
                 return
@@ -5527,10 +5656,51 @@ final class ChatClient: SSEEventHandlerDelegate {
             allMessages.append(pending)
         }
 
+        var explicitlyLinkedChildIDs = Set<String>()
+        for message in allMessages where message.role == .assistant {
+            for segment in message.assistantSegments {
+                if case let .subagent(step) = segment.kind, let cid = step.childSessionID {
+                    explicitlyLinkedChildIDs.insert(cid)
+                }
+            }
+        }
+        for entry in contextEntries {
+            if let cid = entry.subagentResult?.childID {
+                explicitlyLinkedChildIDs.insert(cid)
+            }
+        }
+        var unclaimedChildren = childSessions
+            .filter { !explicitlyLinkedChildIDs.contains($0.id) }
+            .sorted { $0.createdAt < $1.createdAt }
+
         for message in allMessages where message.role == .assistant {
             for segment in message.assistantSegments {
                 guard case let .subagent(step) = segment.kind else { continue }
-                let childID = step.childSessionID
+                var resolvedChildID = step.childSessionID
+                if resolvedChildID == nil, !unclaimedChildren.isEmpty {
+                    // When a subagent tool call is still running, OpenCode may not attach
+                    // `metadata.sessionId` until completion while `SessionsService` already
+                    // knows the child session via `parentID`. Correlate them so the UI never
+                    // displays the same running subagent twice under `call_...` and `ses_...`.
+                    let minCreated = message.createdAt.addingTimeInterval(-10)
+                    let stepAgent = step.agentName?.lowercased()
+                    let matchIndex = unclaimedChildren.firstIndex { candidate in
+                        guard candidate.createdAt >= minCreated else { return false }
+                        if let stepAgent, let candidateAgent = candidate.agent?.lowercased() {
+                            return stepAgent == candidateAgent
+                        }
+                        return step.isActive && SessionListOrganization.isWorking(statuses[candidate.id])
+                    } ?? (step.isActive ? unclaimedChildren.firstIndex {
+                        SessionListOrganization.isWorking(statuses[$0.id]) && $0.createdAt >= minCreated
+                    } : nil)
+
+                    if let matchIndex {
+                        let matched = unclaimedChildren.remove(at: matchIndex)
+                        resolvedChildID = matched.id
+                    }
+                }
+
+                let childID = resolvedChildID
                 let childSession = childID.flatMap { childrenByID[$0] }
                 let serverWorking = childID.map { SessionListOrganization.isWorking(statuses[$0]) } ?? false
                 let locallyStopped = childID.map { locallyStoppedSubagentIDs.contains($0) } ?? false
@@ -6336,7 +6506,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     func remapStreamingMessageID(from oldID: String, to newID: String) -> Bool {
         guard oldID != newID,
               let pending = pendingAssistantMessage,
-              pending.id == oldID
+              pending.id == oldID,
+              !pending.hasAuthoritativeServerID,
+              !messages.contains(where: { $0.id == oldID })
         else {
             return false
         }
@@ -6778,6 +6950,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         streamSynchronizationRetryTask = nil
         streamSynchronizationRetryCount = 0
         cachedTurnDiffSummariesByMessageID.removeAll()
+        currentSessionRestoredAuthoritativeUpdatedAt = nil
         stopViewingResults()
         viewedMarkerRefreshTask?.cancel()
         viewedMarkerRefreshTask = nil

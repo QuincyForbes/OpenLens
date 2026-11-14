@@ -25,6 +25,9 @@ final class SessionCacheStore {
         var todos: [OCTodo]
         var hiddenTodoCount: Int
         var turnDiffSummariesByMessageID: [String: [TurnFileChangeSummary]]
+        var displayLimit: Int = 15
+        var syncedUpdatedAt: Double? = nil
+        var isAuthoritative: Bool = false
         var cachedAt: Date
     }
 
@@ -58,15 +61,35 @@ final class SessionCacheStore {
         let parentUserMessageID: String?
     }
 
+    nonisolated private struct PersistedContextRecord: Codable, Sendable {
+        let id: String
+        let kindRawValue: String
+        let created: Double?
+        let title: String
+        let summary: String
+        let details: String
+        let resultPreview: String
+        let subagentChildID: String?
+        let subagentAgent: String?
+        let subagentStateRawValue: String?
+        let compactionStatus: String?
+        let idleOutcome: String?
+    }
+
     nonisolated private struct PersistedTranscriptPayload: Codable, Sendable {
         let schemaVersion: Int
         let savedAt: Date
         let session: OCSession
         let messages: [PersistedMessageRecord]
+        let contextEntries: [PersistedContextRecord]?
         let entryOrder: [String]
         let olderCursor: String?
         let todos: [OCTodo]
         let hiddenTodoCount: Int
+        let turnDiffSummariesByMessageID: [String: [TurnFileChangeSummary]]?
+        let displayLimit: Int?
+        let syncedUpdatedAt: Double?
+        let isAuthoritative: Bool?
     }
 
     private struct TranscriptKey: Hashable {
@@ -74,13 +97,15 @@ final class SessionCacheStore {
         let sessionID: String
     }
 
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
     static let defaultMaximumInMemorySessions = 16
-    static let defaultMaximumDiskTranscripts = 32
-    static let maximumCachedMessagesPerSession = 20
-    static let maximumCachedContextEntriesPerSession = 24
+    static let defaultMaximumDiskTranscripts = 40
+    static let maximumCachedMessagesPerSession = 60
+    static let maximumDiskMessagesPerSession = 40
+    static let maximumCachedContextEntriesPerSession = 40
     static let maximumSingleMessageCachedUTF8Bytes = 256 * 1_024
     static let maximumDiskMessageUTF8Bytes = 64 * 1_024
+    static let maximumDiskContextDetailsUTF8Bytes = 16 * 1_024
     static let maximumPersistedRootSessions = 400
     static let maximumPersistedChildSessions = 200
 
@@ -162,7 +187,7 @@ final class SessionCacheStore {
         guard let url = catalogFileURL(forNormalizedScope: scope),
               let data = try? Data(contentsOf: url),
               let decoded = Self.decodeCatalogPayload(from: data),
-              decoded.schemaVersion == Self.currentSchemaVersion else {
+              (1...Self.currentSchemaVersion).contains(decoded.schemaVersion) else {
             return nil
         }
 
@@ -232,14 +257,15 @@ final class SessionCacheStore {
         guard let fileURL = transcriptFileURL(forNormalizedScope: scope, sessionID: sessionID),
               let data = try? Data(contentsOf: fileURL),
               let decoded = Self.decodeTranscriptPayload(from: data),
-              decoded.schemaVersion == Self.currentSchemaVersion,
+              (1...Self.currentSchemaVersion).contains(decoded.schemaVersion),
               decoded.session.id == sessionID else {
             return nil
         }
 
+        let diffSummaries = decoded.turnDiffSummariesByMessageID ?? [:]
         let restoredMessages = decoded.messages.map { record -> ChatMessage in
             let role = OCMessageRole(rawValue: record.roleRawValue) ?? .assistant
-            return ChatMessage(
+            let msg = ChatMessage(
                 id: record.id,
                 role: role,
                 content: record.content,
@@ -251,19 +277,53 @@ final class SessionCacheStore {
                 modelID: record.modelID,
                 providerID: record.providerID,
                 finish: record.finish,
-                parentUserMessageID: record.parentUserMessageID
+                parentUserMessageID: record.parentUserMessageID,
+                hasAuthoritativeServerID: true
+            )
+            if let changes = diffSummaries[record.id], !changes.isEmpty {
+                msg.setTurnFileChanges(changes)
+            }
+            return msg
+        }
+
+        let restoredContexts: [SessionContextEntry] = (decoded.contextEntries ?? []).compactMap { record in
+            guard let kind = SessionContextEntry.Kind(rawValue: record.kindRawValue) else { return nil }
+            let subagentResult: SessionContextEntry.SubagentResult?
+            if record.subagentChildID != nil || record.subagentAgent != nil || record.subagentStateRawValue != nil {
+                subagentResult = SessionContextEntry.SubagentResult(
+                    childID: record.subagentChildID,
+                    agent: record.subagentAgent,
+                    state: record.subagentStateRawValue.flatMap(SubagentResultState.init(rawValue:))
+                )
+            } else {
+                subagentResult = nil
+            }
+            return SessionContextEntry(
+                id: record.id,
+                kind: kind,
+                created: record.created,
+                title: record.title,
+                summary: record.summary,
+                details: record.details,
+                resultPreview: record.resultPreview,
+                subagentResult: subagentResult,
+                compactionStatus: record.compactionStatus,
+                idleOutcome: record.idleOutcome
             )
         }
 
         let snapshot = CachedTranscriptSnapshot(
             session: decoded.session,
             messages: restoredMessages,
-            contextEntries: [],
+            contextEntries: restoredContexts,
             entryOrder: decoded.entryOrder,
             olderCursor: decoded.olderCursor,
             todos: decoded.todos,
             hiddenTodoCount: decoded.hiddenTodoCount,
-            turnDiffSummariesByMessageID: [:],
+            turnDiffSummariesByMessageID: diffSummaries,
+            displayLimit: max(15, decoded.displayLimit ?? 15),
+            syncedUpdatedAt: decoded.syncedUpdatedAt,
+            isAuthoritative: decoded.isAuthoritative ?? false,
             cachedAt: decoded.savedAt
         )
         insertIntoLRU(snapshot, for: key)
@@ -279,10 +339,13 @@ final class SessionCacheStore {
         olderCursor: String?,
         todos: [OCTodo],
         hiddenTodoCount: Int,
-        turnDiffSummaries: [String: [TurnFileChangeSummary]] = [:]
+        turnDiffSummaries: [String: [TurnFileChangeSummary]] = [:],
+        displayLimit: Int = 15,
+        syncedUpdatedAt: Double? = nil,
+        isAuthoritative: Bool = false
     ) {
         guard !session.id.isEmpty else { return }
-        if messages.isEmpty && contextEntries.isEmpty && todos.isEmpty {
+        if messages.isEmpty && contextEntries.isEmpty && todos.isEmpty && !isAuthoritative {
             return
         }
 
@@ -322,12 +385,15 @@ final class SessionCacheStore {
             return snap
         }
 
-        guard !cacheableMessages.isEmpty || !todos.isEmpty else { return }
+        guard !cacheableMessages.isEmpty || !contextEntries.isEmpty || !todos.isEmpty || isAuthoritative else {
+            return
+        }
 
         let boundedContexts = Array(contextEntries.suffix(Self.maximumCachedContextEntriesPerSession))
         let keptIDs = Set(cacheableMessages.map(\.id)).union(boundedContexts.map(\.id))
         let filteredOrder = entryOrder.filter { keptIDs.contains($0) }
-        let resolvedOlderCursor = olderCursor ?? (droppedEarlierMessages ? nil : olderCursor)
+        let resolvedOlderCursor = droppedEarlierMessages ? olderCursor : olderCursor
+        let effectiveAuthoritative = isAuthoritative && !droppedEarlierMessages
 
         var relevantDiffs: [String: [TurnFileChangeSummary]] = [:]
         for message in cacheableMessages {
@@ -339,6 +405,7 @@ final class SessionCacheStore {
         }
 
         let now = Date()
+        let normalizedDisplayLimit = max(15, displayLimit)
         let snapshot = CachedTranscriptSnapshot(
             session: session,
             messages: cacheableMessages,
@@ -348,6 +415,9 @@ final class SessionCacheStore {
             todos: todos,
             hiddenTodoCount: hiddenTodoCount,
             turnDiffSummariesByMessageID: relevantDiffs,
+            displayLimit: normalizedDisplayLimit,
+            syncedUpdatedAt: effectiveAuthoritative ? syncedUpdatedAt : nil,
+            isAuthoritative: effectiveAuthoritative,
             cachedAt: now
         )
         insertIntoLRU(snapshot, for: key)
@@ -357,7 +427,13 @@ final class SessionCacheStore {
             return
         }
 
-        let persistedMessages: [PersistedMessageRecord] = cacheableMessages.map { msg in
+        let diskMessagesSlice = Array(cacheableMessages.suffix(Self.maximumDiskMessagesPerSession))
+        let droppedForDisk = cacheableMessages.count > diskMessagesSlice.count || droppedEarlierMessages
+        let diskKeptIDs = Set(diskMessagesSlice.map(\.id)).union(boundedContexts.map(\.id))
+        let diskFilteredOrder = filteredOrder.filter { diskKeptIDs.contains($0) }
+        let diskDiffs = relevantDiffs.filter { diskKeptIDs.contains($0.key) }
+
+        let persistedMessages: [PersistedMessageRecord] = diskMessagesSlice.map { msg in
             let safeContent: String = msg.content.utf8.count <= Self.maximumDiskMessageUTF8Bytes
                 ? msg.content
                 : StreamDisplayValue.preview(msg.content, maximumBytes: Self.maximumDiskMessageUTF8Bytes)
@@ -379,15 +455,41 @@ final class SessionCacheStore {
             )
         }
 
+        let persistedContexts: [PersistedContextRecord] = boundedContexts.map { entry in
+            let safeDetails: String = entry.details.utf8.count <= Self.maximumDiskContextDetailsUTF8Bytes
+                ? entry.details
+                : StreamDisplayValue.preview(entry.details, maximumBytes: Self.maximumDiskContextDetailsUTF8Bytes)
+            return PersistedContextRecord(
+                id: entry.id,
+                kindRawValue: entry.kind.rawValue,
+                created: entry.created,
+                title: entry.title,
+                summary: entry.summary,
+                details: safeDetails,
+                resultPreview: entry.resultPreview,
+                subagentChildID: entry.subagentResult?.childID,
+                subagentAgent: entry.subagentResult?.agent,
+                subagentStateRawValue: entry.subagentResult?.state?.rawValue,
+                compactionStatus: entry.compactionStatus,
+                idleOutcome: entry.idleOutcome
+            )
+        }
+
+        let diskAuthoritative = effectiveAuthoritative && !droppedForDisk
         let payload = PersistedTranscriptPayload(
             schemaVersion: Self.currentSchemaVersion,
             savedAt: now,
             session: session,
             messages: persistedMessages,
-            entryOrder: filteredOrder,
+            contextEntries: persistedContexts,
+            entryOrder: diskFilteredOrder,
             olderCursor: resolvedOlderCursor,
             todos: todos,
-            hiddenTodoCount: hiddenTodoCount
+            hiddenTodoCount: hiddenTodoCount,
+            turnDiffSummariesByMessageID: diskDiffs.isEmpty ? nil : diskDiffs,
+            displayLimit: normalizedDisplayLimit,
+            syncedUpdatedAt: diskAuthoritative ? syncedUpdatedAt : nil,
+            isAuthoritative: diskAuthoritative
         )
         let maxFiles = maximumDiskTranscripts
         diskQueue.async {
