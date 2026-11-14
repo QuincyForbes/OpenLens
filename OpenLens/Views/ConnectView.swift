@@ -88,6 +88,7 @@ struct ConnectView: View {
     @State private var isAutoReconnect: Bool = false
     @State private var currentConnectionMethod: ConnectionMethod = .manual
     @State private var pendingOpenCodePairingLink: OpenCodePairingLink?
+    @State private var pendingAlternateServerURLs: [String] = []
 
     @State private var setupStep: ConnectionSetupStep = .welcome
     @FocusState private var focusedManualField: ManualConnectionField?
@@ -119,7 +120,29 @@ struct ConnectView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
-                autoReconnectIfNeeded()
+                if isWaitingForBootingSavedServer {
+                    retryConnection()
+                } else {
+                    autoReconnectIfNeeded()
+                }
+            }
+        }
+        .task(id: isWaitingForBootingSavedServer && scenePhase == .active) {
+            guard isWaitingForBootingSavedServer, scenePhase == .active else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, isWaitingForBootingSavedServer, scenePhase == .active else {
+                    return
+                }
+                if await connection.probeSavedServerAvailability() {
+                    guard !Task.isCancelled, isWaitingForBootingSavedServer else { return }
+                    retryConnection()
+                    return
+                }
             }
         }
         .onChange(of: connection.state) { _, newState in
@@ -616,6 +639,20 @@ struct ConnectView: View {
         )
     }
 
+    /// True when an automatic reconnect failed because the saved computer is still booting or offline,
+    /// allowing OpenLens to quietly watch for it and connect as soon as it comes back up.
+    private var isWaitingForBootingSavedServer: Bool {
+        guard autoReconnect,
+              isAutoReconnect,
+              setupStep == .welcome,
+              !connection.isConnected,
+              !connection.didManuallyDisconnect,
+              case .failed(_, _, let needsLocalNetworkAccess) = connectionStatus?.phase else {
+            return false
+        }
+        return !needsLocalNetworkAccess
+    }
+
     /// Settles a finished connect call. A fresh connection holds its connected moment briefly
     /// before the app swaps in the main interface.
     private func finishConnectionAttempt() async {
@@ -624,6 +661,9 @@ struct ConnectView: View {
             return
         }
 
+        if let activeHost = connection.serverHostDisplay {
+            connectionStatus?.serverName = activeHost
+        }
         connectionStatus?.phase = .connected
         guard !isAutoReconnect else { return }
         isFinishingConnection = true
@@ -685,6 +725,7 @@ struct ConnectView: View {
             manualURL = saved.serverURL
             username = saved.username
             password = saved.password
+            pendingAlternateServerURLs = saved.alternateServerURLs ?? []
         }
 
         connectionTask?.cancel()
@@ -693,12 +734,19 @@ struct ConnectView: View {
         showConnectionStatus(auto ? .reconnecting : .connecting, serverURL: manualURL)
 
         let method: ConnectionMethod = auto ? .autoReconnect : currentConnectionMethod
+        let alternates = pendingAlternateServerURLs
 
         connectionTask = Task {
             if auto {
                 await connection.reconnect()
             } else {
-                await connection.connect(url: manualURL, username: username, password: password, method: method)
+                await connection.connect(
+                    url: manualURL,
+                    username: username,
+                    password: password,
+                    method: method,
+                    alternateServerURLs: alternates
+                )
             }
 
             guard !Task.isCancelled else { return }
@@ -709,6 +757,7 @@ struct ConnectView: View {
     private func startOpenCodePairing(_ link: OpenCodePairingLink) {
         connectionTask?.cancel()
         pendingOpenCodePairingLink = link
+        pendingAlternateServerURLs = []
         pendingSessionNavigationID = nil
         manualURL = link.serverURL.absoluteString
         username = "opencode"
@@ -726,10 +775,12 @@ struct ConnectView: View {
                 savedConnections.saveConnection(
                     serverURL: credential.serverURL,
                     username: credential.username,
-                    password: credential.password
+                    password: credential.password,
+                    alternateServerURLs: credential.alternateServerURLs
                 )
                 guard !Task.isCancelled else { return }
                 pendingOpenCodePairingLink = nil
+                pendingAlternateServerURLs = credential.alternateServerURLs
                 manualURL = credential.serverURL
                 username = credential.username
                 password = credential.password
@@ -738,7 +789,8 @@ struct ConnectView: View {
                     url: credential.serverURL,
                     username: credential.username,
                     password: credential.password,
-                    method: currentConnectionMethod
+                    method: currentConnectionMethod,
+                    alternateServerURLs: credential.alternateServerURLs
                 )
                 guard !Task.isCancelled else { return }
                 await finishConnectionAttempt()
@@ -774,6 +826,7 @@ struct ConnectView: View {
         connectionTask?.cancel()
         connectionTask = nil
         pendingOpenCodePairingLink = nil
+        pendingAlternateServerURLs = []
         if case .connecting = connection.state {
             connection.disconnect()
         }
@@ -788,15 +841,17 @@ struct ConnectView: View {
     private func connectToDiscovered(_ server: BonjourDiscovery.DiscoveredServer) {
         pendingSessionNavigationID = nil
         currentConnectionMethod = .bonjour
-        let suggestions = savedConnections.suggestions(for: server.url)
-        if let saved = suggestions.first {
-            manualURL = saved.serverURL
+        manualURL = server.url
+        let matchingSaved = savedConnections.suggestions(for: server.url).first
+            ?? savedConnections.suggestions(for: server.host).first
+        if let saved = matchingSaved {
             username = saved.username
             password = saved.password
+            pendingAlternateServerURLs = saved.alternateServerURLs ?? []
         } else {
-            manualURL = server.url
+            pendingAlternateServerURLs = []
         }
-        connectManual()
+        startConnect(auto: false)
     }
 
     private func applySavedServerSuggestion(_ saved: SavedConnection) {
@@ -804,6 +859,7 @@ struct ConnectView: View {
             manualURL = saved.serverURL
             username = saved.username
             password = saved.password
+            pendingAlternateServerURLs = saved.alternateServerURLs ?? []
             focusedManualField = nil
         }
     }
@@ -824,6 +880,7 @@ struct ConnectView: View {
     private func connectManual() {
         pendingSessionNavigationID = nil
         currentConnectionMethod = .manual
+        pendingAlternateServerURLs = []
         startConnect(auto: false)
     }
 
@@ -846,12 +903,14 @@ struct ConnectView: View {
         manualURL = saved.serverURL
         username = saved.username
         password = saved.password
+        pendingAlternateServerURLs = saved.alternateServerURLs ?? []
     }
 
     // MARK: - Deep Link
 
     private func applyDeepLink(_ deepLink: DeepLinkConnection) {
         pendingSessionNavigationID = deepLink.sessionID
+        pendingAlternateServerURLs = deepLink.alternateServerURLs
         manualURL = deepLink.serverURL
         username = deepLink.username
         password = deepLink.password

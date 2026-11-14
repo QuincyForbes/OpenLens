@@ -6,6 +6,7 @@ struct DeepLinkConnection: Equatable, Sendable {
     let username: String
     let password: String
     let sessionID: String?
+    let alternateServerURLs: [String]
 
     /// Attempts to parse an `openlens://connect?url=...&user=...&pass=...&sessionID=...` URL.
     /// Returns `nil` if the URL doesn't match the expected format.
@@ -22,12 +23,22 @@ struct DeepLinkConnection: Equatable, Sendable {
         self.username = items.first(where: { $0.name == "user" })?.value ?? "opencode"
         self.password = items.first(where: { $0.name == "pass" })?.value ?? ""
         self.sessionID = items.first(where: { $0.name == "sessionID" })?.value?.nilIfBlank
+        self.alternateServerURLs = items
+            .filter { $0.name == "alt" }
+            .compactMap { $0.value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank }
     }
 
-    init(serverURL: String, username: String, password: String, sessionID: String? = nil) {
+    init(
+        serverURL: String,
+        username: String,
+        password: String,
+        sessionID: String? = nil,
+        alternateServerURLs: [String] = []
+    ) {
         self.serverURL = serverURL
         self.username = username
         self.password = password
         self.sessionID = sessionID?.nilIfBlank
+        self.alternateServerURLs = alternateServerURLs
     }
 }

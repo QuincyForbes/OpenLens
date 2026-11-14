@@ -101,6 +101,11 @@ struct ConnectedRootView: View {
         .onChange(of: chatClient.pendingPermission?.id) { _, _ in
             permissionSheetDetent = PermissionRequestSheet.defaultPresentationDetent
         }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                connection.reconnectIfNeeded()
+            }
+        }
         .task {
             await chatClient.recoverPendingPermission()
         }

@@ -70,6 +70,11 @@ final class ConnectionManager: ConnectionProviding {
     private static let pathChangeDebounce: Duration = .seconds(1)
 
     @ObservationIgnored private let localNetworkAccessProbe: any LocalNetworkAccessProbing
+    @ObservationIgnored private let lanServerDiscoverer: (any LANServerDiscovering)?
+    @ObservationIgnored private var endpointRecoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var activeAuthHeader: String?
+    @ObservationIgnored private var activeCredentials: (username: String, password: String)?
+    private var reconnectingRecoveryInitialDelay: Duration = .milliseconds(2500)
     @ObservationIgnored var onGlobalSessionActivity: ((GlobalSessionActivityEvent) -> Void)?
 
     /// If no heartbeat arrives within this interval, the connection is considered stale.
@@ -78,20 +83,26 @@ final class ConnectionManager: ConnectionProviding {
 
     init() {
         self.localNetworkAccessProbe = LocalNetworkAccessProbe()
+        self.lanServerDiscoverer = BonjourLANServerDiscoverer()
     }
 
     init(localNetworkAccessProbe: any LocalNetworkAccessProbing,
          transport: (any OpenCodeTransport)? = nil,
-         sseConnectionTimeout: Duration = .seconds(30)) {
+         sseConnectionTimeout: Duration = .seconds(30),
+         lanServerDiscoverer: (any LANServerDiscovering)? = nil,
+         reconnectingRecoveryInitialDelay: Duration = .milliseconds(2500)) {
         self.localNetworkAccessProbe = localNetworkAccessProbe
         self.transport = transport
         self.sseConnectionTimeout = sseConnectionTimeout
+        self.lanServerDiscoverer = lanServerDiscoverer
+        self.reconnectingRecoveryInitialDelay = reconnectingRecoveryInitialDelay
     }
 
 #if DEBUG
     /// Installs a negotiated client without opening a live network connection.
     init(testClient: OpenCodeClient, capabilities: OpenCodeServerCapabilities, testSSEClient: SSEClient? = nil) {
         self.localNetworkAccessProbe = LocalNetworkAccessProbe()
+        self.lanServerDiscoverer = nil
         self.client = testClient
         self.serverCapabilities = capabilities
         self.sseClient = testSSEClient
@@ -127,7 +138,10 @@ final class ConnectionManager: ConnectionProviding {
         url: String,
         username: String = "opencode",
         password: String = "",
-        method: ConnectionMethod = .manual
+        method: ConnectionMethod = .manual,
+        alternateServerURLs: [String] = [],
+        replacingConnectionID: String? = nil,
+        probeTimeout: TimeInterval? = nil
     ) async {
         // Replacing an attempt must not forget the saved connection: a failed
         // retry would otherwise leave nothing to reconnect to.
@@ -135,7 +149,16 @@ final class ConnectionManager: ConnectionProviding {
         let generation = connectionGeneration
         await withTaskCancellationHandler {
             guard !Task.isCancelled else { return }
-            await performConnect(url: url, username: username, password: password, method: method, generation: generation)
+            await performConnect(
+                url: url,
+                username: username,
+                password: password,
+                method: method,
+                alternateServerURLs: alternateServerURLs,
+                replacingConnectionID: replacingConnectionID,
+                probeTimeout: probeTimeout,
+                generation: generation
+            )
         } onCancel: {
             Task { @MainActor [weak self] in
                 guard let self, self.connectionGeneration == generation else { return }
@@ -144,8 +167,16 @@ final class ConnectionManager: ConnectionProviding {
         }
     }
 
-    private func performConnect(url: String, username: String, password: String,
-                                method: ConnectionMethod, generation: UInt) async {
+    private func performConnect(
+        url: String,
+        username: String,
+        password: String,
+        method: ConnectionMethod,
+        alternateServerURLs: [String],
+        replacingConnectionID: String?,
+        probeTimeout: TimeInterval?,
+        generation: UInt
+    ) async {
         didManuallyDisconnect = false
         hasAttemptedConnection = true
         connectionMethod = method
@@ -176,17 +207,15 @@ final class ConnectionManager: ConnectionProviding {
             return
         }
 
-        var authHeader: String?
-        if !password.isEmpty {
-            let credentials = "\(username):\(password)"
-            if let data = credentials.data(using: .utf8) {
-                authHeader = "Basic \(data.base64EncodedString())"
-            }
-        }
+        let authHeader = Self.makeBasicAuthHeader(username: username, password: password)
 
         let restoredProjectDirectory = WorkspaceSelectionBuilder.normalizedDirectory(
             savedConnectionsStore?
-                .matchingConnection(serverURL: urlString, username: username)?
+                .matchingConnection(
+                    serverURL: urlString,
+                    username: username,
+                    connectionID: replacingConnectionID
+                )?
                 .selectedProjectDirectory
         )
 
@@ -199,7 +228,7 @@ final class ConnectionManager: ConnectionProviding {
             transport: transport
         )
         do {
-            let capabilities = try await apiClient.probeCapabilities()
+            let capabilities = try await apiClient.probeCapabilities(timeout: probeTimeout)
             guard !Task.isCancelled, generation == connectionGeneration else { return }
             guard capabilities.isHealthy else {
                 state = .error("Server is not healthy.")
@@ -209,6 +238,8 @@ final class ConnectionManager: ConnectionProviding {
             serverVersion = capabilities.serverVersion
 
             self.client = apiClient
+            self.activeAuthHeader = authHeader
+            self.activeCredentials = (username: username, password: password)
             globalFormRecoveryDirectories = []
             cachedProjectMetadataByDirectory = [:]
             self.serverURL = baseURL
@@ -229,7 +260,9 @@ final class ConnectionManager: ConnectionProviding {
             savedConnectionsStore?.saveConnection(
                 serverURL: urlString,
                 username: username,
-                password: password
+                password: password,
+                alternateServerURLs: alternateServerURLs,
+                replacingConnectionID: replacingConnectionID
             )
             if let activeConnectionID = savedConnectionsStore?.activeConnectionID {
                 savedConnectionsStore?.updateProjectSelection(
@@ -257,15 +290,176 @@ final class ConnectionManager: ConnectionProviding {
         }
     }
 
-    /// Reconnect using saved config.
+    /// Reconnect using saved config, falling back to sibling pairing origins,
+    /// Bonjour-advertised LAN ports, or default port 4096 when a computer restarts.
     func reconnect() async {
         guard let saved = savedConnectionsStore?.mostRecent, saved.isConfigured else { return }
+        await connectSaved(saved, method: .autoReconnect)
+    }
+
+    func connectSaved(_ saved: SavedConnection, method: ConnectionMethod = .autoReconnect) async {
+        guard saved.isConfigured else { return }
+        let primaryIsLocal = saved.baseURL.map(LocalNetworkAccessProbe.requiresLocalNetworkProbe) ?? false
+
         await connect(
             url: saved.serverURL,
             username: saved.username,
             password: saved.password,
-            method: .autoReconnect
+            method: method,
+            alternateServerURLs: saved.alternateServerURLs ?? [],
+            replacingConnectionID: saved.id,
+            probeTimeout: primaryIsLocal ? 6 : 10
         )
+
+        guard !isConnected,
+              !Task.isCancelled,
+              !didManuallyDisconnect,
+              !localNetworkAccessRequired else {
+            return
+        }
+
+        let primaryErrorState = state
+        let fallbackGeneration = connectionGeneration
+        state = .connecting
+
+        await withTaskCancellationHandler {
+            let alternates = saved.alternateServerURLs ?? []
+            let knownLocalHosts = Self.localHosts(from: [saved.serverURL] + alternates)
+            let discovered: [BonjourDiscovery.DiscoveredServer]
+            if !knownLocalHosts.isEmpty, let lanServerDiscoverer {
+                discovered = await lanServerDiscoverer.discoverServers(
+                    timeout: .milliseconds(2200),
+                    preferredHosts: knownLocalHosts
+                )
+            } else {
+                discovered = []
+            }
+
+            guard !Task.isCancelled, !didManuallyDisconnect, connectionGeneration == fallbackGeneration else {
+                return
+            }
+
+            let candidates = Self.fallbackCandidateURLs(
+                primaryURL: saved.serverURL,
+                alternateURLs: alternates,
+                discoveredServers: discovered
+            )
+            guard !candidates.isEmpty else {
+                state = primaryErrorState
+                return
+            }
+
+            let authHeader = Self.makeBasicAuthHeader(username: saved.username, password: saved.password)
+            let preservedAlternates = [saved.serverURL] + alternates
+
+            for candidate in candidates {
+                guard !Task.isCancelled, !didManuallyDisconnect, connectionGeneration == fallbackGeneration else {
+                    return
+                }
+                let normalizedCandidate = normalizeScopedIPv4Address(in: candidate)
+                let candidateURLString = normalizedCandidate.contains("://")
+                    ? normalizedCandidate
+                    : "http://\(normalizedCandidate)"
+                guard let candidateURL = URL(string: candidateURLString) else { continue }
+
+                let probeResult = await localNetworkAccessProbe.probe(candidateURL)
+                guard !Task.isCancelled, !didManuallyDisconnect, connectionGeneration == fallbackGeneration else {
+                    return
+                }
+                guard probeResult == .continueConnection else {
+                    localNetworkAccessRequired = true
+                    state = .error(AppText.localNetworkAccessRequiredBody)
+                    return
+                }
+
+                let probeClient = OpenCodeClient(
+                    baseURL: candidateURL,
+                    authHeader: authHeader,
+                    transport: transport
+                )
+                guard let capabilities = try? await probeClient.probeCapabilities(timeout: 4),
+                      capabilities.isHealthy else {
+                    continue
+                }
+
+                guard !Task.isCancelled, !didManuallyDisconnect, connectionGeneration == fallbackGeneration else {
+                    return
+                }
+                Logger.connection.info("Recovered saved connection via fallback endpoint \(candidateURLString, privacy: .public)")
+                await connect(
+                    url: candidateURLString,
+                    username: saved.username,
+                    password: saved.password,
+                    method: method,
+                    alternateServerURLs: preservedAlternates,
+                    replacingConnectionID: saved.id,
+                    probeTimeout: 6
+                )
+                if isConnected || Task.isCancelled || didManuallyDisconnect || localNetworkAccessRequired {
+                    return
+                }
+                break
+            }
+
+            if !Task.isCancelled && !didManuallyDisconnect && !isConnected {
+                state = primaryErrorState
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.connectionGeneration == fallbackGeneration,
+                      self.state == .connecting else { return }
+                self.tearDownConnection()
+            }
+        }
+    }
+
+    /// Quietly checks whether the most recent saved server (or one of its LAN/Bonjour fallbacks)
+    /// has finished booting and is ready to accept connections, without mutating `state`.
+    func probeSavedServerAvailability() async -> Bool {
+        guard !isConnected,
+              !didManuallyDisconnect,
+              let saved = savedConnectionsStore?.mostRecent,
+              saved.isConfigured else {
+            return false
+        }
+
+        let alternates = saved.alternateServerURLs ?? []
+        let knownLocalHosts = Self.localHosts(from: [saved.serverURL] + alternates)
+        let discovered: [BonjourDiscovery.DiscoveredServer]
+        if !knownLocalHosts.isEmpty, let lanServerDiscoverer {
+            discovered = await lanServerDiscoverer.discoverServers(
+                timeout: .milliseconds(1500),
+                preferredHosts: knownLocalHosts
+            )
+        } else {
+            discovered = []
+        }
+        guard !Task.isCancelled else { return false }
+
+        let allCandidates = [saved.serverURL] + Self.fallbackCandidateURLs(
+            primaryURL: saved.serverURL,
+            alternateURLs: alternates,
+            discoveredServers: discovered
+        )
+        let authHeader = Self.makeBasicAuthHeader(username: saved.username, password: saved.password)
+
+        for candidate in allCandidates {
+            guard !Task.isCancelled else { return false }
+            let normalized = normalizeScopedIPv4Address(in: candidate)
+            let urlString = normalized.contains("://") ? normalized : "http://\(normalized)"
+            guard let url = URL(string: urlString) else { continue }
+            guard await localNetworkAccessProbe.probe(url) == .continueConnection else {
+                return false
+            }
+            let probeClient = OpenCodeClient(baseURL: url, authHeader: authHeader, transport: transport)
+            if let capabilities = try? await probeClient.probeCapabilities(timeout: 3),
+               capabilities.isHealthy {
+                return true
+            }
+        }
+
+        return false
     }
 
     // MARK: - Disconnect
@@ -281,12 +475,15 @@ final class ConnectionManager: ConnectionProviding {
         connectionGeneration &+= 1
         projectContextGeneration &+= 1
         projectContextRevision &+= 1
+        stopEndpointRecovery()
         finishSSEConnectionWait()
         stopHeartbeatWatchdog()
         stopNetworkPathMonitor()
         sseClient?.disconnect()
         sseClient = nil
         client = nil
+        activeAuthHeader = nil
+        activeCredentials = nil
         globalFormRecoveryDirectories = []
         cachedProjectMetadataByDirectory = [:]
         serverURL = nil
@@ -310,6 +507,7 @@ final class ConnectionManager: ConnectionProviding {
             guard let self, let sse, self.sseClient === sse else { return }
             switch sseState {
             case .connected:
+                self.stopEndpointRecovery()
                 self.state = .connected
                 self.startHeartbeatWatchdog()
                 self.startNetworkPathMonitor()
@@ -334,6 +532,7 @@ final class ConnectionManager: ConnectionProviding {
 
         sse.onTerminalHTTPError = { [weak self, weak sse] statusCode in
             guard let self, let sse, self.sseClient === sse else { return }
+            self.stopEndpointRecovery()
             self.stopHeartbeatWatchdog()
             self.stopNetworkPathMonitor()
             self.state = .error(
@@ -537,6 +736,7 @@ final class ConnectionManager: ConnectionProviding {
 
         // If we were in .reconnecting due to a stale heartbeat, recover to .connected.
         if state == .reconnecting {
+            stopEndpointRecovery()
             state = .connected
         }
     }
@@ -566,7 +766,7 @@ final class ConnectionManager: ConnectionProviding {
         guard !didManuallyDisconnect, sseClient != nil else { return }
         let elapsed = Date().timeIntervalSince(lastHeartbeat)
         if state == .reconnecting || (state == .connected && elapsed > Self.heartbeatTimeout) {
-            enterReconnectingState(trackDisconnection: false)
+            enterReconnectingState(trackDisconnection: false, immediateEndpointRecovery: true)
             sseClient?.reconnectNow()
         }
     }
@@ -594,6 +794,9 @@ final class ConnectionManager: ConnectionProviding {
                     self.pathReconnectTask = nil
                     Logger.connection.debug("Network path settled (changed=\(interfaceChanged)) — triggering SSE reconnect")
                     self.sseClient?.reconnectNow()
+                    if self.state == .reconnecting {
+                        self.startEndpointRecoveryIfNeeded(immediate: true)
+                    }
                 }
             }
         }
@@ -615,8 +818,315 @@ final class ConnectionManager: ConnectionProviding {
         lastNetworkInterfaceSignature = nil
     }
 
-    private func enterReconnectingState(trackDisconnection: Bool) {
+    private func enterReconnectingState(trackDisconnection: Bool, immediateEndpointRecovery: Bool = false) {
         state = .reconnecting
+        startEndpointRecoveryIfNeeded(immediate: immediateEndpointRecovery)
+    }
+
+    private func stopEndpointRecovery() {
+        endpointRecoveryTask?.cancel()
+        endpointRecoveryTask = nil
+    }
+
+    /// While `.reconnecting` persists (e.g. the host computer restarted), periodically probes
+    /// the current URL, sibling pairing URLs, Bonjour-advertised LAN ports, and port 4096 so
+    /// OpenLens recovers automatically even when OpenCode restarts on a new port or LAN IP.
+    private func startEndpointRecoveryIfNeeded(immediate: Bool = false) {
+        guard !didManuallyDisconnect, sseClient != nil else { return }
+        if immediate {
+            endpointRecoveryTask?.cancel()
+            endpointRecoveryTask = nil
+        }
+        guard endpointRecoveryTask == nil else { return }
+
+        let generation = connectionGeneration
+        let initialDelay = reconnectingRecoveryInitialDelay
+        endpointRecoveryTask = Task { @MainActor [weak self] in
+            if !immediate {
+                do {
+                    try await Task.sleep(for: initialDelay)
+                } catch {
+                    return
+                }
+            }
+
+            let retryDelays: [Duration] = [.seconds(3), .seconds(5), .seconds(8), .seconds(12)]
+            var attempt = 0
+
+            while !Task.isCancelled {
+                guard let self,
+                      !self.didManuallyDisconnect,
+                      self.connectionGeneration == generation,
+                      self.state == .reconnecting else {
+                    return
+                }
+
+                var recoveredOrTriggered = false
+
+                if let currentURL = self.serverURL {
+                    let currentProbe = OpenCodeClient(
+                        baseURL: currentURL,
+                        authHeader: self.activeAuthHeader,
+                        transport: self.transport
+                    )
+                    if let capabilities = try? await currentProbe.probeCapabilities(timeout: 3),
+                       capabilities.isHealthy {
+                        guard !Task.isCancelled,
+                              self.connectionGeneration == generation,
+                              self.state == .reconnecting else {
+                            return
+                        }
+                        self.serverCapabilities = capabilities
+                        self.serverVersion = capabilities.serverVersion
+                        self.sseClient?.updateConnection(
+                            baseURL: currentURL,
+                            authHeader: self.activeAuthHeader,
+                            protocolVersion: capabilities.protocolVersion
+                        )
+                        self.sseClient?.reconnectNow()
+                        recoveredOrTriggered = true
+                    }
+                }
+
+                if !recoveredOrTriggered {
+                    let saved = self.savedConnectionsStore?.activeConnection ?? self.savedConnectionsStore?.mostRecent
+                    let primaryString = self.serverURL?.absoluteString ?? saved?.serverURL ?? ""
+                    let alternates = saved?.alternateServerURLs ?? []
+                    let knownLocalHosts = Self.localHosts(from: [primaryString] + alternates)
+                    let discovered: [BonjourDiscovery.DiscoveredServer]
+                    if !knownLocalHosts.isEmpty, let lanServerDiscoverer = self.lanServerDiscoverer {
+                        discovered = await lanServerDiscoverer.discoverServers(
+                            timeout: .milliseconds(2000),
+                            preferredHosts: knownLocalHosts
+                        )
+                    } else {
+                        discovered = []
+                    }
+
+                    guard !Task.isCancelled,
+                          self.connectionGeneration == generation,
+                          self.state == .reconnecting else {
+                        return
+                    }
+
+                    let candidates = Self.fallbackCandidateURLs(
+                        primaryURL: primaryString,
+                        alternateURLs: alternates,
+                        discoveredServers: discovered
+                    )
+
+                    for candidate in candidates {
+                        guard !Task.isCancelled,
+                              self.connectionGeneration == generation,
+                              self.state == .reconnecting else {
+                            return
+                        }
+                        let normalizedCandidate = self.normalizeScopedIPv4Address(in: candidate)
+                        let candidateURLString = normalizedCandidate.contains("://")
+                            ? normalizedCandidate
+                            : "http://\(normalizedCandidate)"
+                        guard let candidateURL = URL(string: candidateURLString),
+                              await self.localNetworkAccessProbe.probe(candidateURL) == .continueConnection else {
+                            continue
+                        }
+
+                        let candidateClient = OpenCodeClient(
+                            baseURL: candidateURL,
+                            authHeader: self.activeAuthHeader,
+                            transport: self.transport
+                        )
+                        guard let capabilities = try? await candidateClient.probeCapabilities(timeout: 3),
+                              capabilities.isHealthy else {
+                            continue
+                        }
+
+                        guard !Task.isCancelled,
+                              self.connectionGeneration == generation,
+                              self.state == .reconnecting else {
+                            return
+                        }
+
+                        await self.rebindLiveEndpoint(
+                            to: candidateURL,
+                            urlString: candidateURLString,
+                            capabilities: capabilities,
+                            savedConnection: saved
+                        )
+                        break
+                    }
+                }
+
+                let delay = retryDelays[min(attempt, retryDelays.count - 1)]
+                attempt += 1
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func rebindLiveEndpoint(
+        to candidateURL: URL,
+        urlString: String,
+        capabilities: OpenCodeServerCapabilities,
+        savedConnection: SavedConnection?
+    ) async {
+        Logger.connection.info("Rebinding live connection to recovered endpoint \(urlString, privacy: .public)")
+        self.serverURL = candidateURL
+        self.serverCapabilities = capabilities
+        self.serverVersion = capabilities.serverVersion
+
+        if let client {
+            await client.updateConnection(
+                baseURL: candidateURL,
+                authHeader: activeAuthHeader,
+                contextDirectory: selectedProjectDirectory
+            )
+            _ = try? await client.probeCapabilities(timeout: 4)
+        }
+
+        SharedConnectionStore.save(
+            baseURL: candidateURL.absoluteString,
+            authHeader: activeAuthHeader,
+            protocolVersion: capabilities.protocolVersion.rawValue
+        )
+
+        if let creds = activeCredentials {
+            let preservedAlternates = [savedConnection?.serverURL].compactMap { $0 }
+                + (savedConnection?.alternateServerURLs ?? [])
+            savedConnectionsStore?.saveConnection(
+                serverURL: urlString,
+                username: creds.username,
+                password: creds.password,
+                alternateServerURLs: preservedAlternates,
+                replacingConnectionID: savedConnection?.id ?? savedConnectionsStore?.activeConnectionID
+            )
+        }
+
+        sseClient?.updateConnection(
+            baseURL: candidateURL,
+            authHeader: activeAuthHeader,
+            protocolVersion: capabilities.protocolVersion
+        )
+        sseClient?.reconnectNow()
+
+        Task { @MainActor [weak self] in
+            await self?.refreshProjectMetadata()
+        }
+    }
+
+    // MARK: - Fallback Endpoint Ordering
+
+    nonisolated static func makeBasicAuthHeader(username: String, password: String) -> String? {
+        guard !password.isEmpty else { return nil }
+        let credentials = "\(username):\(password)"
+        guard let data = credentials.data(using: .utf8) else { return nil }
+        return "Basic \(data.base64EncodedString())"
+    }
+
+    nonisolated static func localHosts(from rawURLs: [String]) -> Set<String> {
+        var hosts = Set<String>()
+        for raw in rawURLs {
+            guard let parsed = parsedHostAndPort(raw),
+                  LocalNetworkAccessProbe.requiresLocalNetworkProbe(for: parsed.url) else {
+                continue
+            }
+            hosts.insert(parsed.host)
+        }
+        return hosts
+    }
+
+    /// Produces deduplicated fallback server URLs ordered from highest-confidence same-host
+    /// LAN candidates to general LAN Bonjour discoveries and remote tunnel alternates.
+    nonisolated static func fallbackCandidateURLs(
+        primaryURL: String,
+        alternateURLs: [String],
+        discoveredServers: [BonjourDiscovery.DiscoveredServer]
+    ) -> [String] {
+        let primaryKey = normalizedEndpointKey(primaryURL)
+        let primaryHost = parsedHostAndPort(primaryURL)?.host
+        let knownLocalHosts = localHosts(from: [primaryURL] + alternateURLs)
+
+        var seen: Set<String> = primaryKey.isEmpty ? [] : [primaryKey]
+        var ordered: [String] = []
+
+        func append(_ raw: String) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = normalizedEndpointKey(trimmed)
+            guard !trimmed.isEmpty, !key.isEmpty, seen.insert(key).inserted else { return }
+            ordered.append(trimmed)
+        }
+
+        // 1. Live Bonjour server advertised on the exact same primary host (new port after restart).
+        if let primaryHost {
+            for server in discoveredServers where server.host.lowercased() == primaryHost {
+                append(server.url)
+            }
+        }
+
+        // 2. Local / VPN / Tailscale sibling URLs from pairing or connection history, plus any
+        //    live Bonjour server matching one of those local hosts.
+        var remoteAlternates: [String] = []
+        for alt in alternateURLs {
+            if let parsed = parsedHostAndPort(alt),
+               LocalNetworkAccessProbe.requiresLocalNetworkProbe(for: parsed.url) {
+                append(alt)
+                for server in discoveredServers where server.host.lowercased() == parsed.host {
+                    append(server.url)
+                }
+            } else {
+                remoteAlternates.append(alt)
+            }
+        }
+
+        // 3. Standard OpenCode port 4096 on known local hosts (when previously paired on an ephemeral port).
+        if let primaryParsed = parsedHostAndPort(primaryURL),
+           LocalNetworkAccessProbe.requiresLocalNetworkProbe(for: primaryParsed.url),
+           primaryParsed.port != 4096 {
+            let hostLiteral = primaryParsed.host.contains(":") ? "[\(primaryParsed.host)]" : primaryParsed.host
+            append("http://\(hostLiteral):4096")
+        }
+        for host in knownLocalHosts.sorted() where host != primaryHost {
+            let hostLiteral = host.contains(":") ? "[\(host)]" : host
+            append("http://\(hostLiteral):4096")
+        }
+
+        // 4. Other live OpenCode Bonjour servers on the LAN (router assigned a new DHCP IP after reboot).
+        for server in discoveredServers {
+            append(server.url)
+        }
+
+        // 5. Remote tunnel alternates (e.g. `--remote` URLs).
+        for alt in remoteAlternates {
+            append(alt)
+        }
+
+        return ordered
+    }
+
+    nonisolated private static func normalizedEndpointKey(_ rawURL: String) -> String {
+        rawURL.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "http://", with: "")
+            .replacingOccurrences(of: "https://", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    nonisolated private static func parsedHostAndPort(_ rawURL: String) -> (host: String, port: Int?, url: URL)? {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let withScheme = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+        guard let url = URL(string: withScheme),
+              let host = url.host(percentEncoded: false)?
+                  .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                  .lowercased()
+                  .nilIfBlank
+        else {
+            return nil
+        }
+        return (host: host, port: url.port, url: url)
     }
 
     private func stopHeartbeatWatchdog() {

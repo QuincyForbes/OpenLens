@@ -16,7 +16,7 @@ final class BonjourDiscovery {
     private var resolvingServiceNames = Set<String>()
     private var resolvingConnections: [String: NWConnection] = [:]
 
-    struct DiscoveredServer: Identifiable, Hashable, Sendable {
+    nonisolated struct DiscoveredServer: Identifiable, Hashable, Sendable {
         let id: String
         let name: String
         let host: String
@@ -135,10 +135,17 @@ final class BonjourDiscovery {
         }
     }
 
-    private func resolveService(name: String, type: String, domain: String) {
+    private func resolveService(name: String, type: String, domain: String, preferIPv4: Bool = true) {
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        if preferIPv4,
+           let ipOptions = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            ipOptions.version = .v4
+        }
+
         let connection = NWConnection(
             to: .service(name: name, type: type, domain: domain, interface: nil),
-            using: .tcp
+            using: parameters
         )
         resolvingConnections[name] = connection
 
@@ -188,11 +195,25 @@ final class BonjourDiscovery {
                     }
                 }
 
-            case .failed, .cancelled:
+            case .failed:
                 connection.cancel()
                 Task { @MainActor [weak self] in
-                    self?.resolvingConnections.removeValue(forKey: name)
-                    self?.resolvingServiceNames.remove(name)
+                    guard let self else { return }
+                    guard self.resolvingConnections[name] === connection else { return }
+                    if preferIPv4 && self.isSearching {
+                        self.resolveService(name: name, type: type, domain: domain, preferIPv4: false)
+                    } else {
+                        self.resolvingConnections.removeValue(forKey: name)
+                        self.resolvingServiceNames.remove(name)
+                    }
+                }
+
+            case .cancelled:
+                connection.cancel()
+                Task { @MainActor [weak self] in
+                    guard let self, self.resolvingConnections[name] === connection else { return }
+                    self.resolvingConnections.removeValue(forKey: name)
+                    self.resolvingServiceNames.remove(name)
                 }
 
             default:
@@ -238,5 +259,61 @@ final class BonjourDiscovery {
         }
 
         return true
+    }
+}
+
+/// Discovers OpenCode servers on the LAN for automatic reconnect and live endpoint recovery.
+@MainActor
+protocol LANServerDiscovering: AnyObject {
+    func discoverServers(
+        timeout: Duration,
+        preferredHosts: Set<String>
+    ) async -> [BonjourDiscovery.DiscoveredServer]
+}
+
+@MainActor
+final class BonjourLANServerDiscoverer: LANServerDiscovering {
+    func discoverServers(
+        timeout: Duration = .milliseconds(2200),
+        preferredHosts: Set<String> = []
+    ) async -> [BonjourDiscovery.DiscoveredServer] {
+        let discovery = BonjourDiscovery()
+        discovery.startBrowsing()
+        defer { discovery.stopBrowsing() }
+
+        let normalizedPreferred = Set(
+            preferredHosts.map {
+                $0.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+            }
+        )
+        let deadline = ContinuousClock.now + timeout
+        var firstResolvedAt: ContinuousClock.Instant?
+
+        while !Task.isCancelled && ContinuousClock.now < deadline {
+            if discovery.localNetworkAccessRequired {
+                return []
+            }
+            let current = discovery.discoveredServers
+            if !current.isEmpty {
+                if !normalizedPreferred.isEmpty,
+                   current.contains(where: { normalizedPreferred.contains($0.host.lowercased()) }) {
+                    return current
+                }
+                if let firstResolvedAt {
+                    if ContinuousClock.now - firstResolvedAt >= .milliseconds(250) {
+                        return current
+                    }
+                } else {
+                    firstResolvedAt = .now
+                }
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(60))
+            } catch {
+                break
+            }
+        }
+
+        return discovery.discoveredServers
     }
 }

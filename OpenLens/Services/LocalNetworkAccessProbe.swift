@@ -82,9 +82,13 @@ final class LocalNetworkAccessProbe: LocalNetworkAccessProbing {
     }
 
     private func endpoint(for url: URL) -> NWEndpoint? {
-        guard let host = url.host(percentEncoded: false)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !host.isEmpty
+        guard let rawHost = url.host(percentEncoded: false)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawHost.isEmpty
         else {
+            return nil
+        }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        guard !host.isEmpty else {
             return nil
         }
 

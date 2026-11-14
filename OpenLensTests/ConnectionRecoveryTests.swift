@@ -203,13 +203,153 @@ struct ConnectionRecoveryTests {
         #expect(store.activeConnectionID == activeID)
     }
 
+    @Test func fallbackCandidateOrderingPrioritizesSameHostBonjourThenLocalAlternatesThenPort4096() {
+        let discovered = [
+            BonjourDiscovery.DiscoveredServer(
+                id: "opencode-4096-other",
+                name: "opencode-4096",
+                host: "192.168.3.88",
+                port: 4096
+            ),
+            BonjourDiscovery.DiscoveredServer(
+                id: "opencode-28894-same",
+                name: "opencode-28894",
+                host: "192.168.3.3",
+                port: 28894
+            ),
+        ]
+
+        let candidates = ConnectionManager.fallbackCandidateURLs(
+            primaryURL: "http://192.168.3.3:54321",
+            alternateURLs: ["https://dead.opentunnel.xyz", "http://100.114.113.63:54321"],
+            discoveredServers: discovered
+        )
+
+        #expect(candidates == [
+            "http://192.168.3.3:28894",
+            "http://100.114.113.63:54321",
+            "http://192.168.3.3:4096",
+            "http://100.114.113.63:4096",
+            "http://192.168.3.88:4096",
+            "https://dead.opentunnel.xyz",
+        ])
+    }
+
+    @Test func autoReconnectFallsBackToRestartedBonjourPortAndPreservesSavedPreferences() async throws {
+        let transport = RecoveryTransport()
+        await transport.server.failProbe(port: 54321)
+        let discoverer = RecoveryLANDiscoverer(servers: [
+            .init(id: "opencode-28894", name: "opencode-28894", host: "192.168.3.3", port: 28894),
+        ])
+        let store = SavedConnectionsStore(initialConnections: [])
+        let saved = store.saveConnection(
+            serverURL: "http://192.168.3.3:54321",
+            username: "opencode",
+            password: "persistent-token"
+        )
+        store.updateProjectSelection(connectionID: saved.id, directory: "/Users/me/OpenLens")
+
+        let connection = ConnectionManager(
+            localNetworkAccessProbe: RecoveryAccessProbe(),
+            transport: transport,
+            lanServerDiscoverer: discoverer
+        )
+        connection.savedConnectionsStore = store
+        defer { connection.disconnect() }
+
+        let reconnectTask = Task { await connection.reconnect() }
+        try await waitUntil { transport.streamCount == 1 }
+        transport.respond(status: 200)
+        await reconnectTask.value
+
+        #expect(connection.isConnected)
+        #expect(connection.serverURL?.absoluteString == "http://192.168.3.3:28894")
+        #expect(connection.selectedProjectDirectory == "/Users/me/OpenLens")
+        #expect(store.connections.count == 1)
+        #expect(store.mostRecent?.id == saved.id)
+        #expect(store.mostRecent?.serverURL == "http://192.168.3.3:28894")
+        #expect(store.mostRecent?.password == "persistent-token")
+        let expectedAuth = "Basic " + Data("opencode:persistent-token".utf8).base64EncodedString()
+        let lastAuth = await transport.server.lastAuthHeader
+        #expect(lastAuth == expectedAuth)
+    }
+
+    @Test func autoReconnectFallsBackToSavedLANAlternateWhenRemoteTunnelDiesOnRestart() async throws {
+        let transport = RecoveryTransport()
+        await transport.server.failProbe(host: "dead-route.opentunnel.xyz")
+        let store = SavedConnectionsStore(initialConnections: [])
+        let saved = store.saveConnection(
+            serverURL: "https://dead-route.opentunnel.xyz",
+            username: "opencode",
+            password: "persistent-token",
+            alternateServerURLs: ["http://192.168.3.3:4096"]
+        )
+
+        let connection = makeConnection(transport)
+        connection.savedConnectionsStore = store
+        defer { connection.disconnect() }
+
+        let reconnectTask = Task { await connection.reconnect() }
+        try await waitUntil { transport.streamCount == 1 }
+        transport.respond(status: 200)
+        await reconnectTask.value
+
+        #expect(connection.isConnected)
+        #expect(connection.serverURL?.absoluteString == "http://192.168.3.3:4096")
+        #expect(store.mostRecent?.id == saved.id)
+        #expect(store.mostRecent?.serverURL == "http://192.168.3.3:4096")
+    }
+
+    @Test func liveReconnectingSessionAutomaticallyRebindsWhenServerRestartsOnNewBonjourPort() async throws {
+        let transport = RecoveryTransport()
+        let discoverer = RecoveryLANDiscoverer(servers: [])
+        let store = SavedConnectionsStore(initialConnections: [])
+        let connection = ConnectionManager(
+            localNetworkAccessProbe: RecoveryAccessProbe(),
+            transport: transport,
+            lanServerDiscoverer: discoverer,
+            reconnectingRecoveryInitialDelay: .milliseconds(30)
+        )
+        connection.savedConnectionsStore = store
+        defer { connection.disconnect() }
+
+        let initialTask = Task {
+            await connection.connect(
+                url: "http://192.168.3.3:54321",
+                username: "opencode",
+                password: "persistent-token"
+            )
+        }
+        try await waitUntil { transport.streamCount == 1 }
+        transport.respond(status: 200)
+        await initialTask.value
+        #expect(connection.isConnected)
+
+        // Simulate host computer restart: old port 54321 refuses connections, new port 28894
+        // appears on Bonjour, and the active SSE stream drops into `.reconnecting`.
+        await transport.server.failProbe(port: 54321)
+        discoverer.servers = [
+            .init(id: "opencode-28894", name: "opencode-28894", host: "192.168.3.3", port: 28894),
+        ]
+        connection.sseClient?.onStateChange?(.disconnected)
+        #expect(connection.isReconnecting)
+
+        try await waitUntil { transport.streamCount >= 2 && transport.lastStreamURL?.port == 28894 }
+        transport.respond(status: 200)
+        try await waitUntil { connection.isConnected }
+
+        #expect(connection.serverURL?.absoluteString == "http://192.168.3.3:28894")
+        #expect(store.mostRecent?.serverURL == "http://192.168.3.3:28894")
+        #expect(store.mostRecent?.password == "persistent-token")
+    }
+
     private func makeConnection(_ transport: RecoveryTransport, timeout: Duration = .seconds(30)) -> ConnectionManager {
         ConnectionManager(localNetworkAccessProbe: RecoveryAccessProbe(), transport: transport,
                           sseConnectionTimeout: timeout)
     }
 
     private func waitUntil(_ condition: () async -> Bool) async throws {
-        for _ in 0..<200 {
+        for _ in 0..<300 {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -224,20 +364,38 @@ private final class RecoveryAccessProbe: LocalNetworkAccessProbing {
     func probe(_ url: URL) async -> LocalNetworkAccessProbeResult { .continueConnection }
 }
 
+@MainActor
+private final class RecoveryLANDiscoverer: LANServerDiscovering {
+    var servers: [BonjourDiscovery.DiscoveredServer]
+    init(servers: [BonjourDiscovery.DiscoveredServer]) {
+        self.servers = servers
+    }
+    func discoverServers(timeout: Duration, preferredHosts: Set<String>) async -> [BonjourDiscovery.DiscoveredServer] {
+        servers
+    }
+}
+
 private actor RecoveryServer {
     private var heldHost: String?
     private var failingHost: String?
+    private var failingPort: Int?
+    private(set) var lastAuthHeader: String?
     private var waiter: CheckedContinuation<Void, Never>?
     var isWaiting: Bool { waiter != nil }
     func holdProbe(host: String) { heldHost = host }
     func failProbe(host: String) { failingHost = host }
+    func failProbe(port: Int) { failingPort = port }
     func release() { waiter?.resume(); waiter = nil }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         let url = request.url!
+        lastAuthHeader = request.value(forHTTPHeaderField: "Authorization")
         if url.path.hasSuffix("/prompt_async") {
             await withCheckedContinuation { waiter = $0 }
             throw URLError(.networkConnectionLost)
+        }
+        if url.path == "/api/info", let failingPort, url.port == failingPort {
+            throw URLError(.cannotConnectToHost)
         }
         if url.path == "/api/info", url.host() == failingHost {
             throw URLError(.cannotConnectToHost)
@@ -266,6 +424,7 @@ nonisolated private final class RecoveryTransport: OpenCodeTransport, @unchecked
     private let lock = NSLock()
     private var streams: [RecoveryStream] = []
     var streamCount: Int { lock.withLock { streams.count } }
+    var lastStreamURL: URL? { lock.withLock { streams.last?.request.url } }
     var cancelledCount: Int { lock.withLock { streams.filter(\.isCancelled).count } }
     var requestTimeouts: [TimeInterval] { lock.withLock { streams.map { $0.request.timeoutInterval } } }
     func data(for request: URLRequest) async throws -> (Data, URLResponse) { try await server.data(for: request) }

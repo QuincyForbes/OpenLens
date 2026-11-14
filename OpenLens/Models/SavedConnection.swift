@@ -84,6 +84,9 @@ struct SavedConnection: Codable, Identifiable, Hashable {
     /// Recent project/worktree directories for this connection, newest first.
     var recentProjectDirectories: [String]?
 
+    /// Alternate server URLs known for the same computer (e.g. LAN/Tailscale siblings from `opencode pair`).
+    var alternateServerURLs: [String]? = nil
+
     /// Timestamp of last successful connection (for sorting recent-first).
     var lastConnectedAt: Date?
 
@@ -108,6 +111,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
         recentModelSelections: [SavedModelSelection]? = nil,
         selectedProjectDirectory: String? = nil,
         recentProjectDirectories: [String]? = nil,
+        alternateServerURLs: [String]? = nil,
         lastConnectedAt: Date? = nil
     ) {
         self.id = id
@@ -122,6 +126,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
         self.defaultModelID = nil
         self.selectedProjectDirectory = selectedProjectDirectory
         self.recentProjectDirectories = recentProjectDirectories
+        self.alternateServerURLs = alternateServerURLs
         self.lastConnectedAt = lastConnectedAt
     }
 
@@ -162,6 +167,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
     var defaultModelID: String? = nil
     var selectedProjectDirectory: String?
     var recentProjectDirectories: [String]?
+    var alternateServerURLs: [String]? = nil
     var lastConnectedAt: Date?
 
     nonisolated init(connection: SavedConnection) {
@@ -176,6 +182,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
         defaultModelID = connection.defaultModelID
         selectedProjectDirectory = connection.selectedProjectDirectory
         recentProjectDirectories = connection.recentProjectDirectories
+        alternateServerURLs = connection.alternateServerURLs
         lastConnectedAt = connection.lastConnectedAt
     }
 
@@ -191,6 +198,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
             recentModelSelections: recentModelSelections,
             selectedProjectDirectory: selectedProjectDirectory,
             recentProjectDirectories: recentProjectDirectories,
+            alternateServerURLs: alternateServerURLs,
             lastConnectedAt: lastConnectedAt
         )
         connection.defaultProviderID = defaultProviderID
@@ -221,6 +229,7 @@ final class SavedConnectionsStore {
     private static let maximumSavedConnections = 20
     private static let maximumRecentModelSelections = 5
     private static let maximumRecentProjectDirectories = 5
+    nonisolated private static let maximumAlternateServerURLs = 6
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "OpenLens", category: "SavedConnectionsStore")
     private let shouldPersist: Bool
@@ -250,35 +259,64 @@ final class SavedConnectionsStore {
     }
 
     /// Saves or updates a connection after successful connect.
-    /// If a connection with the same URL+username already exists, updates it.
-    /// Otherwise creates a new entry. Returns the saved connection.
+    /// If a connection with the same ID, URL+username, or alternate URL+username already exists,
+    /// updates it in place so workspace and model preferences survive port/IP recovery.
     @discardableResult
     func saveConnection(
         serverURL: String,
         username: String,
-        password: String
+        password: String,
+        alternateServerURLs: [String] = [],
+        replacingConnectionID: String? = nil
     ) -> SavedConnection {
         let normalizedURL = normalizeURL(serverURL)
 
-        if let index = connections.firstIndex(where: {
-            normalizeURL($0.serverURL) == normalizedURL && $0.username == username
-        }) {
-            // Update existing
+        let existingIndex: Int? = {
+            if let replacingConnectionID,
+               let byID = connections.firstIndex(where: { $0.id == replacingConnectionID }) {
+                return byID
+            }
+            if let byPrimary = connections.firstIndex(where: {
+                normalizeURL($0.serverURL) == normalizedURL && $0.username == username
+            }) {
+                return byPrimary
+            }
+            return connections.firstIndex(where: { conn in
+                conn.username == username
+                    && (conn.alternateServerURLs ?? []).contains(where: { normalizeURL($0) == normalizedURL })
+            })
+        }()
+
+        if let index = existingIndex {
+            let previousPrimary = connections[index].serverURL
+            let existingAlternates = connections[index].alternateServerURLs ?? []
             connections[index].serverURL = serverURL
             connections[index].username = username
             connections[index].password = password
+            connections[index].alternateServerURLs = Self.mergedAlternateServerURLs(
+                newPrimary: serverURL,
+                previousPrimary: previousPrimary,
+                incomingAlternates: alternateServerURLs,
+                existingAlternates: existingAlternates
+            )
             connections[index].lastConnectedAt = Date()
             let connection = connections[index]
             activeConnectionID = connection.id
             persist()
             return connection
         } else {
-            // Create new
+            let cleanedAlternates = Self.mergedAlternateServerURLs(
+                newPrimary: serverURL,
+                previousPrimary: nil,
+                incomingAlternates: alternateServerURLs,
+                existingAlternates: []
+            )
             let connection = SavedConnection(
                 id: UUID().uuidString,
                 serverURL: serverURL,
                 username: username,
                 password: password,
+                alternateServerURLs: cleanedAlternates,
                 lastConnectedAt: Date()
             )
             connections.insert(connection, at: 0)
@@ -423,11 +461,25 @@ final class SavedConnectionsStore {
         )
     }
 
-    /// Finds an existing saved connection matching a server URL and username.
-    func matchingConnection(serverURL: String, username: String) -> SavedConnection? {
+    /// Finds an existing saved connection matching an explicit ID, server URL, or alternate URL.
+    func matchingConnection(
+        serverURL: String,
+        username: String,
+        connectionID: String? = nil
+    ) -> SavedConnection? {
+        if let connectionID,
+           let byID = connections.first(where: { $0.id == connectionID }) {
+            return byID
+        }
         let normalizedURL = normalizeURL(serverURL)
-        return connections.first {
+        if let byPrimary = connections.first(where: {
             normalizeURL($0.serverURL) == normalizedURL && $0.username == username
+        }) {
+            return byPrimary
+        }
+        return connections.first { conn in
+            conn.username == username
+                && (conn.alternateServerURLs ?? []).contains(where: { normalizeURL($0) == normalizedURL })
         }
     }
 
@@ -463,9 +515,10 @@ final class SavedConnectionsStore {
     func suggestions(for urlPrefix: String) -> [SavedConnection] {
         let prefix = urlPrefix.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prefix.isEmpty else { return connections }
-        return connections.filter {
-            $0.displayName.lowercased().contains(prefix) ||
-            $0.serverURL.lowercased().contains(prefix)
+        return connections.filter { conn in
+            conn.displayName.lowercased().contains(prefix)
+                || conn.serverURL.lowercased().contains(prefix)
+                || (conn.alternateServerURLs ?? []).contains(where: { $0.lowercased().contains(prefix) })
         }
     }
 
@@ -667,11 +720,79 @@ final class SavedConnectionsStore {
         Self.normalizeURL(url)
     }
 
-    private static func normalizeURL(_ url: String) -> String {
+    nonisolated private static func normalizeURL(_ url: String) -> String {
         url.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "http://", with: "")
             .replacingOccurrences(of: "https://", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    nonisolated private static func parsedHostAndPort(_ rawURL: String) -> (host: String, port: Int?, url: URL)? {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let withScheme = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+        guard let url = URL(string: withScheme),
+              let host = url.host(percentEncoded: false)?
+                  .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                  .lowercased()
+                  .nilIfBlank
+        else {
+            return nil
+        }
+        return (host: host, port: url.port, url: url)
+    }
+
+    /// Merges alternate server URLs while dropping stale ephemeral ports on the same host
+    /// (keeping standard port 4096 and distinct LAN/Tailscale/remote hosts).
+    nonisolated static func mergedAlternateServerURLs(
+        newPrimary: String,
+        previousPrimary: String?,
+        incomingAlternates: [String],
+        existingAlternates: [String]
+    ) -> [String]? {
+        let primaryKey = normalizeURL(newPrimary)
+        let primaryParsed = parsedHostAndPort(newPrimary)
+        var seen: Set<String> = [primaryKey]
+        var localCandidates: [String] = []
+        var remoteCandidates: [String] = []
+
+        func appendCandidate(_ raw: String, allowSameHostEphemeralPort: Bool) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = normalizeURL(trimmed)
+            guard !trimmed.isEmpty, !key.isEmpty, seen.insert(key).inserted else { return }
+
+            if let candidateParsed = parsedHostAndPort(trimmed) {
+                if !allowSameHostEphemeralPort,
+                   let primaryParsed,
+                   candidateParsed.host == primaryParsed.host,
+                   candidateParsed.port != 4096 {
+                    // The server restarted on a new port on the exact same host; do not retain
+                    // the dead pre-reboot ephemeral port.
+                    return
+                }
+                if LocalNetworkAccessProbe.requiresLocalNetworkProbe(for: candidateParsed.url) {
+                    localCandidates.append(trimmed)
+                } else {
+                    remoteCandidates.append(trimmed)
+                }
+            } else {
+                remoteCandidates.append(trimmed)
+            }
+        }
+
+        for incoming in incomingAlternates {
+            appendCandidate(incoming, allowSameHostEphemeralPort: true)
+        }
+        if let previousPrimary {
+            appendCandidate(previousPrimary, allowSameHostEphemeralPort: false)
+        }
+        for existing in existingAlternates {
+            appendCandidate(existing, allowSameHostEphemeralPort: false)
+        }
+
+        let combined = Array((localCandidates + remoteCandidates).prefix(maximumAlternateServerURLs))
+        return combined.isEmpty ? nil : combined
     }
 }
 
@@ -687,6 +808,7 @@ private extension SavedConnection {
         defaultModelID = snapshot.defaultModelID
         selectedProjectDirectory = snapshot.selectedProjectDirectory
         recentProjectDirectories = snapshot.recentProjectDirectories
+        alternateServerURLs = snapshot.alternateServerURLs ?? alternateServerURLs
         lastConnectedAt = snapshot.lastConnectedAt
     }
 }

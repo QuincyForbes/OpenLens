@@ -76,8 +76,15 @@ actor OpenCodeClient {
 
     // MARK: - Health
 
-    func checkHealth() async throws -> OCHealthResponse {
-        try await get("/global/health")
+    func checkHealth(timeout: TimeInterval? = nil) async throws -> OCHealthResponse {
+        var request = makeRequest(path: "/global/health", method: "GET")
+        if let timeout {
+            request.timeoutInterval = timeout
+        }
+        Logger.api.debug("GET \(request.url?.absoluteString ?? "nil", privacy: .public) → OCHealthResponse")
+        let (data, response) = try await transport.data(for: request)
+        try validateResponse(response, data: data)
+        return try decode(data)
     }
 
     /// Negotiate the wire protocol from endpoint capability evidence.
@@ -87,9 +94,9 @@ actor OpenCodeClient {
     /// report a missing route either as 404/405 or by serving the web app's
     /// HTML shell with HTTP 200. Other failures are surfaced as compatibility
     /// or connectivity failures instead of being hidden by an unsafe downgrade.
-    func probeCapabilities() async throws -> OpenCodeServerCapabilities {
+    func probeCapabilities(timeout: TimeInterval? = nil) async throws -> OpenCodeServerCapabilities {
         do {
-            let info = try await fetchV2ServerInfo()
+            let info = try await fetchV2ServerInfo(timeout: timeout)
             guard info.isUsable else {
                 throw OpenCodeError.invalidPayload("The v2 server-info response did not contain a usable version.")
             }
@@ -104,7 +111,7 @@ actor OpenCodeClient {
                 throw error
             }
 
-            let health = try await checkHealth()
+            let health = try await checkHealth(timeout: timeout)
             let capabilities = OpenCodeServerCapabilities.v1(health)
             self.capabilities = capabilities
             Logger.api.info("Negotiated OpenCode v1 protocol (server \(health.version ?? "unknown", privacy: .public))")
@@ -112,8 +119,11 @@ actor OpenCodeClient {
         }
     }
 
-    private func fetchV2ServerInfo() async throws -> OCV2ServerInfo {
-        let request = makeV2Request(path: "/api/info", includesLocation: false)
+    private func fetchV2ServerInfo(timeout: TimeInterval? = nil) async throws -> OCV2ServerInfo {
+        var request = makeV2Request(path: "/api/info", includesLocation: false)
+        if let timeout {
+            request.timeoutInterval = timeout
+        }
         Logger.api.debug("GET \(request.url?.absoluteString ?? "nil", privacy: .public) → OCV2ServerInfo")
         let (data, response) = try await transport.data(for: request)
         try validateResponse(response, data: data)

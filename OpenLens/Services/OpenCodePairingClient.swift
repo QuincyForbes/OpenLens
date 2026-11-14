@@ -20,10 +20,15 @@ struct OpenCodePairingClient {
 
     func pair(using link: OpenCodePairingLink) async throws -> DeepLinkConnection {
         if let credentials = link.credentials {
+            let primaryURL = link.serverURL.absoluteString
             return DeepLinkConnection(
-                serverURL: link.serverURL.absoluteString,
+                serverURL: primaryURL,
                 username: credentials.username,
-                password: credentials.password
+                password: credentials.password,
+                alternateServerURLs: Self.orderedAlternateServerURLs(
+                    from: link.serverURLs,
+                    excluding: primaryURL
+                )
             )
         }
 
@@ -52,7 +57,16 @@ struct OpenCodePairingClient {
                 switch attempt {
                 case .paired(let credential):
                     group.cancelAll()
-                    return credential
+                    return DeepLinkConnection(
+                        serverURL: credential.serverURL,
+                        username: credential.username,
+                        password: credential.password,
+                        sessionID: credential.sessionID,
+                        alternateServerURLs: Self.orderedAlternateServerURLs(
+                            from: link.serverURLs,
+                            excluding: credential.serverURL
+                        )
+                    )
                 case .failed(let error):
                     if error == .expiredOrUsed || failure == .unreachable {
                         failure = error
@@ -65,6 +79,40 @@ struct OpenCodePairingClient {
             if wasCancelled && failure == .unreachable { throw CancellationError() }
             throw failure
         }
+    }
+
+    /// Preserves sibling addresses from a multi-address pairing payload (such as LAN and
+    /// Tailscale origins alongside an ephemeral `--remote` tunnel) so auto-reconnect can
+    /// fall back to local origins after a computer restart.
+    nonisolated static func orderedAlternateServerURLs(
+        from serverURLs: [URL],
+        excluding primaryServerURL: String
+    ) -> [String] {
+        let primaryKey = normalizedServerOriginKey(primaryServerURL)
+        var seen = Set([primaryKey])
+        var localAlternates: [String] = []
+        var remoteAlternates: [String] = []
+
+        for candidate in serverURLs {
+            let raw = candidate.absoluteString
+            let key = normalizedServerOriginKey(raw)
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            if LocalNetworkAccessProbe.requiresLocalNetworkProbe(for: candidate) {
+                localAlternates.append(raw)
+            } else {
+                remoteAlternates.append(raw)
+            }
+        }
+
+        return localAlternates + remoteAlternates
+    }
+
+    nonisolated private static func normalizedServerOriginKey(_ raw: String) -> String {
+        raw.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "http://", with: "")
+            .replacingOccurrences(of: "https://", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private func redeem(url: URL, serverURL: URL, timeout: TimeInterval) async throws -> DeepLinkConnection {

@@ -64,12 +64,7 @@ struct SettingsView: View {
                             Button {
                                 guard !isActive else { return }
                                 Task {
-                                    await connection.connect(
-                                        url: saved.serverURL,
-                                        username: saved.username,
-                                        password: saved.password,
-                                        method: .manual
-                                    )
+                                    await connection.connectSaved(saved, method: .manual)
                                 }
                             } label: {
                                 HStack {
@@ -112,12 +107,7 @@ struct SettingsView: View {
                             if !isActive {
                                 Button {
                                     Task {
-                                        await connection.connect(
-                                            url: saved.serverURL,
-                                            username: saved.username,
-                                            password: saved.password,
-                                            method: .manual
-                                        )
+                                        await connection.connectSaved(saved, method: .manual)
                                     }
                                 } label: {
                                     Label(AppText.connect, systemImage: "network")

@@ -74,6 +74,23 @@ struct OpenCodePairingTests {
         let credential = try await OpenCodePairingClient(session: session).pair(using: link)
         #expect(credential.serverURL == "https://random-route.opentunnel.xyz")
         #expect(credential.password == "test-session-token")
+        #expect(credential.alternateServerURLs == ["http://\(alternative).pairing.example.com:49374"])
+    }
+
+    @Test func multiAddressOrderingPrioritizesLocalAndTailscaleBeforePublicTunnels() {
+        let urls = [
+            URL(string: "https://random-route.opentunnel.xyz")!,
+            URL(string: "http://192.168.3.3:4096")!,
+            URL(string: "http://100.114.113.63:4096")!,
+        ]
+        let ordered = OpenCodePairingClient.orderedAlternateServerURLs(
+            from: urls,
+            excluding: "https://random-route.opentunnel.xyz"
+        )
+        #expect(ordered == [
+            "http://192.168.3.3:4096",
+            "http://100.114.113.63:4096",
+        ])
     }
 
     @Test func expiredAddressIsReportedOnlyAfterAllAddressesFail() async throws {
