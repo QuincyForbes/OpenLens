@@ -541,8 +541,10 @@ actor OpenCodeClient {
         }
         let firstProjected = OCTranscriptEntry.projectV2(firstValues, sessionID: sessionID)
         let firstOverlapped = firstProjected.contains { knownEntryIDs.contains($0.id) }
+        let isShortNonDescendingInitialPage = !firstWasDescending && firstPage.values.count < deltaLimit
 
-        guard let nextCursor = firstPage.nextCursor, !firstOverlapped else {
+        guard let nextCursor = firstPage.nextCursor,
+              (!firstOverlapped || isShortNonDescendingInitialPage) else {
             return (firstProjected, firstPage.nextCursor, firstOverlapped)
         }
 
