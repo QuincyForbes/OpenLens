@@ -2260,8 +2260,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
 
         // Restore cached transcript, display depth & todos immediately on Frame 0.
+        let legacyURLScope = connection?.serverURL?.absoluteString
         let cachedSnapshot = sessionCacheStore.transcript(serverScope: serverCacheScope, sessionID: session.id)
-            ?? connection?.serverURL?.absoluteString.flatMap {
+            ?? legacyURLScope.flatMap {
                 sessionCacheStore.transcript(serverScope: $0, sessionID: session.id)
             }
         let knownStatus = sessionsService?.effectiveStatuses[session.id]
@@ -5682,7 +5683,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                     // `metadata.sessionId` until completion while `SessionsService` already
                     // knows the child session via `parentID`. Correlate them so the UI never
                     // displays the same running subagent twice under `call_...` and `ses_...`.
-                    let minCreated = message.createdAt.addingTimeInterval(-10)
+                    let minCreated = message.createdAt.addingTimeInterval(-10).timeIntervalSince1970
                     let stepAgent = step.agentName?.lowercased()
                     let matchIndex = unclaimedChildren.firstIndex { candidate in
                         guard candidate.createdAt >= minCreated else { return false }

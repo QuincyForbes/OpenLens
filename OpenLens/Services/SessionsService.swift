@@ -200,10 +200,11 @@ final class SessionsService {
 
     var pinnedSessionIDs: Set<String> {
         let scope = pinScope
+        let legacyURLScope = connection.serverURL?.absoluteString
         // Read `pinsByServer` so `@Observable` tracks pin toggles, while caching
         // the constructed `Set` so N rows don't re-hash it N times per render.
         let list = scope.flatMap { pinsByServer[$0] }
-            ?? connection.serverURL?.absoluteString.flatMap { pinsByServer[$0] }
+            ?? legacyURLScope.flatMap { pinsByServer[$0] }
             ?? []
         if cachedPinnedScope != scope {
             cachedPinnedScope = scope
@@ -214,8 +215,9 @@ final class SessionsService {
 
     func togglePin(_ sessionID: String) {
         guard let pinScope else { return }
+        let legacyURLScope = connection.serverURL?.absoluteString
         let baseline = pinsByServer[pinScope]
-            ?? connection.serverURL?.absoluteString.flatMap { pinsByServer[$0] }
+            ?? legacyURLScope.flatMap { pinsByServer[$0] }
             ?? []
         var ids = Set(baseline)
         if !ids.insert(sessionID).inserted { ids.remove(sessionID) }
@@ -260,11 +262,12 @@ final class SessionsService {
     /// from the local two-tier cache so app startup and reconnects render immediately.
     @discardableResult
     func hydrateFromLocalCache() -> [OCSession]? {
+        let legacyURLScope = connection.serverURL?.absoluteString
         guard let client = ensureLiveStateScope(),
               let cacheStore,
               let scope = connection.cacheScopeKey,
               let cached = cacheStore.loadCatalog(serverScope: scope)
-                ?? connection.serverURL?.absoluteString.flatMap({ cacheStore.loadCatalog(serverScope: $0) }),
+                ?? legacyURLScope.flatMap({ cacheStore.loadCatalog(serverScope: $0) }),
               !cached.rootSessions.isEmpty else {
             return nil
         }
