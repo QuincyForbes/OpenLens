@@ -414,18 +414,33 @@ struct SessionCacheAndLiveActivityTests {
         chat.isLoading = true
         chat.responseState = .generating
 
-        let runningSubagentPart = OCPart(
-            id: "call_sub_1",
-            sessionID: parent.id,
-            messageID: "msg_step_1",
-            type: .tool,
-            callID: "call_sub_1",
-            tool: "subagent",
-            state: OCToolState(
-                status: .running,
-                input: ["agent": AnyCodable("explore"), "description": AnyCodable("Explore codebase")]
-            )
+        let rawPartEvent = OCEvent(
+            type: "message.part.updated",
+            properties: AnyCodable([
+                "part": [
+                    "id": "call_sub_1",
+                    "sessionID": parent.id,
+                    "messageID": "msg_step_1",
+                    "type": "tool",
+                    "callID": "call_sub_1",
+                    "tool": "subagent",
+                    "state": [
+                        "status": "running",
+                        "input": [
+                            "agent": "explore",
+                            "description": "Explore codebase",
+                        ],
+                    ],
+                ]
+            ])
         )
+        guard case .partUpdated(let runningSubagentPart, _, _, _) = SSEInboundEvent.prepare(
+            rawPartEvent,
+            retainingRawEvent: false
+        ) else {
+            Issue.record("Expected prepared running subagent part")
+            return
+        }
         let step1 = ChatMessage(
             id: "msg_step_1",
             role: .assistant,
