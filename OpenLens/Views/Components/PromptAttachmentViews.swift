@@ -8,6 +8,7 @@ struct PromptImageThumbnail: View {
     let cacheKey: String
     let source: Source
     let side: CGFloat
+    var showsZoomBadge: Bool = false
 
     enum Source: Sendable {
         case data(Data)
@@ -16,6 +17,7 @@ struct PromptImageThumbnail: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
+    @State private var isHovered = false
 
     var body: some View {
         ZStack {
@@ -32,6 +34,24 @@ struct PromptImageThumbnail: View {
         }
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.75)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showsZoomBadge && image != nil {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(5)
+                    .background(.black.opacity(isHovered ? 0.68 : 0.45), in: Circle())
+                    .padding(6)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onHover { hovering in
+            isHovered = hovering
+        }
         .task(id: cacheKey) {
             image = await PromptImageThumbnailCache.thumbnail(
                 key: cacheKey,
@@ -89,34 +109,50 @@ enum PromptImageThumbnailCache {
     }
 }
 
-/// Images and files attached to a user prompt, shown above its text.
+/// Images and files attached to a chat message, shown above its text.
 struct MessageAttachmentsRow: View {
     let images: [OCPart]
     let files: [OCPart]
+    var alignment: HorizontalAlignment = .trailing
 
-    @State private var previewedImage: PreviewedImageItem?
+    @State private var gallerySelection: ChatImageGallerySelection?
+
+    private var imageItems: [ChatImageItem] {
+        images.map { ChatImageItem.fromPart($0, fallbackTitle: AppText.attachedImage) }
+    }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 6) {
+        VStack(alignment: alignment, spacing: 6) {
             if !images.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(images, id: \.id) { part in
+                let items = imageItems
+                let thumbnailSide: CGFloat = images.count == 1 ? 180 : 104
+                let rowContent = HStack(spacing: 6) {
+                    ForEach(Array(zip(images, items)), id: \.0.id) { part, item in
                         Button {
-                            previewedImage = PreviewedImageItem(
-                                id: part.id,
-                                title: part.filename ?? AppText.attachedImage,
-                                source: .dataURL(part.url ?? "")
-                            )
+                            gallerySelection = ChatImageGallerySelection(items: items, initialItemID: item.id)
                         } label: {
                             PromptImageThumbnail(
                                 cacheKey: part.id,
                                 source: .dataURL(part.url ?? ""),
-                                side: images.count == 1 ? 160 : 96
+                                side: thumbnailSide,
+                                showsZoomBadge: true
                             )
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(part.filename ?? AppText.attachedImage)
+                        .chatImageContextMenu(item: item) {
+                            gallerySelection = ChatImageGallerySelection(items: items, initialItemID: item.id)
+                        }
+                        .accessibilityLabel(item.title)
+                        .accessibilityHint(AppText.imageViewAndZoom)
                     }
+                }
+
+                if images.count > 2 {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        rowContent
+                    }
+                } else {
+                    rowContent
                 }
             }
             ForEach(files, id: \.id) { part in
@@ -126,9 +162,7 @@ struct MessageAttachmentsRow: View {
                 )
             }
         }
-        .sheet(item: $previewedImage) { item in
-            ImageAttachmentPreview(item: item)
-        }
+        .adaptiveImageViewerPresentation(selection: $gallerySelection)
     }
 }
 
@@ -195,7 +229,14 @@ struct ComposerAttachmentStrip: View {
     let onRemove: (String) -> Void
     let onPreview: (PromptTextFileAttachment) -> Void
 
-    @State private var previewedImage: PreviewedImageItem?
+    @State private var gallerySelection: ChatImageGallerySelection?
+
+    private var composerImageItems: [ChatImageItem] {
+        attachments.compactMap { attachment in
+            guard case let .image(image) = attachment else { return nil }
+            return ChatImageItem.fromPromptImage(image)
+        }
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -219,23 +260,26 @@ struct ComposerAttachmentStrip: View {
             }
             .padding(.vertical, 2)
         }
-        .sheet(item: $previewedImage) { item in
-            ImageAttachmentPreview(item: item)
-        }
+        .adaptiveImageViewerPresentation(selection: $gallerySelection)
     }
 
     @ViewBuilder
     private func item(for attachment: PromptAttachment) -> some View {
         switch attachment {
         case let .image(image):
+            let imageItem = ChatImageItem.fromPromptImage(image)
+            let openViewer = {
+                let items = composerImageItems
+                gallerySelection = ChatImageGallerySelection(
+                    items: items.isEmpty ? [imageItem] : items,
+                    initialItemID: image.id
+                )
+            }
             PromptImageThumbnail(cacheKey: image.id, source: .data(image.data), side: 56)
                 .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .onTapGesture {
-                    previewedImage = PreviewedImageItem(
-                        id: image.id,
-                        title: image.name,
-                        source: .data(image.data)
-                    )
+                .onTapGesture(perform: openViewer)
+                .chatImageContextMenu(item: imageItem, onOpenViewer: openViewer) {
+                    onRemove(image.id)
                 }
                 .overlay(alignment: .topTrailing) {
                     Button {
@@ -268,59 +312,23 @@ struct PreviewedImageItem: Identifiable {
     let id: String
     let title: String
     let source: PromptImageThumbnail.Source
+
+    var asChatImageItem: ChatImageItem {
+        switch source {
+        case let .data(bytes):
+            ChatImageItem(id: id, title: title, source: .data(bytes))
+        case let .dataURL(uri):
+            ChatImageItem(id: id, title: title, source: .dataURL(uri))
+        }
+    }
 }
 
-/// Full-size preview sheet for attached or sent images with Copy Image action.
+/// Full-size zoomable preview for attached or sent images with download, copy, and share actions.
 struct ImageAttachmentPreview: View {
     let item: PreviewedImageItem
 
-    @Environment(\.dismiss) private var dismiss
-    @State private var image: UIImage?
-    @State private var didCopy = false
-
     var body: some View {
-        NavigationStack {
-            Group {
-                if let image {
-                    ScrollView([.vertical, .horizontal]) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .containerRelativeFrame(.horizontal)
-                            .padding()
-                    }
-                } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-            .background(Color.appBackground)
-            .navigationTitle(item.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if let image {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            UIPasteboard.general.image = image
-                            didCopy = true
-                        } label: {
-                            Label(didCopy ? "Copied" : "Copy Image", systemImage: didCopy ? "checkmark" : "doc.on.doc")
-                        }
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(AppText.done) { dismiss() }
-                }
-            }
-            .task(id: item.id) {
-                image = await PromptImageThumbnailCache.thumbnail(
-                    key: "\(item.id)-full",
-                    source: item.source,
-                    maximumPixelSize: 2_400
-                )
-            }
-        }
-        .adaptiveSheetDragIndicator()
+        ChatImageViewer(selection: ChatImageGallerySelection(single: item.asChatImageItem))
     }
 }
 

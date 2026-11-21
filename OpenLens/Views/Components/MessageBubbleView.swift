@@ -223,6 +223,14 @@ struct MessageBubbleView: View {
 
     private var assistantBubble: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !message.imageAttachments.isEmpty {
+                MessageAttachmentsRow(
+                    images: message.imageAttachments,
+                    files: [],
+                    alignment: .leading
+                )
+            }
+
             ForEach(visibleAssistantSegments) { segment in
                 segmentView(segment)
             }

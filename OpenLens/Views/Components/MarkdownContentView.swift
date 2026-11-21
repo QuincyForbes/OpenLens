@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Renders markdown text as native SwiftUI views.
 /// Supports: code blocks, headings, lists, and inline formatting via AttributedString.
@@ -35,6 +36,7 @@ struct MarkdownContentView: View {
 
     /// Number of blocks currently visible (nil = show all).
     @State private var visibleBlockCount: Int?
+    @State private var gallerySelection: ChatImageGallerySelection?
 
     // Global parse cache — avoids re-parsing the same (finished) message text on every
     // SwiftUI re-render of the parent. NSCache evicts under memory pressure automatically.
@@ -178,6 +180,41 @@ struct MarkdownContentView: View {
                 }
             }
         }
+        .adaptiveImageViewerPresentation(selection: $gallerySelection)
+    }
+
+    private var markdownImageItems: [ChatImageItem] {
+        prepared.blocks.compactMap { block in
+            guard case let .image(alt, urlString) = block.kind else { return nil }
+            return Self.makeChatImageItem(
+                cacheKey: prepared.cacheKey,
+                blockID: block.id,
+                alt: alt,
+                urlString: urlString
+            )
+        }
+    }
+
+    private static func makeChatImageItem(
+        cacheKey: Int,
+        blockID: Int,
+        alt: String,
+        urlString: String
+    ) -> ChatImageItem? {
+        let id = "md-img-\(cacheKey)-\(blockID)"
+        let title = alt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? (URL(string: urlString)?.lastPathComponent.nilIfBlank ?? AppText.image)
+            : alt.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if urlString.lowercased().hasPrefix("data:image/") {
+            return ChatImageItem(id: id, title: title, source: .dataURL(urlString))
+        }
+        if let url = URL(string: urlString),
+           let scheme = url.scheme?.lowercased(),
+           scheme == "https" || scheme == "http" {
+            return ChatImageItem(id: id, title: title, source: .remoteURL(url))
+        }
+        return nil
     }
 
     // MARK: - Block Types
@@ -197,6 +234,7 @@ struct MarkdownContentView: View {
         case unorderedList([ListFragment])
         case orderedList([ListFragment])
         case blockquote([TextFragment])
+        case image(alt: String, urlString: String)
     }
 
     /// A bounded piece of prose that can be laid out independently. Quotes use
@@ -419,6 +457,13 @@ struct MarkdownContentView: View {
                 continue
             }
 
+            if let parsedImage = parseStandaloneImageLine(line) {
+                blocks.append(Block(id: nextID, kind: .image(alt: parsedImage.alt, urlString: parsedImage.urlString)))
+                nextID += 1
+                i += 1
+                continue
+            }
+
             // Paragraph: collect consecutive non-special lines
             var paraLines: [String] = []
             while i < lines.count {
@@ -432,7 +477,8 @@ struct MarkdownContentView: View {
                     || current.hasPrefix("- ")
                     || current.hasPrefix("* ")
                     || current.hasPrefix("+ ")
-                    || parseOrderedListItem(current) != nil {
+                    || parseOrderedListItem(current) != nil
+                    || parseStandaloneImageLine(current) != nil {
                     break
                 }
                 paraLines.append(current)
@@ -458,6 +504,50 @@ struct MarkdownContentView: View {
         let remainder = line.dropFirst(level)
         return remainder.first?.isWhitespace == true
             && !remainder.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Parses a standalone Markdown image line `![alt](url)` when the target is an inline
+    /// base64 `data:image/` URI or an `http(s)://` image URL.
+    private static func parseStandaloneImageLine(_ line: String) -> (alt: String, urlString: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("!["), trimmed.hasSuffix(")") else { return nil }
+        guard let separator = trimmed.range(of: "](") else { return nil }
+
+        let altStart = trimmed.index(trimmed.startIndex, offsetBy: 2)
+        guard altStart <= separator.lowerBound else { return nil }
+        let alt = String(trimmed[altStart..<separator.lowerBound])
+        // Avoid accidentally matching two images or trailing prose on the same line.
+        guard !alt.contains("]") else { return nil }
+
+        let destEnd = trimmed.index(before: trimmed.endIndex)
+        var rawDest = String(trimmed[separator.upperBound..<destEnd]).trimmingCharacters(in: .whitespaces)
+        guard !rawDest.isEmpty else { return nil }
+
+        if rawDest.hasPrefix("<"), let closingAngle = rawDest.firstIndex(of: ">") {
+            rawDest = String(rawDest[rawDest.index(after: rawDest.startIndex)..<closingAngle])
+        } else if let space = rawDest.firstIndex(where: \.isWhitespace) {
+            let suffix = rawDest[space...].trimmingCharacters(in: .whitespaces)
+            // Accept optional Markdown title ("..." or '...') after the URL, reject arbitrary prose.
+            if (suffix.hasPrefix("\"") && suffix.hasSuffix("\""))
+                || (suffix.hasPrefix("'") && suffix.hasSuffix("'")) {
+                rawDest = String(rawDest[..<space])
+            } else {
+                return nil
+            }
+        }
+
+        let lower = rawDest.lowercased()
+        if lower.hasPrefix("data:image/") && lower.contains(";base64,") {
+            return (alt, rawDest)
+        }
+        if let url = URL(string: rawDest),
+           let scheme = url.scheme?.lowercased(),
+           (scheme == "https" || scheme == "http"),
+           let host = url.host,
+           !host.isEmpty {
+            return (alt, rawDest)
+        }
+        return nil
     }
 
     private static func parseOrderedListItem(_ line: String) -> (ordinal: Int, body: String)? {
@@ -609,6 +699,27 @@ struct MarkdownContentView: View {
                 fragments: fragments,
                 usesRetroTypography: usesRetroTypography
             )
+
+        case .image(let alt, let urlString):
+            if let item = Self.makeChatImageItem(
+                cacheKey: prepared.cacheKey,
+                blockID: block.id,
+                alt: alt,
+                urlString: urlString
+            ) {
+                MarkdownImageBlockView(
+                    item: item,
+                    alt: alt,
+                    urlString: urlString,
+                    usesRetroTypography: usesRetroTypography
+                ) {
+                    let allItems = markdownImageItems
+                    gallerySelection = ChatImageGallerySelection(
+                        items: allItems.isEmpty ? [item] : allItems,
+                        initialItemID: item.id
+                    )
+                }
+            }
         }
     }
 
@@ -952,6 +1063,122 @@ struct DeferredMarkdownTextView: View {
         MarkdownContentView.prepare(text) { candidate in
             guard requestID == nextRequestID else { return }
             prepared = candidate
+        }
+    }
+}
+
+/// Renders a standalone Markdown image (`![alt](url)`) inline in a chat bubble,
+/// opening the full zoomable & downloadable `ChatImageViewer` on tap.
+private struct MarkdownImageBlockView: View {
+    let item: ChatImageItem
+    let alt: String
+    let urlString: String
+    let usesRetroTypography: Bool
+    let onOpenViewer: () -> Void
+
+    private enum LoadState {
+        case loading
+        case loaded(UIImage, ChatImageMetadata)
+        case failed
+    }
+
+    @Environment(\.workspaceService) private var workspaceService
+    @Environment(\.chatSessionDirectory) private var sessionDirectory
+    @Environment(\.openURL) private var openURL
+    @State private var loadState: LoadState = .loading
+    @State private var isHovered = false
+
+    private var caption: String? {
+        alt.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch loadState {
+            case .loading:
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.quaternary.opacity(0.6))
+                    .frame(maxWidth: 320, minHeight: 120, maxHeight: 160)
+                    .overlay {
+                        ProgressView()
+                    }
+
+            case let .loaded(image, metadata):
+                Button(action: onOpenViewer) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 420, maxHeight: 280, alignment: .leading)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 0.75)
+                        }
+                        .overlay(alignment: .bottomTrailing) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(6)
+                                .background(.black.opacity(isHovered ? 0.72 : 0.48), in: Circle())
+                                .padding(8)
+                                .allowsHitTesting(false)
+                        }
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    isHovered = hovering
+                }
+                .chatImageContextMenu(item: item, onOpenViewer: onOpenViewer)
+                .accessibilityLabel(caption ?? item.title)
+                .accessibilityHint(AppText.imageViewAndZoom)
+
+                HStack(spacing: 6) {
+                    if let caption {
+                        Text(caption)
+                            .lineLimit(2)
+                    }
+                    Text(metadata.summaryLabel)
+                        .monospacedDigit()
+                }
+                .font(usesRetroTypography ? RetroChatStyle.smallFont : .caption)
+                .foregroundStyle(.secondary)
+
+            case .failed:
+                if let url = URL(string: urlString),
+                   let scheme = url.scheme?.lowercased(),
+                   scheme == "https" || scheme == "http" {
+                    Button {
+                        openURL(url)
+                    } label: {
+                        Label(caption ?? urlString, systemImage: "photo")
+                            .font(usesRetroTypography ? RetroChatStyle.smallFont : .footnote)
+                            .foregroundStyle(Color.appAccent)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .buttonStyle(.plain)
+                } else if let caption {
+                    Label(caption, systemImage: "photo")
+                        .font(usesRetroTypography ? RetroChatStyle.smallFont : .footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .task(id: item.id) {
+            do {
+                let loaded = try await ChatImageLoader.load(
+                    item: item,
+                    workspaceService: workspaceService,
+                    sessionDirectory: sessionDirectory
+                )
+                guard !Task.isCancelled else { return }
+                loadState = .loaded(loaded.image, loaded.payload.metadata)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                loadState = .failed
+            }
         }
     }
 }

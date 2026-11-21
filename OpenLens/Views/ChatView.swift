@@ -3851,6 +3851,7 @@ private struct QueuedPromptBubbleView: View {
     @Environment(\.chatEasterEgg) private var chatEasterEgg
     @Environment(ChatClient.self) private var chatClient
     @State private var showFullReader = false
+    @State private var gallerySelection: ChatImageGallerySelection?
 
     var body: some View {
         let presentation = UserMessagePresentation.makeQueuedPreview(for: bodyText)
@@ -3861,11 +3862,28 @@ private struct QueuedPromptBubbleView: View {
             VStack(alignment: .trailing, spacing: 6) {
                 let images = prompt.attachments.compactMap(\.image)
                 if !images.isEmpty {
+                    let imageItems = images.map(ChatImageItem.fromPromptImage)
                     HStack(spacing: 6) {
-                        ForEach(images) { image in
-                            PromptImageThumbnail(cacheKey: image.id, source: .data(image.data), side: 56)
+                        ForEach(Array(zip(images, imageItems)), id: \.0.id) { image, item in
+                            Button {
+                                gallerySelection = ChatImageGallerySelection(items: imageItems, initialItemID: item.id)
+                            } label: {
+                                PromptImageThumbnail(
+                                    cacheKey: image.id,
+                                    source: .data(image.data),
+                                    side: 64,
+                                    showsZoomBadge: true
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .chatImageContextMenu(item: item) {
+                                gallerySelection = ChatImageGallerySelection(items: imageItems, initialItemID: item.id)
+                            }
+                            .accessibilityLabel(item.title)
+                            .accessibilityHint(AppText.imageViewAndZoom)
                         }
                     }
+                    .adaptiveImageViewerPresentation(selection: $gallerySelection)
                 }
                 ForEach(prompt.attachments) { attachment in
                     switch attachment {

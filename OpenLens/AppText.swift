@@ -394,4 +394,34 @@ enum AppText {
     static let executionWaitingForm = "Waiting for response"
     static let executionSucceeded = "Succeeded"
     static let executionInterrupted = "Interrupted"
+
+    // MARK: - Image Viewer & Export
+    static let imageViewAndZoom = "View & Zoom"
+    static let imageCopy = "Copy Image"
+    static let imageCopied = "Copied to Clipboard"
+    static let imageSaveToPhotos = "Save to Photos"
+    static let imageSavedToPhotos = "Saved to Photos"
+    static let imageSaveToFiles = "Save to Files…"
+    static let imageDownload = "Download"
+    static let imageShare = "Share"
+    static let imageRotate = "Rotate 90°"
+    static let imageInfo = "Image Info"
+    static let imageResetView = "Reset View"
+    static let imageZoomIn = "Zoom In"
+    static let imageZoomOut = "Zoom Out"
+    static let imageZoomFit = "Fit to Screen"
+    static let imageZoomActualSize = "Actual Size (1:1)"
+    static let imageBackdropDark = "Dark Backdrop"
+    static let imageBackdropLight = "Light Backdrop"
+    static let imageBackdropCheckerboard = "Transparency Grid"
+    static let imagePrevious = "Previous Image"
+    static let imageNext = "Next Image"
+    static let imageClose = "Close Image Viewer"
+    static let imageLoadFailed = "Couldn't Load Image"
+    static let imagePhotosAccessDenied = "Photos access is off. Enable it in Settings or use Save to Files."
+    static func imageSaveAllToPhotos(_ count: Int) -> String { "Save All \(count) to Photos" }
+    static func imageSavedMultipleToPhotos(_ count: Int) -> String { "Saved \(count) images to Photos" }
+    static func imageSavedFile(_ name: String) -> String { "Saved \(name)" }
+    static func imageSaveFailed(_ description: String) -> String { "Couldn't save image: \(description)" }
+    static func imageGalleryPosition(_ current: Int, total: Int) -> String { "\(current) of \(total)" }
 }

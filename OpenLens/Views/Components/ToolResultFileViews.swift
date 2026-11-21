@@ -15,6 +15,13 @@ struct ToolResultFilesStrip: View {
     let usesRetroTypography: Bool
 
     @State private var previewedFile: ToolResultFile?
+    @State private var gallerySelection: ChatImageGallerySelection?
+
+    private var inspectableImageItems: [ChatImageItem] {
+        files
+            .filter { $0.kind == .image && $0.isInspectable }
+            .map(ChatImageItem.fromToolResultFile)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -37,19 +44,50 @@ struct ToolResultFilesStrip: View {
         .sheet(item: $previewedFile) { file in
             ToolResultFilePreview(file: file)
         }
+        .adaptiveImageViewerPresentation(selection: $gallerySelection)
+    }
+
+    private func openImageGallery(startingAt file: ToolResultFile) {
+        let items = inspectableImageItems
+        let single = ChatImageItem.fromToolResultFile(file)
+        gallerySelection = ChatImageGallerySelection(
+            items: items.isEmpty ? [single] : items,
+            initialItemID: file.id
+        )
     }
 
     @ViewBuilder
     private func item(for file: ToolResultFile) -> some View {
         if file.kind == .image, case let .dataURI(uri) = file.source {
+            let imageItem = ChatImageItem.fromToolResultFile(file)
             Button {
-                previewedFile = file
+                openImageGallery(startingAt: file)
             } label: {
-                PromptImageThumbnail(cacheKey: file.id, source: .dataURL(uri), side: 64)
+                PromptImageThumbnail(
+                    cacheKey: file.id,
+                    source: .dataURL(uri),
+                    side: 76,
+                    showsZoomBadge: true
+                )
             }
             .buttonStyle(.plain)
+            .chatImageContextMenu(item: imageItem) {
+                openImageGallery(startingAt: file)
+            }
             .accessibilityLabel("\(AppText.toolReturnedFile): \(file.title)")
-            .accessibilityHint(AppText.openToolFile)
+            .accessibilityHint(AppText.imageViewAndZoom)
+        } else if file.kind == .image, file.isInspectable {
+            let imageItem = ChatImageItem.fromToolResultFile(file)
+            Button {
+                openImageGallery(startingAt: file)
+            } label: {
+                ToolResultFileChip(file: file, detail: nil)
+            }
+            .buttonStyle(.plain)
+            .chatImageContextMenu(item: imageItem) {
+                openImageGallery(startingAt: file)
+            }
+            .accessibilityHint(AppText.imageViewAndZoom)
         } else if file.isInspectable {
             Button {
                 previewedFile = file
@@ -119,27 +157,31 @@ struct ToolResultFilePreview: View {
     @State private var loadState: LoadState = .loading
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle(file.title)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button(AppText.done) { dismiss() }
+        if file.kind == .image {
+            ChatImageViewer(selection: ChatImageGallerySelection(single: ChatImageItem.fromToolResultFile(file)))
+        } else {
+            NavigationStack {
+                content
+                    .navigationTitle(file.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button(AppText.done) { dismiss() }
+                        }
                     }
+            }
+            .task(id: "\(file.id):\(sessionDirectory ?? "")") {
+                loadState = .loading
+                do {
+                    let content = try await workspaceService.loadToolResultFile(file, sessionDirectory: sessionDirectory)
+                    guard !Task.isCancelled else { return }
+                    loadState = .loaded(content)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    loadState = .failed((error as? LocalizedError)?.errorDescription ?? AppText.toolFileCouldNotOpen)
                 }
-        }
-        .task(id: "\(file.id):\(sessionDirectory ?? "")") {
-            loadState = .loading
-            do {
-                let content = try await workspaceService.loadToolResultFile(file, sessionDirectory: sessionDirectory)
-                guard !Task.isCancelled else { return }
-                loadState = .loaded(content)
-            } catch is CancellationError {
-                return
-            } catch {
-                guard !Task.isCancelled else { return }
-                loadState = .failed((error as? LocalizedError)?.errorDescription ?? AppText.toolFileCouldNotOpen)
             }
         }
     }
@@ -153,7 +195,11 @@ struct ToolResultFilePreview: View {
         case let .failed(message):
             ContentUnavailableView(AppText.toolFileCouldNotOpen, systemImage: "exclamationmark.triangle", description: Text(message))
         case let .loaded(.image(data)):
-            ToolResultDownsampledImageView(id: file.id, title: file.title, data: data)
+            ChatImageViewer(
+                selection: ChatImageGallerySelection(
+                    single: ChatImageItem(id: file.id, title: file.title, mime: file.mime, source: .data(data))
+                )
+            )
         case let .loaded(.text(text)):
             ScrollView([.vertical, .horizontal]) {
                 Text(AttachmentPreviewText.truncated(text))
@@ -180,53 +226,4 @@ private struct ToolResultPDFView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: PDFView, context: Context) {}
-}
-
-private struct ToolResultDownsampledImageView: View {
-    let id: String
-    let title: String
-    let data: Data
-
-    @State private var phase: ImagePhase = .decoding
-
-    private enum ImagePhase {
-        case decoding
-        case decoded(UIImage)
-        case unreadable
-    }
-
-    var body: some View {
-        Group {
-            switch phase {
-            case .decoding:
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case let .decoded(image):
-                ScrollView([.vertical, .horizontal]) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .containerRelativeFrame(.horizontal)
-                        .accessibilityLabel(title)
-                }
-            case .unreadable:
-                ContentUnavailableView(
-                    AppText.toolFileCouldNotOpen,
-                    systemImage: "photo",
-                    description: Text(AppText.toolFileUnreadable)
-                )
-            }
-        }
-        .task(id: id) {
-            if let image = await PromptImageThumbnailCache.thumbnail(
-                key: "tool-result-\(id)-\(data.count)",
-                source: .data(data),
-                maximumPixelSize: 2_400
-            ) {
-                phase = .decoded(image)
-            } else {
-                phase = .unreadable
-            }
-        }
-    }
 }
