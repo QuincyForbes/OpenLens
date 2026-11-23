@@ -408,7 +408,7 @@ struct SubagentThreadsSheet: View {
                         }
 
                         if let detail = item.detail?.nilIfBlank, detail != item.title {
-                            Text(detail)
+                            MarkdownPreviewText(text: detail)
                                 .font(.caption)
                                 .foregroundStyle(Color.appSecondary)
                                 .lineLimit(2)

@@ -106,6 +106,12 @@ struct MeridianUsageView: View {
             if let cacheHit = snapshot.cacheHitRate24h {
                 LabeledContent("Cache Hit Rate", value: "\(Int((cacheHit * 100).rounded()))%")
             }
+            if let asOf = snapshot.dataAsOf {
+                LabeledContent("Updated") {
+                    Text(asOf, style: .relative)
+                        .foregroundStyle(MeridianUsageService.isBridgedSnapshotFresh(snapshot) ? Color.secondary : Color.orange)
+                }
+            }
         }
     }
 

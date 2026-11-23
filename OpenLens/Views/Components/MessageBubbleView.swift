@@ -514,7 +514,7 @@ struct MessageBubbleView: View {
             }
 
             if !step.detail.isEmpty {
-                Text(step.detail)
+                MarkdownPreviewText(text: step.detail)
                     .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12))
                     .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
                     .fixedSize(horizontal: false, vertical: true)

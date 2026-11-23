@@ -78,6 +78,8 @@ nonisolated struct MeridianUsageSnapshot: Equatable, Sendable {
     let cacheHitRate24h: Double?
     let models24h: [MeridianModelUsageSummary]
     let fetchedAt: Date
+    /// When Meridian produced the quota payload (`asOf`), if it reported one.
+    var dataAsOf: Date? = nil
 }
 
 @MainActor @Observable
@@ -200,6 +202,8 @@ final class MeridianUsageService {
         // When no custom URL is forced and we have an active OpenCode connection
         // (including remote tunnels like *.opentunnel.xyz), try reading the live
         // Meridian bridge files through the authenticated OpenCode server first.
+        // The files outlive the bridge process, so stale ones are only a fallback.
+        var staleBridged: MeridianUsageSnapshot?
         if customEndpointURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            let client = connection.client {
             let tmpDir = connection.serverCapabilities?.serverInfo?.paths?.temporaryDirectory
@@ -210,14 +214,21 @@ final class MeridianUsageService {
                 displayURL: URL(string: "https://desktop-t43r9nu.taild1dd15.ts.net:8443")!
             ) {
                 guard !Task.isCancelled, generation == refreshGeneration else { return }
-                state = .loaded(bridged)
-                return
+                if Self.isBridgedSnapshotFresh(bridged) {
+                    state = .loaded(bridged)
+                    return
+                }
+                staleBridged = bridged
             }
         }
 
         guard !candidates.isEmpty else {
             guard generation == refreshGeneration else { return }
-            state = .failed("Connect to a server or set a Meridian URL (for example http://host:3456).")
+            if let staleBridged {
+                state = .loaded(staleBridged)
+            } else {
+                state = .failed("Connect to a server or set a Meridian URL (for example http://host:3456).")
+            }
             return
         }
 
@@ -258,13 +269,23 @@ final class MeridianUsageService {
             return
         }
 
-        if let previous {
+        if let staleBridged {
+            state = .loaded(staleBridged)
+        } else if let previous {
             state = .loaded(previous)
         } else if case let .failure(error) = raceOutcome {
             state = .failed(error.localizedDescription)
         } else {
             state = .failed("Could not reach Meridian dashboard.")
         }
+    }
+
+    /// Bridge files are rewritten every few seconds while the host bridge runs.
+    nonisolated static let bridgedFreshnessInterval: TimeInterval = 120
+
+    nonisolated static func isBridgedSnapshotFresh(_ snapshot: MeridianUsageSnapshot, now: Date = .now) -> Bool {
+        guard let asOf = snapshot.dataAsOf else { return true }
+        return now.timeIntervalSince(asOf) <= bridgedFreshnessInterval
     }
 
     nonisolated static func fetchSnapshotViaOpenCodeServer(
@@ -399,7 +420,8 @@ final class MeridianUsageService {
             totalUsd24h: telemetry?.costEstimate?.totalUsd,
             cacheHitRate24h: telemetry?.tokenUsage?.avgCacheHitRate,
             models24h: models24h,
-            fetchedAt: now
+            fetchedAt: now,
+            dataAsOf: quota.asOf.flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0 / 1000.0) : nil }
         )
     }
 
@@ -482,6 +504,7 @@ final class MeridianUsageService {
         let profiles: [QuotaProfile]
         let activeProfile: String?
         let activeProfiles: [String: String]?
+        let asOf: Double?
     }
 
     nonisolated private struct QuotaProfile: Decodable, Sendable {

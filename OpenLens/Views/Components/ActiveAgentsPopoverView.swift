@@ -468,7 +468,7 @@ struct ActiveAgentsPopoverView: View {
                 .foregroundStyle(Color.appAccent)
                 .symbolEffect(.pulse)
 
-            Text(text)
+            MarkdownPreviewText(text: text)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(Color.appPrimary)
                 .lineLimit(1)
@@ -518,7 +518,7 @@ struct ActiveAgentsPopoverView: View {
                             .background(Color.appTertiary, in: Capsule())
                     }
                     if let liveText = liveText?.nilIfBlank, liveText != title {
-                        Text("· \(liveText)")
+                        Text("· \(MarkdownPreview.plainText(liveText))")
                             .font(.system(size: 11))
                             .foregroundStyle(Color.appSecondary)
                             .lineLimit(1)

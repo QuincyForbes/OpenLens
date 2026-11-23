@@ -94,6 +94,21 @@ struct MeridianUsageServiceTests {
         #expect(snapshot.models24h.map(\.id) == ["claude-opus-5-5", "gpt-6-astra"])
     }
 
+    @Test func bridgedSnapshotFreshnessUsesQuotaAsOf() throws {
+        let quotaJSON = Data(#"{"profiles":[],"asOf":1795445700000}"#.utf8)
+        let snapshot = try MeridianUsageService.decodeSnapshot(
+            baseURL: URL(string: "https://desktop.example.ts.net:8443")!,
+            quotaData: quotaJSON,
+            profilesData: nil,
+            healthData: nil,
+            telemetryData: nil
+        )
+        let asOf = Date(timeIntervalSince1970: 1_795_445_700)
+        #expect(snapshot.dataAsOf == asOf)
+        #expect(MeridianUsageService.isBridgedSnapshotFresh(snapshot, now: asOf.addingTimeInterval(60)))
+        #expect(!MeridianUsageService.isBridgedSnapshotFresh(snapshot, now: asOf.addingTimeInterval(600)))
+    }
+
     @Test func resolvesCustomAndConnectedServerCandidateURLs() {
         let urls = MeridianUsageService.resolveCandidateURLs(
             customEndpoint: "100.114.113.63:3456",

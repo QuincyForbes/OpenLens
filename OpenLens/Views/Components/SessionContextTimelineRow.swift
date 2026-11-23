@@ -31,13 +31,25 @@ struct SessionContextTimelineRow: View {
                     // Same rule as message bubbles: per-Text selection fights
                     // scrolling, so copying goes through a menu and a sheet.
                     VStack(alignment: .leading, spacing: 8) {
-                        LinkedPlainText(text: previewInfo.text, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                            .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
-                            .foregroundStyle(ink)
+                        if rendersDetailsAsMarkdown {
+                            // Subagent reports are Markdown (headings, lists,
+                            // tables, code). Details are already bounded and
+                            // the renderer reveals long content incrementally.
+                            DeferredMarkdownTextView(
+                                text: entry.details,
+                                foregroundColor: ink,
+                                usesRetroTypography: isRetroChat
+                            )
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            LinkedPlainText(text: previewInfo.text, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
+                                .foregroundStyle(ink)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
 
                         HStack(spacing: 14) {
-                            if previewInfo.isTruncated {
+                            if previewInfo.isTruncated, !rendersDetailsAsMarkdown {
                                 Button {
                                     selectableDetails = SelectableDetails(text: entry.details)
                                 } label: {
@@ -109,14 +121,14 @@ struct SessionContextTimelineRow: View {
                     .foregroundStyle(ink)
                     .multilineTextAlignment(.leading)
                 if !entry.summary.isEmpty {
-                    Text(entry.summary)
+                    MarkdownPreviewText(text: entry.summary)
                         .font(isRetroChat ? RetroChatStyle.smallFont : .caption)
                         .foregroundStyle(secondaryInk)
                         .multilineTextAlignment(.leading)
                         .lineLimit(isExpanded ? nil : 2)
                 }
                 if entry.kind == .synthetic, !isExpanded, !entry.resultPreview.isEmpty {
-                    Text(entry.resultPreview)
+                    MarkdownPreviewText(text: entry.resultPreview)
                         .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
                         .foregroundStyle(ink)
                         .multilineTextAlignment(.leading)
@@ -144,6 +156,12 @@ struct SessionContextTimelineRow: View {
     }
 
     private var isRetroChat: Bool { chatEasterEgg.visualMode.isRetro }
+
+    /// Subagent results carry the agent's Markdown report; other entries
+    /// (shell output, compaction summaries) stay verbatim plain text.
+    private var rendersDetailsAsMarkdown: Bool {
+        entry.kind == .synthetic && entry.subagentResult != nil
+    }
     private var ink: Color { isRetroChat ? RetroChatStyle.ink : .primary }
     private var secondaryInk: Color { isRetroChat ? RetroChatStyle.secondaryInk : .primary.opacity(0.65) }
 

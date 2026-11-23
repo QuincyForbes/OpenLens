@@ -62,6 +62,45 @@ struct MarkdownContentViewTests {
     }
 
     @MainActor
+    @Test func pipeTableBetweenParagraphsIsPreparedAsTableBlock() async {
+        let prepared = await prepareMarkdown("""
+        Here are the results:
+        | Name | Status | Count |
+        | :--- | :----: | ----: |
+        | **api** | `ok` | 12 |
+        | web | down | 3 |
+        That's all.
+        """)
+
+        #expect(prepared.blocks.count == 3)
+        guard prepared.blocks.count == 3,
+              case let .table(table) = prepared.blocks[1].kind else {
+            Issue.record("Expected paragraph, table, paragraph")
+            return
+        }
+        #expect(table.table.headers == ["Name", "Status", "Count"])
+        #expect(table.table.alignments == [.leading, .center, .trailing])
+        #expect(table.rows.count == 2)
+        #expect(table.columnWidths.count == 3)
+        #expect(table.rows[0][0].attributed.map { String($0.characters) } == "api")
+        if case let .paragraph(_, raw) = prepared.blocks[2].kind {
+            #expect(raw == "That's all.")
+        } else {
+            Issue.record("Expected trailing paragraph")
+        }
+    }
+
+    @MainActor
+    @Test func pipeTextWithoutDelimiterRowStaysParagraph() async {
+        let prepared = await prepareMarkdown("a | b\nc | d")
+        guard case .paragraph = prepared.blocks.first?.kind else {
+            Issue.record("Expected a paragraph")
+            return
+        }
+        #expect(prepared.blocks.count == 1)
+    }
+
+    @MainActor
     private func prepareMarkdown(_ text: String) async -> MarkdownContentView.Prepared {
         await withCheckedContinuation { continuation in
             MarkdownContentView.prepare(text) { prepared in

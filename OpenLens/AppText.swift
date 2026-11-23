@@ -424,4 +424,25 @@ enum AppText {
     static func imageSavedFile(_ name: String) -> String { "Saved \(name)" }
     static func imageSaveFailed(_ description: String) -> String { "Couldn't save image: \(description)" }
     static func imageGalleryPosition(_ current: Int, total: Int) -> String { "\(current) of \(total)" }
+
+    // MARK: - Markdown Tables
+    static let table = "Table"
+    static let tableOpen = "Open Table"
+    static let tableActions = "Table Actions"
+    static let tableCopyMarkdown = "Copy as Markdown"
+    static let tableCopySpreadsheet = "Copy for Spreadsheet"
+    static let tableCopiedMarkdown = "Copied table as Markdown"
+    static let tableCopiedSpreadsheet = "Copied — paste into Numbers, Excel, or Sheets"
+    static let tableDownloadCSV = "Download CSV…"
+    static let tableDownloadMarkdown = "Download Markdown…"
+    static let tableShareCSV = "Share CSV"
+    static let tableZoomReset = "Reset Zoom"
+    static func tableDimensions(rows: Int, columns: Int) -> String {
+        "\(rows) row\(rows == 1 ? "" : "s") · \(columns) column\(columns == 1 ? "" : "s")"
+    }
+    static func tableShowMoreRows(_ remaining: Int) -> String { "Show more (\(remaining) rows)" }
+    static func tableRowsLimited(_ shown: Int, total: Int) -> String {
+        "Showing first \(shown) of \(total) rows. Downloads include every row."
+    }
+    static func tableSaveFailed(_ description: String) -> String { "Couldn't save table: \(description)" }
 }

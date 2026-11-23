@@ -235,6 +235,45 @@ struct MarkdownContentView: View {
         case orderedList([ListFragment])
         case blockquote([TextFragment])
         case image(alt: String, urlString: String)
+        case table(PreparedTable)
+    }
+
+    /// A table whose cells were already converted to attributed text and whose
+    /// column widths were estimated on `parserQueue`.
+    struct PreparedTable: Identifiable {
+        struct Cell {
+            let attributed: AttributedString?
+            let raw: String
+        }
+
+        let id: Int
+        let table: MarkdownTable
+        let header: [Cell]
+        let rows: [[Cell]]
+        let columnWidths: [CGFloat]
+    }
+
+    /// Display text for one cell is bounded; exports keep the full source.
+    private static let tableCellDisplayLimit = 1_000
+
+    private static func prepareTable(_ table: MarkdownTable, id: Int) -> PreparedTable {
+        func cell(_ raw: String) -> PreparedTable.Cell {
+            var display = raw
+                .replacingOccurrences(of: "<br/>", with: "\n")
+                .replacingOccurrences(of: "<br />", with: "\n")
+                .replacingOccurrences(of: "<br>", with: "\n")
+            if display.count > tableCellDisplayLimit {
+                display = String(display.prefix(tableCellDisplayLimit)) + "…"
+            }
+            return PreparedTable.Cell(attributed: makeAttributed(display), raw: display)
+        }
+        return PreparedTable(
+            id: id,
+            table: table,
+            header: table.headers.map(cell),
+            rows: table.rows.map { $0.map(cell) },
+            columnWidths: table.estimatedColumnWidths().map { CGFloat($0) }
+        )
     }
 
     /// A bounded piece of prose that can be laid out independently. Quotes use
@@ -297,6 +336,12 @@ struct MarkdownContentView: View {
         guard text.contains("."), let domainCandidateRegex else { return false }
         let range = NSRange(text.startIndex..., in: text)
         return domainCandidateRegex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    /// Inline Markdown (bold, code, links) for short single-line labels such as
+    /// subagent summaries. Block syntax is flattened to plain text first.
+    static func inlineAttributed(_ text: String) -> AttributedString? {
+        makeAttributed(MarkdownPreview.flattenedBlockSyntax(text))
     }
 
     /// Plain prose (no Markdown) with bare URLs made tappable, or nil when the
@@ -464,6 +509,13 @@ struct MarkdownContentView: View {
                 continue
             }
 
+            if let parsedTable = MarkdownTable.parse(lines: lines, at: i) {
+                blocks.append(Block(id: nextID, kind: .table(prepareTable(parsedTable.table, id: nextID))))
+                nextID += 1
+                i = parsedTable.nextIndex
+                continue
+            }
+
             // Paragraph: collect consecutive non-special lines
             var paraLines: [String] = []
             while i < lines.count {
@@ -478,7 +530,8 @@ struct MarkdownContentView: View {
                     || current.hasPrefix("* ")
                     || current.hasPrefix("+ ")
                     || parseOrderedListItem(current) != nil
-                    || parseStandaloneImageLine(current) != nil {
+                    || parseStandaloneImageLine(current) != nil
+                    || MarkdownTable.startsTable(lines: lines, at: i) {
                     break
                 }
                 paraLines.append(current)
@@ -720,6 +773,12 @@ struct MarkdownContentView: View {
                     )
                 }
             }
+
+        case .table(let table):
+            MarkdownTableBlockView(
+                table: table,
+                usesRetroTypography: usesRetroTypography
+            )
         }
     }
 
@@ -749,6 +808,21 @@ struct LinkedPlainText: View {
             }
         }
         .macInlineTextSelection()
+    }
+}
+
+/// A compact preview of Markdown for collapsed rows and status labels: block
+/// markers (headings, bullets, table pipes) are flattened, inline styles kept.
+/// Intended for short strings such as subagent summaries.
+struct MarkdownPreviewText: View {
+    let text: String
+
+    var body: some View {
+        if let attributed = MarkdownContentView.inlineAttributed(text) {
+            Text(attributed)
+        } else {
+            Text(MarkdownPreview.flattenedBlockSyntax(text))
+        }
     }
 }
 
