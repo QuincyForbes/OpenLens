@@ -10,7 +10,7 @@ final class InstanceStatusMonitor {
     enum Status: Equatable, Sendable {
         case unknown
         case checking
-        case online(protocolVersion: OpenCodeProtocolVersion, serverVersion: String?, activeSessionCount: Int?)
+        case online(protocolVersion: OpenCodeProtocol, serverVersion: String?, activeSessionCount: Int?)
         case offline(String)
 
         var isOnline: Bool {
