@@ -65,6 +65,8 @@ struct ReviewRootView: View {
     @State private var isSessionPickerPresented = false
     @State private var inboxBadgeCount = 0
     @State private var isInboxPresented = false
+    @State private var hasLoadedSessions = false
+    @State private var reviewLoadGeneration: UInt = 0
     @State private var selectedScopeState = SelectedScopeState.empty
     private let appearancePreference = AppearancePreference.shared
 
@@ -94,6 +96,8 @@ struct ReviewRootView: View {
             refreshSelectedScopeState()
         }
         .onChange(of: connection.instanceSwitchRevision) { _, _ in
+            reviewLoadGeneration &+= 1
+            hasLoadedSessions = false
             selectedReviewSession = nil
             availableSessions = []
             nextSessionsCursor = nil
@@ -168,15 +172,14 @@ struct ReviewRootView: View {
     @ViewBuilder
     private var content: some View {
         switch viewState {
-        case .idle where availableSessions.isEmpty && chatClient.currentSession == nil:
+        case .idle where hasLoadedSessions && availableSessions.isEmpty && chatClient.currentSession == nil:
             ContentUnavailableView(
                 "No Sessions",
                 systemImage: "doc.text.magnifyingglass",
                 description: Text("Start a chat or pick a session once one exists.")
             )
         case .idle, .loading where reviewSnapshot == nil:
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            AppLoadingStateView(title: "Loading review…")
         case .error(let message) where reviewSnapshot == nil:
             ContentUnavailableView {
                 Label("Review Unavailable", systemImage: "exclamationmark.triangle")
@@ -510,11 +513,14 @@ struct ReviewRootView: View {
 
     /// Reloads the first page of sessions and keeps a valid selection.
     private func refreshAvailableSessions() async {
+        let switchRevision = connection.instanceSwitchRevision
         do {
             let page = try await sessionsService.listSessionsPage()
+            guard !Task.isCancelled, switchRevision == connection.instanceSwitchRevision else { return }
             availableSessions = page.sessions
             nextSessionsCursor = page.nextCursor
             sessionsPagingState = .idle
+            hasLoadedSessions = true
 
             let activeSession = chatClient.currentSession.flatMap { session in
                 session.parentID?.nilIfBlank == nil ? session : nil
@@ -530,7 +536,11 @@ struct ReviewRootView: View {
             } else {
                 selectedReviewSession = activeSession ?? page.sessions.first
             }
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled, switchRevision == connection.instanceSwitchRevision else { return }
+            hasLoadedSessions = true
             if availableSessions.isEmpty {
                 viewState = .error(error.localizedDescription)
             }
@@ -569,14 +579,29 @@ struct ReviewRootView: View {
             return
         }
 
+        reviewLoadGeneration &+= 1
+        let generation = reviewLoadGeneration
+        let switchRevision = connection.instanceSwitchRevision
         viewState = .loading
         do {
             let snapshot = try await reviewService.loadReview(sessionID: sessionID)
+            guard !Task.isCancelled,
+                  generation == reviewLoadGeneration,
+                  switchRevision == connection.instanceSwitchRevision else {
+                return
+            }
             reviewSnapshot = snapshot
             syncSelectedScope(using: snapshot, resetScope: resetScope)
             refreshSelectedScopeState(using: snapshot)
             viewState = .loaded
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled,
+                  generation == reviewLoadGeneration,
+                  switchRevision == connection.instanceSwitchRevision else {
+                return
+            }
             viewState = .error(error.localizedDescription)
         }
     }

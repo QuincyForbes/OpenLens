@@ -35,9 +35,7 @@ struct InboxRootView: View {
     var body: some View {
         Group {
             if isInitialLoading {
-                ProgressView()
-                    .tint(Color.appSecondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                AppLoadingStateView(title: "Loading inbox…")
                     .background(Color.appBackground)
             } else {
                 content
@@ -426,10 +424,14 @@ struct InboxRootView: View {
     }
 
     private var isInitialLoading: Bool {
-        if case .loading = viewState {
+        switch viewState {
+        case .idle:
+            return true
+        case .loading:
             return snapshot.permissions.isEmpty && snapshot.questions.isEmpty && snapshot.forms.isEmpty
+        case .loaded, .error:
+            return false
         }
-        return false
     }
 
     private var errorMessage: String? {
@@ -489,7 +491,10 @@ struct InboxRootView: View {
                 snapshot = try await inboxService.loadInbox()
             }
             viewState = .loaded
+        } catch is CancellationError {
+            return
         } catch {
+            guard !Task.isCancelled else { return }
             viewState = .error(error.localizedDescription)
         }
     }

@@ -15,7 +15,7 @@ struct MeridianUsageView: View {
                 if !snapshot.models24h.isEmpty {
                     modelsSection(snapshot)
                 }
-            } else if meridianService.isLoading {
+            } else if meridianService.isLoading || meridianService.state == .idle {
                 Section {
                     HStack(spacing: 10) {
                         ProgressView()

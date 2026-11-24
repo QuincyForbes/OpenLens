@@ -44,6 +44,7 @@ struct SessionsListView: View {
     @State private var viewState: ViewState
     @State private var sessions: [OCSession]
     @State private var repositoryIndex = SessionRepositoryIndex()
+    @State private var cachedRepositories: [SessionProjectGroup] = []
     @State private var lastCatalogRefresh: Date?
     @State private var refreshWarning: String?
     @State private var sessionStatuses: [String: OCSessionStatus]
@@ -104,9 +105,19 @@ struct SessionsListView: View {
 
         switch initialState {
         case .loaded(let sessions):
+            let unique = SessionListOrganization.uniqueSessions(sessions)
+            let index = SessionRepositoryIndex(sessions: unique)
             self._viewState = State(initialValue: .loaded)
-            self._sessions = State(initialValue: SessionListOrganization.uniqueSessions(sessions))
-            self._repositoryIndex = State(initialValue: SessionRepositoryIndex(sessions: sessions))
+            self._sessions = State(initialValue: unique)
+            self._repositoryIndex = State(initialValue: index)
+            self._cachedRepositories = State(
+                initialValue: SessionListOrganization.groups(
+                    from: unique,
+                    statuses: [:],
+                    sortOrder: .repository,
+                    repositoryIndex: index
+                )
+            )
         case .error(let message):
             self._viewState = State(initialValue: .error(message))
             self._sessions = State(initialValue: [])
@@ -119,6 +130,11 @@ struct SessionsListView: View {
 
     private var isLoading: Bool {
         if case .loading = viewState { return true }
+        return false
+    }
+
+    private var isIdle: Bool {
+        if case .idle = viewState { return true }
         return false
     }
 
@@ -271,7 +287,7 @@ struct SessionsListView: View {
     }
 
     private var repositories: [SessionProjectGroup] {
-        SessionListOrganization.groups(from: sessions, statuses: [:], sortOrder: .repository, repositoryIndex: repositoryIndex)
+        cachedRepositories
     }
 
     /// Repository names shared by several folders, so the filter menu shows their full paths instead.
@@ -391,7 +407,10 @@ struct SessionsListView: View {
                 await refreshAttentionSessions()
             } else {
                 await loadSessionStatuses()
-                await refreshCatalogSilently()
+                let isCatalogFresh = lastCatalogRefresh.map { Date().timeIntervalSince($0) < 15 } ?? false
+                if !isCatalogFresh {
+                    await refreshCatalogSilently()
+                }
                 await refreshAttentionSessions()
             }
             let supportsAttentionOutcomes = connection.serverCapabilities?.protocolVersion == .v2
@@ -466,7 +485,10 @@ struct SessionsListView: View {
                                     Button {
                                         guard !isActive else { return }
                                         Task {
-                                            _ = await connection.switchToInstance(saved)
+                                            let result = await connection.switchToInstance(saved)
+                                            if case .failure(let error) = result, !(error is CancellationError) {
+                                                refreshWarning = "Couldn’t switch to \(saved.displayName): \(error.localizedDescription)"
+                                            }
                                         }
                                     } label: {
                                         if isActive {
@@ -505,19 +527,21 @@ struct SessionsListView: View {
 
     @ViewBuilder
     private var sessionStateContent: some View {
-        if isLoading && sessions.isEmpty {
-            ProgressView()
-                .tint(Color.appSecondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if (isLoading || isIdle) && sessions.isEmpty {
+            SessionListSkeletonView(isSidebar: isSidebar)
+                .transition(.opacity)
         } else if let errorMessage, sessions.isEmpty {
             SessionsLoadErrorView(
                 message: errorMessage,
                 retry: retryLoadingSessions
             )
+            .transition(.opacity)
         } else if sessions.isEmpty {
             emptyState
+                .transition(.opacity)
         } else {
             sessionList
+                .transition(.opacity)
         }
     }
 
@@ -1642,19 +1666,22 @@ struct SessionsListView: View {
             sessions = SessionListOrganization.uniqueSessions(cached)
             viewState = .loaded
             Task {
-                await loadSessions(silentlyWhenPopulated: true)
+                await loadSessions(silentlyWhenPopulated: true, allowWhenAlreadyLoading: true)
             }
         } else {
             sessions = []
-            viewState = .idle
+            viewState = .loading
             Task {
-                await loadSessions()
+                await loadSessions(allowWhenAlreadyLoading: true)
             }
         }
     }
 
-    private func loadSessions(silentlyWhenPopulated: Bool = false) async {
-        guard !Task.isCancelled, !isLoading else { return }
+    private func loadSessions(
+        silentlyWhenPopulated: Bool = false,
+        allowWhenAlreadyLoading: Bool = false
+    ) async {
+        guard !Task.isCancelled, (allowWhenAlreadyLoading || !isLoading) else { return }
         let client = connection.client
         outcomeRefreshGeneration &+= 1
         let generation = outcomeRefreshGeneration
@@ -1872,7 +1899,11 @@ struct SessionsListView: View {
                 sessions.removeAll { $0.id == session.id }
                 onDelete(session)
             } catch {
-                viewState = .error(error.localizedDescription)
+                if sessions.isEmpty {
+                    viewState = .error(error.localizedDescription)
+                } else {
+                    refreshWarning = error.localizedDescription
+                }
             }
         }
     }
@@ -1887,7 +1918,7 @@ struct SessionsListView: View {
                     sessions[index] = updated
                 }
             } catch {
-                viewState = .error(error.localizedDescription)
+                refreshWarning = error.localizedDescription
             }
         }
     }
@@ -1980,8 +2011,15 @@ struct SessionsListView: View {
     }
 
     private func rebuildRepositoryIndex() {
-        repositoryIndex = SessionRepositoryIndex(sessions: sessions, projects: sessionsService.repositoryProjects)
-        let validIDs = Set(sessions.map { repositoryIndex.repository(for: $0).id })
+        let index = SessionRepositoryIndex(sessions: sessions, projects: sessionsService.repositoryProjects)
+        repositoryIndex = index
+        cachedRepositories = SessionListOrganization.groups(
+            from: sessions,
+            statuses: [:],
+            sortOrder: .repository,
+            repositoryIndex: index
+        )
+        let validIDs = Set(sessions.map { index.repository(for: $0).id })
         if let selectedRepositoryID, !validIDs.contains(selectedRepositoryID) {
             self.selectedRepositoryID = nil
         }

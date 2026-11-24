@@ -471,6 +471,7 @@ private struct ConnectedSidebarNavigation: View {
 
     @Environment(\.connection) private var connection
     @Environment(\.savedConnections) private var savedConnections
+    @State private var quickSwitchError: String?
 
     private var connectionStatusColor: Color {
         switch connection.state {
@@ -589,7 +590,10 @@ private struct ConnectedSidebarNavigation: View {
                         Button {
                             guard !isActive else { return }
                             Task {
-                                _ = await connection.switchToInstance(saved)
+                                let result = await connection.switchToInstance(saved)
+                                if case .failure(let error) = result, !(error is CancellationError) {
+                                    quickSwitchError = error.localizedDescription
+                                }
                             }
                         } label: {
                             if isActive {
@@ -659,6 +663,17 @@ private struct ConnectedSidebarNavigation: View {
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 10)
+        .alert(
+            "Couldn’t Switch Instance",
+            isPresented: Binding(
+                get: { quickSwitchError != nil },
+                set: { if !$0 { quickSwitchError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { quickSwitchError = nil }
+        } message: {
+            Text(quickSwitchError ?? "")
+        }
     }
 
     private func sidebarTitle(for tab: AppTab) -> String {

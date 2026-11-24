@@ -62,8 +62,7 @@ struct WorkspaceRootView: View {
     @Environment(\.workspaceService) private var workspaceService
     @Environment(\.savedConnections) private var savedConnections
 
-    @State private var viewState: ViewState = .idle
-    @State private var snapshot = WorkspaceSnapshot(
+    private static let emptySnapshot = WorkspaceSnapshot(
         currentProject: nil,
         projects: [],
         pathInfo: nil,
@@ -74,7 +73,11 @@ struct WorkspaceRootView: View {
         workingTree: [],
         workingTreeSource: .unavailable
     )
-    @State private var browserPath: String?
+
+    @State private var viewState: ViewState = .idle
+    @State private var snapshot = emptySnapshot
+    @State private var requestedBrowserPath: String?
+    @State private var isLoadingFiles = false
     @State private var workspaceLoadGeneration: UInt = 0
     @State private var commandSearch = ""
     @State private var switchingProjectID: String?
@@ -96,8 +99,7 @@ struct WorkspaceRootView: View {
         let _ = appearancePreference.appearance
         Group {
             if isInitialLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                AppLoadingStateView(title: "Loading workspace…")
             } else {
                 content
             }
@@ -107,13 +109,18 @@ struct WorkspaceRootView: View {
         .toolbar {
             projectToolbarItem
         }
-        .task(id: "\(connection.projectContextRevision):\(browserPath ?? ".")") {
+        .task(id: "\(connection.projectContextRevision):\(requestedBrowserPath ?? ".")") {
             await loadWorkspace()
         }
         .onChange(of: connection.projectContextRevision) { _, _ in
-            browserPath = "."
+            requestedBrowserPath = nil
             selectedDiffFile = nil
             pendingWorkspaceAction = nil
+            snapshot = Self.emptySnapshot
+            workspaceOptions = []
+            filteredCommands = []
+            workingTreeSummary = .empty
+            viewState = .loading
         }
         .onChange(of: chatClient.currentSession?.id) { _, newID in
             guard newID != nil else { return }
@@ -425,15 +432,19 @@ struct WorkspaceRootView: View {
 
     // MARK: - Files
 
+    private var displayedBrowserPath: String? {
+        requestedBrowserPath ?? snapshot.currentPath
+    }
+
     private var filesSection: some View {
         Section {
             DisclosureGroup(isExpanded: $showsFiles) {
-                if let browserPath {
+                if let currentPath = displayedBrowserPath {
                     Button {
                         goUpDirectory()
                     } label: {
                         LabeledContent {
-                            Text(browserPath)
+                            Text(currentPath)
                                 .font(.footnote.monospaced())
                                 .lineLimit(1)
                                 .truncationMode(.head)
@@ -441,10 +452,18 @@ struct WorkspaceRootView: View {
                             Label("Up", systemImage: "arrow.up.backward")
                         }
                     }
-                    .disabled(browserPath == ".")
+                    .disabled(currentPath == ".")
                 }
 
-                if snapshot.fileItems.isEmpty {
+                if isLoadingFiles && snapshot.fileItems.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading folder…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if snapshot.fileItems.isEmpty {
                     Text("No file entries returned for this path.")
                         .foregroundStyle(.secondary)
                 } else {
@@ -453,7 +472,17 @@ struct WorkspaceRootView: View {
                     }
                 }
             } label: {
-                LabeledContent("Files", value: fileCountLabel)
+                HStack(spacing: 8) {
+                    Text("Files")
+                    Spacer()
+                    if isLoadingFiles {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Text(fileCountLabel)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         } footer: {
             Text("Browse the current working directory and send paths back into chat as context.")
@@ -464,7 +493,7 @@ struct WorkspaceRootView: View {
     private func fileRow(_ item: WorkspaceFileItem) -> some View {
         if item.kind == .directory {
             Button {
-                browserPath = item.path
+                requestedBrowserPath = item.path
             } label: {
                 HStack {
                     Label(item.name, systemImage: "folder")
@@ -565,10 +594,18 @@ struct WorkspaceRootView: View {
     // MARK: - Computed Properties
 
     private var isInitialLoading: Bool {
-        if case .loading = viewState {
-            return snapshot.commands.isEmpty && snapshot.fileItems.isEmpty && snapshot.projects.isEmpty
+        switch viewState {
+        case .idle:
+            return true
+        case .loading:
+            return snapshot.commands.isEmpty
+                && snapshot.fileItems.isEmpty
+                && snapshot.projects.isEmpty
+                && snapshot.currentProject == nil
+                && snapshot.pathInfo == nil
+        case .loaded, .error:
+            return false
         }
-        return false
     }
 
     private var errorMessage: String? {
@@ -818,19 +855,28 @@ struct WorkspaceRootView: View {
         workspaceLoadGeneration &+= 1
         let generation = workspaceLoadGeneration
         let revision = connection.projectContextRevision
-        viewState = .loading
+        let isDirectoryNavigation = !isInitialLoading && requestedBrowserPath != nil
+        if isDirectoryNavigation {
+            isLoadingFiles = true
+        } else {
+            viewState = .loading
+        }
+        defer {
+            if generation == workspaceLoadGeneration {
+                isLoadingFiles = false
+            }
+        }
         do {
             let loadedSnapshot = try await workspaceService.loadWorkspace(
-                path: browserPath,
+                path: requestedBrowserPath,
                 sessionID: chatClient.currentSession?.id
             )
             guard !Task.isCancelled, generation == workspaceLoadGeneration,
                   revision == connection.projectContextRevision else { return }
             applySnapshot(loadedSnapshot)
-            if browserPath == nil {
-                browserPath = loadedSnapshot.currentPath
+            if !isDirectoryNavigation {
+                activityRefreshToken += 1
             }
-            activityRefreshToken += 1
             viewState = .loaded
         } catch is CancellationError {
             return
@@ -847,15 +893,12 @@ struct WorkspaceRootView: View {
         let revision = connection.projectContextRevision
         do {
             let loadedSnapshot = try await workspaceService.loadWorkspace(
-                path: browserPath,
+                path: requestedBrowserPath,
                 sessionID: chatClient.currentSession?.id
             )
             guard !Task.isCancelled, generation == workspaceLoadGeneration,
                   revision == connection.projectContextRevision else { return }
             applySnapshot(loadedSnapshot)
-            if browserPath == nil {
-                browserPath = loadedSnapshot.currentPath
-            }
             activityRefreshToken += 1
             viewState = .loaded
         } catch is CancellationError {
@@ -868,14 +911,14 @@ struct WorkspaceRootView: View {
     }
 
     private func goUpDirectory() {
-        guard let browserPath = browserPath?.nilIfBlank else { return }
-        if browserPath == "." {
+        guard let currentPath = displayedBrowserPath?.nilIfBlank else { return }
+        if currentPath == "." {
             return
         }
-        var path = browserPath.replacingOccurrences(of: "\\", with: "/")
+        var path = currentPath.replacingOccurrences(of: "\\", with: "/")
         while path.hasSuffix("/") { path.removeLast() }
         let parent = (path as NSString).deletingLastPathComponent
-        self.browserPath = parent.nilIfBlank ?? "."
+        self.requestedBrowserPath = parent.nilIfBlank ?? "."
     }
 
     private func insertIntoChat(_ text: String) {
@@ -960,9 +1003,8 @@ struct WorkspaceRootView: View {
 
         rememberActiveWorkspace()
         await connection.setProjectContext(directory: directory)
-        browserPath = "."
+        requestedBrowserPath = nil
         await chatClient.reloadForProjectContextChange()
-        await refreshWorkspace()
     }
 
     /// The folder the server started in was never chosen in the app, so nothing

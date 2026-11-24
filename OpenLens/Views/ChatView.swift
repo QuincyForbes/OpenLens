@@ -114,6 +114,7 @@ struct ChatView: View {
 
             ChatMessagesListView(
                 chatClient: chatClient,
+                expectedSessionID: initialSession?.id,
                 jumpToLatestRequest: jumpToLatestRequest
             )
             .environment(\.chatSkillIDs, availableSkillIDs)
@@ -389,8 +390,8 @@ struct ChatView: View {
                 chatClient.updateSlashCatalog(commands: [], agents: [])
                 chatClient.updateSkillCatalog([])
                 guard chatClient.sessionLocationState == .ready else { return }
-                async let commandsLoad: Void = loadCommands(force: true)
-                async let skillsLoad: Void = loadSkills(force: true)
+                async let commandsLoad: Void = loadCommands(force: false)
+                async let skillsLoad: Void = loadSkills(force: false)
                 _ = await (commandsLoad, skillsLoad)
             }
             .onChange(of: resultViewingContext, initial: true) { _, _ in
@@ -3567,6 +3568,7 @@ private final class ChatScrollMetricsBox {
 
 private struct ChatMessagesListView: View {
     @Bindable var chatClient: ChatClient
+    let expectedSessionID: String?
     let jumpToLatestRequest: UInt
 
     @Environment(\.chatEasterEgg) private var chatEasterEgg
@@ -3578,16 +3580,27 @@ private struct ChatMessagesListView: View {
     @State private var isPastScrollVisibilityThreshold = false
     @State private var pendingForcedScroll = false
     @State private var paginationRestoreAnchorID: String?
-    @State private var timelineItems: [ChatTimelineItem] = []
+    @State private var timelineItems: [ChatTimelineItem]
 
     private let bottomAnchorID = "bottom"
     private let streamingScrollInterval: TimeInterval = 0.18
     private let settledBottomTolerance: CGFloat = 8
     private let scrollToBottomVisibilityThreshold: CGFloat = 56
 
-    init(chatClient: ChatClient, jumpToLatestRequest: UInt = 0) {
+    init(chatClient: ChatClient, expectedSessionID: String? = nil, jumpToLatestRequest: UInt = 0) {
+        self.expectedSessionID = expectedSessionID
         self.jumpToLatestRequest = jumpToLatestRequest
         self._chatClient = Bindable(wrappedValue: chatClient)
+        let showsThinking = UserDefaults.standard.object(forKey: "showThinking") as? Bool ?? true
+        let isBound = expectedSessionID == nil || chatClient.currentSession?.id == expectedSessionID
+        self._timelineItems = State(
+            initialValue: isBound ? chatClient.timelineItems(showsThinking: showsThinking) : []
+        )
+    }
+
+    private var isBoundToExpectedSession: Bool {
+        guard let expectedSessionID else { return true }
+        return chatClient.currentSession?.id == expectedSessionID
     }
 
     var body: some View {
@@ -3597,18 +3610,42 @@ private struct ChatMessagesListView: View {
                     Color.clear.frame(height: isRetroChat ? 150 : 12)
 
                     LazyVStack(alignment: .leading, spacing: isRetroChat ? 13 : 16) {
-                        if !chatClient.isStreamSynchronized,
-                           timelineItems.isEmpty,
-                           chatClient.queuedPrompts.isEmpty {
+                        if !isBoundToExpectedSession
+                            || (!chatClient.isStreamSynchronized
+                                && timelineItems.isEmpty
+                                && chatClient.queuedPrompts.isEmpty) {
                             HStack(spacing: 10) {
                                 ProgressView()
+                                    .controlSize(.small)
                                 Text("Loading conversation…")
                                     .font(.subheadline)
                                     .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 48)
-                        } else if chatClient.isStreamSynchronized,
+                        } else if !chatClient.isStreamSynchronized,
+                                  !timelineItems.isEmpty,
+                                  !chatClient.isLoading {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                Text("Syncing latest messages…")
+                                    .font(.caption)
+                                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color.appSurface.opacity(0.9), in: Capsule())
+                            .overlay {
+                                Capsule()
+                                    .stroke(Color.appSeparator.opacity(0.7), lineWidth: 0.75)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.bottom, 2)
+                            .transition(.opacity)
+                        } else if isBoundToExpectedSession,
+                                  chatClient.isStreamSynchronized,
+                                  chatClient.currentSession != nil,
                                   timelineItems.isEmpty,
                                   chatClient.queuedPrompts.isEmpty,
                                   !chatClient.isLoading,
@@ -3616,36 +3653,38 @@ private struct ChatMessagesListView: View {
                             emptyChatQuickStartCard
                         }
 
-                        if chatClient.hasEarlierMessages {
-                            Button {
-                                loadEarlierMessages(using: proxy)
-                            } label: {
-                                Text(chatClient.contextEntries.isEmpty ? "Load earlier messages" : "Load earlier history")
-                                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 14, weight: .medium))
-                                    .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : .secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .ifRetroPanel(isRetroChat)
+                        if isBoundToExpectedSession {
+                            if chatClient.hasEarlierMessages {
+                                Button {
+                                    loadEarlierMessages(using: proxy)
+                                } label: {
+                                    Text(chatClient.contextEntries.isEmpty ? "Load earlier messages" : "Load earlier history")
+                                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 14, weight: .medium))
+                                        .foregroundStyle(isRetroChat ? RetroChatStyle.secondaryInk : .secondary)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .ifRetroPanel(isRetroChat)
+                                }
                             }
-                        }
 
-                        ForEach(timelineItems) { item in
-                            timelineRow(item)
-                        }
+                            ForEach(timelineItems) { item in
+                                timelineRow(item)
+                            }
 
-                        ChatPendingActivityStatusRow(
-                            chatClient: chatClient,
-                            isRetroChat: isRetroChat
-                        )
-
-                        let queuePositions = QueuedPrompt.queuePositions(chatClient.queuedPrompts)
-                        ForEach(chatClient.queuedPrompts) { prompt in
-                            QueuedPromptBubbleView(
-                                prompt: prompt,
-                                position: queuePositions[prompt.id] ?? 0
+                            ChatPendingActivityStatusRow(
+                                chatClient: chatClient,
+                                isRetroChat: isRetroChat
                             )
-                            .environment(chatClient)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+
+                            let queuePositions = QueuedPrompt.queuePositions(chatClient.queuedPrompts)
+                            ForEach(chatClient.queuedPrompts) { prompt in
+                                QueuedPromptBubbleView(
+                                    prompt: prompt,
+                                    position: queuePositions[prompt.id] ?? 0
+                                )
+                                .environment(chatClient)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
                         }
                     }
                     .padding(.horizontal, isRetroChat ? 12 : 16)
@@ -3764,6 +3803,9 @@ private struct ChatMessagesListView: View {
         .onChange(of: chatClient.timelineVersion) { _, _ in
             rebuildTimeline()
         }
+        .onChange(of: chatClient.currentSession?.id) { _, _ in
+            rebuildTimeline()
+        }
         .onChange(of: showThinking) { _, _ in
             rebuildTimeline()
         }
@@ -3778,6 +3820,10 @@ private struct ChatMessagesListView: View {
 #endif
 
     private func rebuildTimeline() {
+        guard isBoundToExpectedSession else {
+            if !timelineItems.isEmpty { timelineItems = [] }
+            return
+        }
         timelineItems = chatClient.timelineItems(showsThinking: showThinking)
 #if DEBUG
         if Self.logsStressTimelineRebuilds {
