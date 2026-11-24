@@ -51,6 +51,9 @@ struct SavedConnection: Codable, Identifiable, Hashable {
     /// Stable identifier for this saved connection.
     var id: String
 
+    /// Optional user-assigned friendly name (e.g. "MacBook Pro", "Work Linux").
+    var name: String? = nil
+
     /// Server URL (e.g. "192.168.1.50:4096" or "http://192.168.1.50:4096").
     var serverURL: String
 
@@ -90,18 +93,29 @@ struct SavedConnection: Codable, Identifiable, Hashable {
     /// Timestamp of last successful connection (for sorting recent-first).
     var lastConnectedAt: Date?
 
-    /// Display label derived from the URL.
-    var displayName: String {
-        // Strip scheme for a cleaner label
+    /// Clean host/address label derived from the URL without scheme or trailing slash.
+    var hostDisplay: String {
         serverURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "http://", with: "")
             .replacingOccurrences(of: "https://", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    var hasCustomName: Bool {
+        name?.nilIfBlank != nil
+    }
+
+    /// Display label: user-assigned friendly name if set, otherwise host:port.
+    var displayName: String {
+        name?.nilIfBlank ?? hostDisplay
     }
 
     // MARK: - Computed (same as old ConnectionConfig)
 
     nonisolated init(
         id: String,
+        name: String? = nil,
         serverURL: String,
         username: String,
         password: String,
@@ -115,6 +129,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
         lastConnectedAt: Date? = nil
     ) {
         self.id = id
+        self.name = name?.nilIfBlank
         self.serverURL = serverURL
         self.username = username
         self.password = password
@@ -155,6 +170,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
 
 struct SavedConnectionPublicSnapshot: Codable, Equatable {
     var id: String
+    var name: String? = nil
     var serverURL: String
     var username: String
     /// Only read to drop profiles saved by the removed OpenLens Remote feature.
@@ -172,6 +188,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
 
     nonisolated init(connection: SavedConnection) {
         id = connection.id
+        name = connection.name
         serverURL = connection.serverURL
         username = connection.username
         selectedProviderID = connection.selectedProviderID
@@ -189,6 +206,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
     nonisolated func savedConnectionWithoutPassword() -> SavedConnection {
         var connection = SavedConnection(
             id: id,
+            name: name,
             serverURL: serverURL,
             username: username,
             password: "",
@@ -260,16 +278,18 @@ final class SavedConnectionsStore {
 
     /// Saves or updates a connection after successful connect.
     /// If a connection with the same ID, URL+username, or alternate URL+username already exists,
-    /// updates it in place so workspace and model preferences survive port/IP recovery.
+    /// updates it in place so workspace, label, and model preferences survive port/IP recovery.
     @discardableResult
     func saveConnection(
         serverURL: String,
         username: String,
         password: String,
+        name: String? = nil,
         alternateServerURLs: [String] = [],
         replacingConnectionID: String? = nil
     ) -> SavedConnection {
         let normalizedURL = normalizeURL(serverURL)
+        let cleanedName = name?.nilIfBlank
 
         let existingIndex: Int? = {
             if let replacingConnectionID,
@@ -290,6 +310,9 @@ final class SavedConnectionsStore {
         if let index = existingIndex {
             let previousPrimary = connections[index].serverURL
             let existingAlternates = connections[index].alternateServerURLs ?? []
+            if let cleanedName {
+                connections[index].name = cleanedName
+            }
             connections[index].serverURL = serverURL
             connections[index].username = username
             connections[index].password = password
@@ -313,6 +336,7 @@ final class SavedConnectionsStore {
             )
             let connection = SavedConnection(
                 id: UUID().uuidString,
+                name: cleanedName,
                 serverURL: serverURL,
                 username: username,
                 password: password,
@@ -324,6 +348,92 @@ final class SavedConnectionsStore {
             persist()
             return connection
         }
+    }
+
+    /// Adds or edits a saved OpenCode instance without changing `activeConnectionID`.
+    /// Lets the user configure multiple instances while staying connected to their current one.
+    @discardableResult
+    func addOrUpdateInstance(
+        id: String? = nil,
+        name: String?,
+        serverURL: String,
+        username: String,
+        password: String,
+        alternateServerURLs: [String] = []
+    ) -> SavedConnection {
+        let trimmedURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURL = normalizeURL(trimmedURL)
+        let cleanedName = name?.nilIfBlank
+
+        let existingIndex: Int? = {
+            if let id, let byID = connections.firstIndex(where: { $0.id == id }) {
+                return byID
+            }
+            return connections.firstIndex(where: {
+                normalizeURL($0.serverURL) == normalizedURL && $0.username == username
+            })
+        }()
+
+        if let index = existingIndex {
+            let previousPrimary = connections[index].serverURL
+            let existingAlternates = connections[index].alternateServerURLs ?? []
+            connections[index].name = cleanedName
+            connections[index].serverURL = trimmedURL
+            connections[index].username = username
+            connections[index].password = password
+            connections[index].alternateServerURLs = Self.mergedAlternateServerURLs(
+                newPrimary: trimmedURL,
+                previousPrimary: normalizeURL(previousPrimary) == normalizedURL ? nil : previousPrimary,
+                incomingAlternates: alternateServerURLs,
+                existingAlternates: existingAlternates
+            )
+            let updated = connections[index]
+            persist()
+            return updated
+        } else {
+            let cleanedAlternates = Self.mergedAlternateServerURLs(
+                newPrimary: trimmedURL,
+                previousPrimary: nil,
+                incomingAlternates: alternateServerURLs,
+                existingAlternates: []
+            )
+            let created = SavedConnection(
+                id: id ?? UUID().uuidString,
+                name: cleanedName,
+                serverURL: trimmedURL,
+                username: username,
+                password: password,
+                alternateServerURLs: cleanedAlternates,
+                lastConnectedAt: nil
+            )
+            connections.append(created)
+            persist()
+            return created
+        }
+    }
+
+    /// Updates the friendly label of a saved connection.
+    func renameConnection(id: String, name: String?) {
+        guard let index = connections.firstIndex(where: { $0.id == id }) else { return }
+        let cleaned = name?.nilIfBlank
+        guard connections[index].name != cleaned else { return }
+        connections[index].name = cleaned
+        persist()
+    }
+
+    /// Returns normalized endpoint keys (`host:port`) belonging to OTHER saved instances,
+    /// so LAN fallback discovery never accidentally hijacks a different OpenCode instance.
+    func otherSavedEndpointKeys(excludingConnectionID: String?) -> Set<String> {
+        var keys = Set<String>()
+        for conn in connections where conn.id != excludingConnectionID {
+            let primary = normalizeURL(conn.serverURL)
+            if !primary.isEmpty { keys.insert(primary) }
+            for alt in conn.alternateServerURLs ?? [] {
+                let normalized = normalizeURL(alt)
+                if !normalized.isEmpty { keys.insert(normalized) }
+            }
+        }
+        return keys
     }
 
     /// Updates model selection for a specific connection.
@@ -511,12 +621,13 @@ final class SavedConnectionsStore {
         connections.first
     }
 
-    /// Saved connections matching a URL prefix (for suggestions/autocomplete).
+    /// Saved connections matching a name or URL prefix (for suggestions/autocomplete).
     func suggestions(for urlPrefix: String) -> [SavedConnection] {
         let prefix = urlPrefix.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prefix.isEmpty else { return connections }
         return connections.filter { conn in
             conn.displayName.lowercased().contains(prefix)
+                || conn.hostDisplay.lowercased().contains(prefix)
                 || conn.serverURL.lowercased().contains(prefix)
                 || (conn.alternateServerURLs ?? []).contains(where: { $0.lowercased().contains(prefix) })
         }
@@ -798,6 +909,7 @@ final class SavedConnectionsStore {
 
 private extension SavedConnection {
     mutating func applyPublicSnapshot(_ snapshot: SavedConnectionPublicSnapshot) {
+        name = snapshot.name?.nilIfBlank ?? name
         serverURL = snapshot.serverURL
         username = snapshot.username
         selectedProviderID = snapshot.selectedProviderID

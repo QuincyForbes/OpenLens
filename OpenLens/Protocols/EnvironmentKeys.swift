@@ -94,6 +94,10 @@ private struct ChatEasterEggControllerKey: EnvironmentKey {
     static let defaultValue: ChatEasterEggController = ChatEasterEggController()
 }
 
+private struct InstanceStatusMonitorKey: EnvironmentKey {
+    static let defaultValue: InstanceStatusMonitor = InstanceStatusMonitor()
+}
+
 private struct ReviewPromptActionKey: EnvironmentKey {
     static let defaultValue: () -> Void = {}
 }
@@ -174,6 +178,11 @@ extension EnvironmentValues {
     var chatEasterEgg: ChatEasterEggController {
         get { self[ChatEasterEggControllerKey.self] }
         set { self[ChatEasterEggControllerKey.self] = newValue }
+    }
+
+    var instanceStatusMonitor: InstanceStatusMonitor {
+        get { self[InstanceStatusMonitorKey.self] }
+        set { self[InstanceStatusMonitorKey.self] = newValue }
     }
 
     var requestReviewPrompt: () -> Void {

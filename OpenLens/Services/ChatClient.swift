@@ -2320,6 +2320,33 @@ final class ChatClient: SSEEventHandlerDelegate {
         cacheClient !== connection?.client || currentSession?.id != session.id || preparedSessionID == session.id
     }
 
+    /// Clears cached session/UI state when the active OpenCode instance changes and
+    /// restores the newly selected instance's persisted model preference.
+    func resetForConnectionChange() {
+        resetCachesForConnectionIfNeeded()
+        pendingPermission = nil
+        showPermissionAlert = false
+        pendingQuestion = nil
+        showQuestionSheet = false
+        pendingForm = nil
+        showFormSheet = false
+        composerAttachments = []
+        composerPastedSnippets = []
+        if let activeID = savedConnectionsStore?.activeConnectionID,
+           let saved = savedConnectionsStore?.savedModelSelection(connectionID: activeID) {
+            selectedProviderID = saved.providerID
+            selectedModelID = saved.modelID
+            selectedVariant = saved.variant
+        } else {
+            selectedProviderID = ""
+            selectedModelID = ""
+            selectedVariant = nil
+        }
+        Task {
+            await loadProviders()
+        }
+    }
+
     private func resetCachesForConnectionIfNeeded() {
         guard cacheClient !== connection?.client else { return }
         cachedTurnDiffSummariesByMessageID.removeAll()

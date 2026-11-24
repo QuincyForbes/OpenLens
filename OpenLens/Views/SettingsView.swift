@@ -6,11 +6,16 @@ struct SettingsView: View {
 
     @Environment(\.connection) private var connection
     @Environment(\.savedConnections) private var savedConnections
+    @Environment(\.sessionsService) private var sessionsService
+    @Environment(\.instanceStatusMonitor) private var statusMonitor
     @Environment(\.liveActivity) private var liveActivity
     @Environment(\.requestReviewPrompt) private var requestReviewPrompt
     @Environment(\.gitHubStarsService) private var gitHubStars
+    @Environment(AppRouter.self) private var router: AppRouter?
 
     @State private var showDisconnectConfirmation = false
+    @State private var editorMode: InstanceEditorSheet.Mode?
+    @State private var switchErrorMessage: String?
 
     @AppStorage(AppPreferenceKeys.showThinking) private var showThinking = true
     @AppStorage(AppPreferenceKeys.autoReconnect) private var autoReconnect = true
@@ -28,6 +33,9 @@ struct SettingsView: View {
         Form {
             if let host = connection.serverHostDisplay {
                 Section("Connected Server") {
+                    if let active = savedConnections.activeConnection, active.hasCustomName {
+                        detailRow("Instance", value: active.displayName)
+                    }
                     detailRow("Server", value: host)
                     if let capabilities = connection.serverCapabilities {
                         let versionText = connection.serverVersion.map { " · \($0)" } ?? ""
@@ -56,83 +64,199 @@ struct SettingsView: View {
                 .listRowBackground(Color.appSurface)
             }
 
-            if savedConnections.connections.count > 1 {
-                Section("Saved Servers") {
-                    ForEach(savedConnections.connections) { saved in
-                        let isActive = saved.id == savedConnections.activeConnectionID
-                        HStack(spacing: 10) {
-                            Button {
-                                guard !isActive else { return }
-                                Task {
-                                    await connection.connectSaved(saved, method: .manual)
-                                }
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(saved.displayName)
-                                            .font(.system(size: 14, weight: .medium, design: .monospaced))
-                                            .foregroundStyle(Color.appPrimary)
-                                        Text(saved.username)
-                                            .font(.caption)
-                                            .foregroundStyle(Color.appSecondary)
+            Section {
+                if let switchErrorMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.appWarning)
+                        Text(switchErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(Color.appSecondary)
+                        Spacer()
+                        Button {
+                            self.switchErrorMessage = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.appSecondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                ForEach(savedConnections.connections) { saved in
+                    let isActive = saved.id == savedConnections.activeConnectionID && (connection.isConnected || connection.isReconnecting)
+                    let isSwitchingThis = connection.switchingToConnectionID == saved.id
+                    let status = statusMonitor.status(for: saved.id)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            guard !isActive, connection.switchingToConnectionID == nil else { return }
+                            switchToSavedInstance(saved)
+                        } label: {
+                            HStack(spacing: 10) {
+                                InstanceStatusDot(
+                                    isActive: isActive,
+                                    isReconnecting: isActive && connection.isReconnecting,
+                                    status: status
+                                )
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(saved.displayName)
+                                        .font(saved.hasCustomName
+                                            ? .system(size: 14, weight: .semibold)
+                                            : .system(size: 14, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(Color.appPrimary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+
+                                    HStack(spacing: 5) {
+                                        if saved.hasCustomName {
+                                            Text(saved.hostDisplay)
+                                                .font(.caption.monospaced())
+                                                .foregroundStyle(Color.appSecondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        } else {
+                                            Text(saved.username)
+                                                .font(.caption)
+                                                .foregroundStyle(Color.appSecondary)
+                                        }
+
+                                        if case .online(_, _, let running) = status, let running, running > 0 {
+                                            Text("· \(running) running")
+                                                .font(.caption)
+                                                .foregroundStyle(Color.appSuccess)
+                                        } else if case .offline = status, !isActive {
+                                            Text("· Offline")
+                                                .font(.caption)
+                                                .foregroundStyle(Color.appDanger.opacity(0.85))
+                                        }
                                     }
-                                    Spacer()
-                                    if isActive {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(Color.appUserAccent)
-                                    }
                                 }
+
+                                Spacer()
+
+                                if isSwitchingThis {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else if isActive {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Color.appUserAccent)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            editorMode = .edit(saved)
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.appSecondary)
+                                .frame(width: 28, height: 28)
                                 .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Edit \(saved.displayName)")
+                        .accessibilityLabel("Edit \(saved.displayName)")
+
+                        #if targetEnvironment(macCatalyst)
+                        if !isActive {
+                            Button(role: .destructive) {
+                                savedConnections.removeConnection(saved)
+                                refreshInstanceStatuses()
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.red.opacity(0.85))
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-
-                            #if targetEnvironment(macCatalyst)
-                            if !isActive {
-                                Button(role: .destructive) {
-                                    savedConnections.removeConnection(saved)
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(.red.opacity(0.85))
-                                        .frame(width: 28, height: 28)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .help(AppText.forget)
-                                .accessibilityLabel("\(AppText.forget) \(saved.displayName)")
-                            }
-                            #endif
+                            .help(AppText.forget)
+                            .accessibilityLabel("\(AppText.forget) \(saved.displayName)")
                         }
-                        .contextMenu {
-                            if !isActive {
-                                Button {
-                                    Task {
-                                        await connection.connectSaved(saved, method: .manual)
-                                    }
-                                } label: {
-                                    Label(AppText.connect, systemImage: "network")
-                                }
-                                Divider()
-                                Button(role: .destructive) {
-                                    savedConnections.removeConnection(saved)
-                                } label: {
-                                    Label(AppText.forget, systemImage: "trash")
-                                }
+                        #endif
+                    }
+                    .contextMenu {
+                        if !isActive {
+                            Button {
+                                switchToSavedInstance(saved)
+                            } label: {
+                                Label("Switch to Instance", systemImage: "arrow.left.arrow.right")
                             }
                         }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            if !isActive {
-                                Button(role: .destructive) {
-                                    savedConnections.removeConnection(saved)
-                                } label: {
-                                    Label("Forget", systemImage: "trash")
-                                }
+                        Button {
+                            editorMode = .edit(saved)
+                        } label: {
+                            Label("Edit Instance", systemImage: "pencil")
+                        }
+                        if !isActive {
+                            Divider()
+                            Button(role: .destructive) {
+                                savedConnections.removeConnection(saved)
+                                refreshInstanceStatuses()
+                            } label: {
+                                Label(AppText.forget, systemImage: "trash")
                             }
                         }
                     }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if !isActive {
+                            Button(role: .destructive) {
+                                savedConnections.removeConnection(saved)
+                                refreshInstanceStatuses()
+                            } label: {
+                                Label("Forget", systemImage: "trash")
+                            }
+                        }
+                        Button {
+                            editorMode = .edit(saved)
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        .tint(Color.appUserAccent)
+                    }
                 }
-                .listRowBackground(Color.appSurface)
+
+                Button {
+                    editorMode = .add(prefillURL: nil, prefillName: nil)
+                } label: {
+                    Label("Add OpenCode Instance", systemImage: "plus.circle.fill")
+                        .foregroundStyle(Color.appUserAccent)
+                }
+
+                if router != nil {
+                    Button {
+                        router?.requestInstanceSwitcher()
+                    } label: {
+                        Label("Discover & Manage Instances…", systemImage: "server.rack")
+                            .foregroundStyle(Color.appPrimary)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("OpenCode Instances")
+                    Spacer()
+                    if statusMonitor.isRefreshing {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else if savedConnections.connections.count > 1 {
+                        Button {
+                            refreshInstanceStatuses()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption)
+                                .foregroundStyle(Color.appSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Refresh instance status")
+                    }
+                }
             }
+            .listRowBackground(Color.appSurface)
 
             Section(AppText.settingsAppPreferences) {
                 Toggle(isOn: $showThinking) {
@@ -284,6 +408,7 @@ struct SettingsView: View {
                 detailRow("Choose Model", value: "⇧⌘M")
                 detailRow("New Session", value: "⌘N")
                 detailRow("Quick Switch Session", value: "⌘K")
+                detailRow("Switch OpenCode Instance", value: "⇧⌘I")
                 detailRow("Search Sessions", value: "⌥⌘F")
                 detailRow("Toggle Sidebar", value: "⌥⌘S")
                 detailRow("Stop Agent Response", value: "⌘.")
@@ -382,8 +507,43 @@ struct SettingsView: View {
             }
         }
         .task {
+            refreshInstanceStatuses()
             await gitHubStars.refresh()
         }
+        .sheet(item: $editorMode) { mode in
+            InstanceEditorSheet(
+                mode: mode,
+                onSaved: {
+                    refreshInstanceStatuses()
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .adaptiveSheetDragIndicator()
+            .presentationBackground(Color.appBackground)
+        }
+    }
+
+    private func switchToSavedInstance(_ saved: SavedConnection) {
+        switchErrorMessage = nil
+        Task {
+            let result = await connection.switchToInstance(saved)
+            if case .failure(let error) = result, !(error is CancellationError) {
+                switchErrorMessage = error.localizedDescription
+                refreshInstanceStatuses()
+            }
+        }
+    }
+
+    private func refreshInstanceStatuses() {
+        let activeCount = sessionsService.effectiveStatuses.values
+            .filter { SessionListOrganization.isWorking($0) }
+            .count
+        statusMonitor.refreshStatuses(
+            for: savedConnections.connections,
+            activeConnectionID: savedConnections.activeConnectionID,
+            activeConnection: connection,
+            activeSessionCount: activeCount
+        )
     }
 
     private var starGoalRow: some View {

@@ -15,16 +15,20 @@ struct ConnectedRootView: View {
     @Environment(AppRouter.self) private var router
     @Environment(\.connection) private var connection
     @Environment(\.inboxService) private var inboxService
+    @Environment(\.liveActivity) private var liveActivity
+    @Environment(\.instanceStatusMonitor) private var instanceStatusMonitor
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var permissionSheetDetent = PermissionRequestSheet.defaultPresentationDetent
     @State private var inboxPendingCount = 0
+    @State private var isInstanceSwitcherPresented = false
 
     private struct InboxRefreshKey: Equatable {
         let isActive: Bool
         let permissionID: String?
         let isLoading: Bool
         let sessionID: String?
+        let instanceSwitchRevision: UInt
     }
 
     private var inboxRefreshKey: InboxRefreshKey {
@@ -32,7 +36,8 @@ struct ConnectedRootView: View {
             isActive: scenePhase == .active,
             permissionID: chatClient.pendingPermission?.id,
             isLoading: chatClient.isLoading,
-            sessionID: chatClient.currentSession?.id
+            sessionID: chatClient.currentSession?.id,
+            instanceSwitchRevision: connection.instanceSwitchRevision
         )
     }
 
@@ -97,6 +102,25 @@ struct ConnectedRootView: View {
             .presentationContentInteraction(.resizes)
             .adaptiveSheetDragIndicator()
             .interactiveDismissDisabled()
+        }
+        .sheet(isPresented: $isInstanceSwitcherPresented) {
+            InstanceSwitcherSheet()
+                .presentationDetents([.medium, .large])
+                .adaptiveSheetDragIndicator()
+                .presentationBackground(Color.appBackground)
+        }
+        .onChange(of: router.switchInstanceCommandCount) { _, _ in
+            isInstanceSwitcherPresented = true
+        }
+        .onChange(of: connection.instanceSwitchRevision) { _, _ in
+            liveActivity.dismissImmediately()
+            inboxPendingCount = 0
+            instanceStatusMonitor.cancelRefresh()
+            router.resetForInstanceSwitch()
+            chatClient.resetForConnectionChange()
+            Task {
+                await chatClient.recoverPendingPermission()
+            }
         }
         .onChange(of: chatClient.pendingPermission?.id) { _, _ in
             permissionSheetDetent = PermissionRequestSheet.defaultPresentationDetent
@@ -324,6 +348,7 @@ private struct ConnectedSidebarLayout: View {
                 selectedTab: router.selectedTab,
                 badgeCounts: [.review: inboxPendingCount],
                 onNewSession: { router.requestNewSession() },
+                onSwitchInstance: { router.requestInstanceSwitcher() },
                 onToggleSidebar: toggleSidebar,
                 onSelect: { tab in
                     withAnimation(.snappy(duration: 0.2)) {
@@ -440,10 +465,12 @@ private struct ConnectedSidebarNavigation: View {
     let selectedTab: AppTab
     var badgeCounts: [AppTab: Int] = [:]
     var onNewSession: (() -> Void)? = nil
+    var onSwitchInstance: (() -> Void)? = nil
     var onToggleSidebar: (() -> Void)? = nil
     let onSelect: (AppTab) -> Void
 
     @Environment(\.connection) private var connection
+    @Environment(\.savedConnections) private var savedConnections
 
     private var connectionStatusColor: Color {
         switch connection.state {
@@ -451,6 +478,10 @@ private struct ConnectedSidebarNavigation: View {
         case .reconnecting, .connecting: Color.appWarning
         case .disconnected, .error: Color.appDanger
         }
+    }
+
+    private var instanceLabel: String {
+        connection.activeInstanceDisplayName ?? connection.serverHostDisplay ?? "OpenCode"
     }
 
     var body: some View {
@@ -463,10 +494,6 @@ private struct ConnectedSidebarNavigation: View {
                     Text("OpenLens")
                         .font(.system(size: 17, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.appPrimary)
-                    Circle()
-                        .fill(connectionStatusColor)
-                        .frame(width: 6, height: 6)
-                        .help(connection.serverHostDisplay.map { "Connected to \($0)" } ?? "Server status")
                 }
 
                 Spacer(minLength: 4)
@@ -507,6 +534,77 @@ private struct ConnectedSidebarNavigation: View {
             }
             .padding(.leading, 6)
             .padding(.trailing, 2)
+
+            if let onSwitchInstance {
+                Button(action: onSwitchInstance) {
+                    HStack(spacing: 8) {
+                        if connection.switchingToConnectionID != nil {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .frame(width: 8, height: 8)
+                        } else {
+                            Circle()
+                                .fill(connectionStatusColor)
+                                .frame(width: 7, height: 7)
+                        }
+
+                        Text(instanceLabel)
+                            .font(.system(size: 12, weight: .semibold, design: savedConnections.activeConnection?.hasCustomName == true ? .rounded : .monospaced))
+                            .foregroundStyle(Color.appPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Spacer(minLength: 4)
+
+                        if savedConnections.connections.count > 1 {
+                            Text("\(savedConnections.connections.count)")
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Color.appSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(Color.appTertiary, in: Capsule())
+                        }
+
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color.appSecondary.opacity(0.75))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.appBackground.opacity(0.72), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(Color.appSeparator.opacity(0.8), lineWidth: 1)
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .macHoverHighlight(cornerRadius: 9)
+                .help("Switch OpenCode Instance (⇧⌘I)")
+                .accessibilityLabel("OpenCode instance: \(instanceLabel)")
+                .accessibilityHint("Switch or manage OpenCode server instances")
+                .contextMenu {
+                    ForEach(savedConnections.connections) { saved in
+                        let isActive = saved.id == savedConnections.activeConnectionID
+                        Button {
+                            guard !isActive else { return }
+                            Task {
+                                _ = await connection.switchToInstance(saved)
+                            }
+                        } label: {
+                            if isActive {
+                                Label(saved.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(saved.displayName)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button(action: onSwitchInstance) {
+                        Label("Manage Instances…", systemImage: "server.rack")
+                    }
+                }
+            }
 
             HStack(spacing: 4) {
                 ForEach(Array(AppTab.allCases.enumerated()), id: \.element.id) { index, tab in
@@ -716,6 +814,9 @@ private struct DesktopKeyboardShortcutsResponder: View {
 
             Button("") { router.requestSessionSwitcher() }
                 .keyboardShortcut("k", modifiers: .command)
+
+            Button("") { router.requestInstanceSwitcher() }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
 
             Button("") { router.requestFocusSessionSearch() }
                 .keyboardShortcut("f", modifiers: [.command, .option])

@@ -83,6 +83,7 @@ struct SessionsListView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.sessionsService) private var sessionsService
     @Environment(\.inboxService) private var inboxService
+    @Environment(\.savedConnections) private var savedConnections
     @Environment(AppRouter.self) private var router: AppRouter?
     @FocusState private var isSidebarSearchFocused: Bool
     @Environment(\.connection) private var connection
@@ -173,10 +174,15 @@ struct SessionsListView: View {
     private struct PollTaskKey: Equatable {
         let scenePhase: ScenePhase
         let isPollingActive: Bool
+        let instanceSwitchRevision: UInt
     }
 
     private var pollTaskKey: PollTaskKey {
-        PollTaskKey(scenePhase: scenePhase, isPollingActive: isSidebar || isOnScreen)
+        PollTaskKey(
+            scenePhase: scenePhase,
+            isPollingActive: isSidebar || isOnScreen,
+            instanceSwitchRevision: connection.instanceSwitchRevision
+        )
     }
 
     /// Chats that pass the repository, status and search filters, in catalog order.
@@ -374,6 +380,9 @@ struct SessionsListView: View {
             guard oldValue != nil, newValue != nil, isSidebar, isOnScreen else { return }
             isSidebarSearchFocused = true
         }
+        .onChange(of: connection.instanceSwitchRevision) { _, _ in
+            handleInstanceSwitched()
+        }
         .task(id: pollTaskKey) {
             guard pollTaskKey.scenePhase == .active, pollTaskKey.isPollingActive else { return }
             let shouldRefreshAllInactive = sessionsService.consumeInitialInactiveOutcomeRefreshNeeded()
@@ -439,9 +448,41 @@ struct SessionsListView: View {
                         .accessibilityHint("Fetches sessions and updates their activity order")
                         .accessibilityIdentifier("sessions.refresh")
                     }
-                    if let host = connection.serverHostDisplay {
+                    if let label = connection.activeInstanceDisplayName ?? connection.serverHostDisplay {
                         ToolbarItem(placement: .principal) {
-                            ConnectedHostCapsule(host: host, isReconnecting: connection.isReconnecting)
+                            ConnectedHostCapsule(
+                                label: label,
+                                isCustomName: savedConnections.activeConnection?.hasCustomName == true,
+                                isReconnecting: connection.isReconnecting,
+                                isSwitching: connection.switchingToConnectionID != nil,
+                                savedCount: savedConnections.connections.count,
+                                onTap: {
+                                    router?.requestInstanceSwitcher()
+                                }
+                            )
+                            .contextMenu {
+                                ForEach(savedConnections.connections) { saved in
+                                    let isActive = saved.id == savedConnections.activeConnectionID
+                                    Button {
+                                        guard !isActive else { return }
+                                        Task {
+                                            _ = await connection.switchToInstance(saved)
+                                        }
+                                    } label: {
+                                        if isActive {
+                                            Label(saved.displayName, systemImage: "checkmark")
+                                        } else {
+                                            Text(saved.displayName)
+                                        }
+                                    }
+                                }
+                                Divider()
+                                Button {
+                                    router?.requestInstanceSwitcher()
+                                } label: {
+                                    Label("Manage Instances…", systemImage: "server.rack")
+                                }
+                            }
                         }
                         .sharedBackgroundVisibility(.hidden)
                     }
@@ -1582,6 +1623,36 @@ struct SessionsListView: View {
 
     // MARK: - Side Effects (Service calls)
 
+    private func handleInstanceSwitched() {
+        outcomeRefreshGeneration &+= 1
+        attentionRefreshGeneration &+= 1
+        sessionStatuses = [:]
+        attentionSessionIDs = []
+        attentionLabels = [:]
+        openedSessionIDs = []
+        failedOutcomeSessionIDs = []
+        selectedRepositoryID = nil
+        searchQuery = ""
+        sessionFilter = .all
+        expandedProjectIDs = []
+        refreshWarning = nil
+        lastCatalogRefresh = nil
+
+        if let cached = sessionsService.hydrateFromLocalCache(), !cached.isEmpty {
+            sessions = SessionListOrganization.uniqueSessions(cached)
+            viewState = .loaded
+            Task {
+                await loadSessions(silentlyWhenPopulated: true)
+            }
+        } else {
+            sessions = []
+            viewState = .idle
+            Task {
+                await loadSessions()
+            }
+        }
+    }
+
     private func loadSessions(silentlyWhenPopulated: Bool = false) async {
         guard !Task.isCancelled, !isLoading else { return }
         let client = connection.client
@@ -2439,24 +2510,50 @@ private struct NewSessionSheet: View {
 // MARK: - Connected Host Capsule
 
 private struct ConnectedHostCapsule: View {
-    let host: String
+    let label: String
+    let isCustomName: Bool
     let isReconnecting: Bool
+    let isSwitching: Bool
+    let savedCount: Int
+    let onTap: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(isReconnecting ? Color.appWarning : Color.appSuccess)
-                .frame(width: 7, height: 7)
-            Text(host)
-                .font(.subheadline.weight(.medium).monospaced())
-                .foregroundStyle(Color.appPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                if isSwitching {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Circle()
+                        .fill(isReconnecting ? Color.appWarning : Color.appSuccess)
+                        .frame(width: 7, height: 7)
+                }
+                Text(label)
+                    .font(isCustomName
+                        ? .subheadline.weight(.semibold)
+                        : .subheadline.weight(.medium).monospaced())
+                    .foregroundStyle(Color.appPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if savedCount > 1 {
+                    Text("\(savedCount)")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.appSecondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.appTertiary, in: Capsule())
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.appSecondary.opacity(0.75))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .glassEffect(.regular, in: Capsule())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .glassEffect(.regular, in: Capsule())
+        .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(AppText.sessions), \(host)")
+        .accessibilityLabel("\(AppText.sessions), \(label)")
+        .accessibilityHint("Switch or manage OpenCode server instances")
     }
 }

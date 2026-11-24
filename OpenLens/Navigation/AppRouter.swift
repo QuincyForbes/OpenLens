@@ -16,6 +16,7 @@ final class AppRouter {
     private(set) var attachFileCommandCount: UInt = 0
     private(set) var pasteClipboardCommandCount: UInt = 0
     private(set) var jumpToLatestCommandCount: UInt = 0
+    private(set) var switchInstanceCommandCount: UInt = 0
 
     func requestNewSession() {
         selectedTab = .chat
@@ -53,6 +54,20 @@ final class AppRouter {
     func requestJumpToLatest() {
         selectedTab = .chat
         jumpToLatestCommandCount &+= 1
+    }
+
+    func requestInstanceSwitcher() {
+        switchInstanceCommandCount &+= 1
+    }
+
+    /// Clears navigation stacks across all tabs when switching to another OpenCode instance
+    /// so stale session/review/workspace destinations from the previous server are never reopened.
+    func resetForInstanceSwitch() {
+        chatPath = []
+        reviewPath = []
+        workspacePath = []
+        settingsPath = []
+        selectedTab = .chat
     }
 
     var selectedChatSessionID: String? {

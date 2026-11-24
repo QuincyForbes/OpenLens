@@ -46,6 +46,7 @@ struct ReviewRootView: View {
 
     @Environment(AppRouter.self) private var router: AppRouter?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.connection) private var connection
     @Environment(\.inboxService) private var inboxService
     @Environment(\.reviewService) private var reviewService
     @Environment(\.sessionsService) private var sessionsService
@@ -91,6 +92,21 @@ struct ReviewRootView: View {
                 lastUpdateScopeID = newScopeID
             }
             refreshSelectedScopeState()
+        }
+        .onChange(of: connection.instanceSwitchRevision) { _, _ in
+            selectedReviewSession = nil
+            availableSessions = []
+            nextSessionsCursor = nil
+            reviewSnapshot = nil
+            selectedScopeState = .empty
+            selectedScopeID = reviewSessionScopeID
+            lastUpdateScopeID = nil
+            inboxBadgeCount = 0
+            viewState = .idle
+            Task {
+                await refreshInboxBadgeCount()
+                await refreshAvailableSessions()
+            }
         }
         .refreshable {
             await refreshAvailableSessions()

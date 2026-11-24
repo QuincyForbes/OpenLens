@@ -402,6 +402,10 @@ struct ConnectView: View {
 
     private var manualConnectionAccessories: some View {
         VStack(spacing: 20) {
+            if savedConnections.connections.count > 1 {
+                savedInstancesSection
+            }
+
             discoveredServersSection
 
             if showsPreviewModesSection {
@@ -409,6 +413,73 @@ struct ConnectView: View {
                     .padding(.top, 8)
             }
         }
+    }
+
+    private var savedInstancesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Saved Instances")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.appSecondary)
+                .padding(.horizontal, 6)
+
+            VStack(spacing: 0) {
+                ForEach(savedConnections.connections) { saved in
+                    Button {
+                        connectToSaved(saved)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "server.rack")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Color.appAccent)
+                                .frame(width: 24, height: 24)
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(saved.displayName)
+                                    .font(saved.hasCustomName
+                                        ? .system(size: 13, weight: .semibold, design: .rounded)
+                                        : .system(size: 13, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Color.appPrimary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                Text(saved.hasCustomName ? saved.hostDisplay : saved.username)
+                                    .font(.system(size: 11, design: saved.hasCustomName ? .monospaced : .default))
+                                    .foregroundStyle(Color.appSecondary.opacity(0.78))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+
+                            Spacer(minLength: 8)
+
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.appSecondary.opacity(0.45))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Connect to \(saved.displayName)")
+
+                    if saved.id != savedConnections.connections.last?.id {
+                        Divider()
+                            .overlay(Color.appSeparator.opacity(0.42))
+                            .padding(.leading, 46)
+                    }
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.appSurface.opacity(0.84))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.appSeparator.opacity(0.5), lineWidth: 0.7)
+            )
+        }
+        .frame(maxWidth: 340)
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -472,15 +543,18 @@ struct ConnectView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(saved.displayName)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(saved.hasCustomName
+                        ? .system(size: 12, weight: .semibold, design: .rounded)
+                        : .system(size: 12, design: .monospaced))
                     .foregroundStyle(Color.appPrimary.opacity(0.82))
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                Text(saved.username)
-                    .font(.system(size: 11))
+                Text(saved.hasCustomName ? saved.hostDisplay : saved.username)
+                    .font(.system(size: 11, design: saved.hasCustomName ? .monospaced : .default))
                     .foregroundStyle(Color.appSecondary.opacity(0.72))
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
             Spacer(minLength: 8)
@@ -661,8 +735,8 @@ struct ConnectView: View {
             return
         }
 
-        if let activeHost = connection.serverHostDisplay {
-            connectionStatus?.serverName = activeHost
+        if let activeName = connection.activeInstanceDisplayName ?? connection.serverHostDisplay {
+            connectionStatus?.serverName = activeName
         }
         connectionStatus?.phase = .connected
         guard !isAutoReconnect else { return }
@@ -852,6 +926,29 @@ struct ConnectView: View {
             pendingAlternateServerURLs = []
         }
         startConnect(auto: false)
+    }
+
+    private func connectToSaved(_ saved: SavedConnection) {
+        pendingSessionNavigationID = nil
+        pendingOpenCodePairingLink = nil
+        currentConnectionMethod = .manual
+        manualURL = saved.serverURL
+        username = saved.username
+        password = saved.password
+        pendingAlternateServerURLs = saved.alternateServerURLs ?? []
+        isAutoReconnect = false
+        focusedManualField = nil
+        connectionStatus = ConnectionSetupStatus(
+            phase: .connecting,
+            serverName: saved.displayName
+        )
+
+        connectionTask?.cancel()
+        connectionTask = Task {
+            await connection.connectSaved(saved, method: .manual)
+            guard !Task.isCancelled else { return }
+            await finishConnectionAttempt()
+        }
     }
 
     private func applySavedServerSuggestion(_ saved: SavedConnection) {
