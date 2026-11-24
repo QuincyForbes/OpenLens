@@ -63,4 +63,117 @@ struct MarkdownTableTests {
         #expect(MarkdownPreview.flattenedBlockSyntax(report) == "Summary **Fixed** the `parser` A · B 1 · 2")
         #expect(MarkdownPreview.plainText(report) == "Summary Fixed the parser A · B 1 · 2")
     }
+
+    @Test func parsesCRLFAndCRLineEndings() throws {
+        let crlf = "| Name | Value |\r\n| --- | ---: |\r\n| alpha | 10 |\r\n| beta | 20 |\r\n"
+        #expect(MarkdownTable.containsTable(crlf))
+        let lines = MarkdownTable.normalizedLines(from: crlf)
+        let parsed = try #require(MarkdownTable.parse(lines: lines, at: 0))
+        #expect(parsed.table.headers == ["Name", "Value"])
+        #expect(parsed.table.alignments == [.leading, .trailing])
+        #expect(parsed.table.rows == [["alpha", "10"], ["beta", "20"]])
+    }
+
+    @Test func splitsMultiBacktickCodeSpansUnclosedBackticksAndEscapedBackslashes() {
+        #expect(MarkdownTable.splitRow("| ``a | b`` | c |") == ["``a | b``", "c"])
+        #expect(MarkdownTable.splitRow("| unclosed `tick | next |") == ["unclosed `tick", "next"])
+        #expect(MarkdownTable.splitRow("| path\\\\ | end |") == ["path\\\\", "end"])
+        #expect(MarkdownTable.splitRow("| a | b\\\\|") == ["a", "b\\\\"])
+        #expect(MarkdownTable.splitRow("| a | b\\|") == ["a", "b|"])
+    }
+
+    @Test func separatesBackToBackTablesAndFollowingBlocksWithPipes() throws {
+        let lines = MarkdownTable.normalizedLines(from: """
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+        | C | D |
+        |---|---|
+        | 3 | 4 |
+        ## Section A | Section B
+        - item X | item Y
+        > quoted a | b
+        """)
+        let first = try #require(MarkdownTable.parse(lines: lines, at: 0))
+        #expect(first.table.headers == ["A", "B"])
+        #expect(first.table.rows == [["1", "2"]])
+        #expect(first.nextIndex == 3)
+
+        let second = try #require(MarkdownTable.parse(lines: lines, at: first.nextIndex))
+        #expect(second.table.headers == ["C", "D"])
+        #expect(second.table.rows == [["3", "4"]])
+        #expect(second.nextIndex == 6)
+    }
+
+    @Test func rejectsHeaderDelimiterColumnCountMismatch() {
+        let lines = ["| A | B |", "|---|---|---|", "| 1 | 2 | 3 |"]
+        #expect(MarkdownTable.parse(lines: lines, at: 0) == nil)
+        #expect(!MarkdownTable.startsTable(lines: lines, at: 0))
+    }
+
+    @Test func ignoresTablesInsideFencedCodeBlocksAndSplitsProseFromTables() {
+        let fenced = """
+        ```markdown
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+        ```
+        """
+        #expect(!MarkdownTable.containsTable(fenced))
+
+        let tildeFenced = """
+        ~~~md
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+        ~~~
+        """
+        #expect(!MarkdownTable.containsTable(tildeFenced))
+
+        let mixed = """
+        Intro text
+
+        | Key | Value |
+        | --- | --- |
+        | a | 1 |
+
+        Outro text
+        """
+        #expect(MarkdownTable.containsTable(mixed))
+        let segments = MarkdownTable.splitTextAndTables(mixed)
+        #expect(segments.count == 3)
+        #expect(segments[0] == .text("Intro text"))
+        #expect(segments[1] == .table(MarkdownTable(headers: ["Key", "Value"], alignments: [.leading, .leading], rows: [["a", "1"]])))
+        #expect(segments[2] == .text("Outro text"))
+    }
+
+    @Test func normalizesMixedCaseLineBreakTags() {
+        #expect(MarkdownTable.normalizeLineBreaks("one<BR>two<br />three<Br/>four") == "one\ntwo\nthree\nfour")
+    }
+
+    @Test func splitsQuotedTableIntoBlockquoteSegment() {
+        let quoted = """
+        Intro
+
+        > Quoted header
+        > | A | B |
+        > |---|---|
+        > | 1 | 2 |
+
+        Outro
+        """
+        #expect(MarkdownTable.containsTable(quoted))
+        let segments = MarkdownTable.splitTextAndTables(quoted)
+        #expect(segments.count == 3)
+        #expect(segments[0] == .text("Intro"))
+        #expect(segments[2] == .text("Outro"))
+        if case let .blockquote(nested) = segments[1] {
+            #expect(nested == [
+                .text("Quoted header"),
+                .table(MarkdownTable(headers: ["A", "B"], alignments: [.leading, .leading], rows: [["1", "2"]]))
+            ])
+        } else {
+            Issue.record("Expected blockquote segment containing nested table")
+        }
+    }
 }

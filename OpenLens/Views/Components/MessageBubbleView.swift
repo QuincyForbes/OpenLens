@@ -291,13 +291,14 @@ struct MessageBubbleView: View {
                 StreamingAssistantTextView(
                     projection: projection,
                     font: isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16),
-                    color: isRetroChat ? RetroChatStyle.ink : Color.appPrimary
+                    color: isRetroChat ? RetroChatStyle.ink : Color.appPrimary,
+                    usesRetroTypography: isRetroChat,
+                    rendersTables: true
                 )
-            } else if message.isStreaming {
-                LinkedPlainText(text: text, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                    .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
-                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
             } else {
+                // Completed text segments (even while subsequent tool calls in
+                // the same assistant turn are still streaming) render full
+                // Markdown and tables immediately instead of raw pipe text.
                 DeferredMarkdownTextView(
                     text: text,
                     foregroundColor: isRetroChat ? RetroChatStyle.ink : Color.appPrimary,
@@ -379,7 +380,9 @@ struct MessageBubbleView: View {
         StreamingAssistantTextView(
             projection: projection,
             font: isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16),
-            color: isRetroChat ? RetroChatStyle.ink : Color.appPrimary
+            color: isRetroChat ? RetroChatStyle.ink : Color.appPrimary,
+            usesRetroTypography: isRetroChat,
+            rendersTables: true
         )
         .padding(.horizontal, showsTranscriptStyleAssistantContent ? 0 : 16)
         .padding(.vertical, showsTranscriptStyleAssistantContent ? 0 : 12)
@@ -424,11 +427,13 @@ struct MessageBubbleView: View {
             }
 
             if let output = step.outputPreview {
-                LinkedPlainText(text: output, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, design: .monospaced))
-                    .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 2)
+                TableAwareTextView(text: output, usesRetroTypography: isRetroChat, spacing: 8) { prose in
+                    LinkedPlainText(text: prose, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, design: .monospaced))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 2)
             }
 
             if let partial = step.partialOutputPreview {
@@ -498,7 +503,7 @@ struct MessageBubbleView: View {
 
                 if canStopChild, let childID = step.childSessionID {
                     Button {
-                        onStopSubagentSession?(childID)
+                        onStopSubagentSession?.callAsFunction(childID)
                     } label: {
                         Image(systemName: "stop.circle.fill")
                             .font(.system(size: 15))
@@ -514,15 +519,24 @@ struct MessageBubbleView: View {
             }
 
             if !step.detail.isEmpty {
-                MarkdownPreviewText(text: step.detail)
-                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12))
-                    .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if MarkdownTable.containsTable(step.detail) {
+                    DeferredMarkdownTextView(
+                        text: step.detail,
+                        foregroundColor: isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary,
+                        usesRetroTypography: isRetroChat
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    MarkdownPreviewText(text: step.detail)
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12))
+                        .foregroundStyle(isRetroChat ? RetroChatStyle.mutedInk : Color.appSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if canOpenThread, let childID = step.childSessionID {
                 Button {
-                    onOpenSubagentSession?(childID)
+                    onOpenSubagentSession?.callAsFunction(childID)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "bubble.left.and.bubble.right")
@@ -815,10 +829,9 @@ private struct DeferredReasoningTextView: View {
     let font: Font
     let color: Color
     let usesRetroTypography: Bool
-    private let fallbackPreview: String
-    private let fallbackIsTruncated: Bool
 
     @State private var prepared: CompletedReasoningTextPreparation?
+    @State private var preparedText: String?
     @State private var visibleChunkCount: Int?
     @State private var requestID = UUID()
 
@@ -827,40 +840,37 @@ private struct DeferredReasoningTextView: View {
         self.font = font
         self.color = color
         self.usesRetroTypography = usesRetroTypography
-
-        let end = text.index(
-            text.startIndex,
-            offsetBy: CompletedReasoningTextPreparation.maximumChunkLength,
-            limitedBy: text.endIndex
-        ) ?? text.endIndex
-        self.fallbackPreview = String(text[..<end])
-        self.fallbackIsTruncated = end != text.endIndex
-        self._prepared = State(
-            initialValue: text.utf8.count <= 4_096
-                ? CompletedReasoningTextPreparation.prepare(text)
-                : nil
-        )
     }
 
     var body: some View {
+        let activePrepared: CompletedReasoningTextPreparation? =
+            (preparedText == text ? prepared : nil)
+            ?? (text.utf8.count <= 4_096 ? CompletedReasoningTextPreparation.prepare(text) : nil)
+
         Group {
-            if let prepared {
-                preparedReasoning(prepared)
+            if let activePrepared {
+                preparedReasoning(activePrepared)
             } else {
                 fallback
             }
         }
         .onAppear {
-            if prepared == nil {
-                requestPreparation(for: text)
-            }
+            syncPreparation(for: text)
         }
         .onChange(of: text) { _, newText in
-            if newText.utf8.count <= 4_096 {
-                prepared = CompletedReasoningTextPreparation.prepare(newText)
-            } else {
-                requestPreparation(for: newText)
-            }
+            syncPreparation(for: newText)
+        }
+    }
+
+    private func syncPreparation(for targetText: String) {
+        if preparedText == targetText, prepared != nil {
+            return
+        }
+        if targetText.utf8.count <= 4_096 {
+            prepared = CompletedReasoningTextPreparation.prepare(targetText)
+            preparedText = targetText
+        } else {
+            requestPreparation(for: targetText)
         }
     }
 
@@ -869,13 +879,36 @@ private struct DeferredReasoningTextView: View {
             visibleChunkCount ?? Self.initialChunkLimit,
             prepared.chunks.count
         )
+        let visibleChunks = prepared.chunks.prefix(shownChunkCount)
+        let hasPipe = visibleChunks.contains { $0.text.utf8.contains(UInt8(ascii: "|")) }
+        let tableAwareText: String?
+        if hasPipe {
+            let combined = visibleChunks.map(\.text).joined()
+            tableAwareText = MarkdownTable.containsTable(combined) ? combined : nil
+        } else {
+            tableAwareText = nil
+        }
 
         return VStack(alignment: .leading, spacing: 0) {
-            ForEach(prepared.chunks.prefix(shownChunkCount)) { chunk in
-                Text(chunk.text)
-                    .font(font)
-                    .foregroundStyle(color)
-                    .fixedSize(horizontal: false, vertical: true)
+            if let tableAwareText {
+                TableAwareTextView(text: tableAwareText, usesRetroTypography: usesRetroTypography, spacing: 8) { prose in
+                    let proseChunks = CompletedReasoningTextPreparation.prepare(prose).chunks
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(proseChunks) { chunk in
+                            Text(chunk.text)
+                                .font(font)
+                                .foregroundStyle(color)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            } else {
+                ForEach(visibleChunks) { chunk in
+                    Text(chunk.text)
+                        .font(font)
+                        .foregroundStyle(color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if shownChunkCount < prepared.chunks.count {
@@ -895,7 +928,15 @@ private struct DeferredReasoningTextView: View {
     }
 
     private var fallback: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let end = text.index(
+            text.startIndex,
+            offsetBy: CompletedReasoningTextPreparation.maximumChunkLength,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+        let fallbackPreview = String(text[..<end])
+        let fallbackIsTruncated = end != text.endIndex
+
+        return VStack(alignment: .leading, spacing: 8) {
             Text(fallbackPreview)
                 .font(font)
                 .foregroundStyle(color)
@@ -913,6 +954,7 @@ private struct DeferredReasoningTextView: View {
         let nextRequestID = UUID()
         requestID = nextRequestID
         prepared = nil
+        preparedText = nil
         visibleChunkCount = nil
 
         Self.preparationQueue.async {
@@ -921,6 +963,7 @@ private struct DeferredReasoningTextView: View {
             DispatchQueue.main.async {
                 guard requestID == nextRequestID else { return }
                 prepared = candidate
+                preparedText = text
             }
         }
     }
@@ -1520,16 +1563,79 @@ private struct WorkingShimmerText: View {
 
 /// Renders sealed streaming chunks as independent stable text nodes. Appending
 /// to a response only changes the small `tail` node rather than laying out the
-/// whole accumulated response again.
+/// whole accumulated response again. When a Markdown table appears in the live
+/// stream, it switches seamlessly to render the table with proper column and row
+/// separation live as rows arrive.
 private struct StreamingAssistantTextView: View {
     let projection: ChatMessage.StreamingTextProjection
     let font: Font
     let color: Color
+    var usesRetroTypography: Bool = false
+    var rendersTables: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SealedStreamingTextChunks(projection: projection, font: font, color: color)
-            StreamingTextTail(projection: projection, font: font, color: color)
+        if rendersTables {
+            StreamingTableAwareTextView(
+                projection: projection,
+                font: font,
+                color: color,
+                usesRetroTypography: usesRetroTypography
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                SealedStreamingTextChunks(projection: projection, font: font, color: color)
+                StreamingTextTail(projection: projection, font: font, color: color)
+            }
+        }
+    }
+}
+
+private struct StreamingTableAwareTextView: View {
+    let projection: ChatMessage.StreamingTextProjection
+    let font: Font
+    let color: Color
+    let usesRetroTypography: Bool
+
+    var body: some View {
+        let liveWindow = projection.liveWindow
+        let tail = projection.tail
+        let hasPipe = tail.utf8.contains(UInt8(ascii: "|"))
+            || liveWindow.sealedChunks.contains(where: { $0.text.utf8.contains(UInt8(ascii: "|")) })
+
+        if hasPipe {
+            let combined = liveWindow.sealedChunks.map(\.text).joined() + tail
+            if MarkdownTable.containsTable(combined) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if liveWindow.omittedSealedChunkCount > 0 {
+                        Text(AppText.streamingEarlierTextHidden(liveWindow.omittedSealedChunkCount))
+                            .font(.system(size: 11))
+                            .foregroundStyle(color.opacity(0.7))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isStaticText)
+                    }
+
+                    TableAwareTextView(
+                        text: combined,
+                        usesRetroTypography: usesRetroTypography,
+                        spacing: 8
+                    ) { prose in
+                        Text(prose)
+                            .font(font)
+                            .foregroundStyle(color)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    SealedStreamingTextChunks(projection: projection, font: font, color: color)
+                    StreamingTextTail(projection: projection, font: font, color: color)
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                SealedStreamingTextChunks(projection: projection, font: font, color: color)
+                StreamingTextTail(projection: projection, font: font, color: color)
+            }
         }
     }
 }
@@ -1602,10 +1708,16 @@ private struct UserMessageBubbleContentView: View {
     var body: some View {
         switch UserMessagePresentation.make(for: text) {
         case .full(let shortText):
-            SkillMentionText(text: shortText, chipStyle: chipStyle)
-                .font(bodyFont)
-                .foregroundStyle(foregroundColor)
-                .macInlineTextSelection()
+            TableAwareTextView(
+                text: shortText,
+                usesRetroTypography: isRetroChat,
+                tableStyle: .embeddedOnAccent
+            ) { prose in
+                SkillMentionText(text: prose, chipStyle: chipStyle)
+                    .font(bodyFont)
+                    .foregroundStyle(foregroundColor)
+                    .macInlineTextSelection()
+            }
 
         case let .collapsible(preview, initialMetrics, canExpandInline):
             let metrics = exactMetrics ?? initialMetrics
@@ -1613,16 +1725,35 @@ private struct UserMessageBubbleContentView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 if isExpandedInline && !inlineChunks.isEmpty {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(inlineChunks) { chunk in
-                            SkillMentionText(text: chunk.text, chipStyle: chipStyle)
-                                .font(bodyFont)
-                                .foregroundStyle(foregroundColor)
-                                .fixedSize(horizontal: false, vertical: true)
+                    if MarkdownTable.containsTable(text) {
+                        TableAwareTextView(
+                            text: text,
+                            usesRetroTypography: isRetroChat,
+                            tableStyle: .embeddedOnAccent
+                        ) { prose in
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(UserMessagePresentation.prepareInlineChunks(prose)) { chunk in
+                                    SkillMentionText(text: chunk.text, chipStyle: chipStyle)
+                                        .font(bodyFont)
+                                        .foregroundStyle(foregroundColor)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .macInlineTextSelection()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                    } else {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(inlineChunks) { chunk in
+                                SkillMentionText(text: chunk.text, chipStyle: chipStyle)
+                                    .font(bodyFont)
+                                    .foregroundStyle(foregroundColor)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .macInlineTextSelection()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .macInlineTextSelection()
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     SkillMentionText(text: preview, chipStyle: chipStyle)
                         .font(bodyFont)

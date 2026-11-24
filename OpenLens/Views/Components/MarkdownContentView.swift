@@ -184,15 +184,29 @@ struct MarkdownContentView: View {
     }
 
     private var markdownImageItems: [ChatImageItem] {
-        prepared.blocks.compactMap { block in
-            guard case let .image(alt, urlString) = block.kind else { return nil }
-            return Self.makeChatImageItem(
-                cacheKey: prepared.cacheKey,
-                blockID: block.id,
-                alt: alt,
-                urlString: urlString
-            )
+        Self.collectImageItems(from: prepared.blocks, cacheKey: prepared.cacheKey)
+    }
+
+    private static func collectImageItems(from blocks: [Block], cacheKey: Int) -> [ChatImageItem] {
+        var items: [ChatImageItem] = []
+        for block in blocks {
+            switch block.kind {
+            case let .image(alt, urlString):
+                if let item = makeChatImageItem(
+                    cacheKey: cacheKey,
+                    blockID: block.id,
+                    alt: alt,
+                    urlString: urlString
+                ) {
+                    items.append(item)
+                }
+            case let .richBlockquote(nested):
+                items.append(contentsOf: collectImageItems(from: nested, cacheKey: cacheKey))
+            default:
+                break
+            }
         }
+        return items
     }
 
     private static func makeChatImageItem(
@@ -234,6 +248,8 @@ struct MarkdownContentView: View {
         case unorderedList([ListFragment])
         case orderedList([ListFragment])
         case blockquote([TextFragment])
+        case richBlockquote([Block])
+        case thematicBreak
         case image(alt: String, urlString: String)
         case table(PreparedTable)
     }
@@ -256,12 +272,9 @@ struct MarkdownContentView: View {
     /// Display text for one cell is bounded; exports keep the full source.
     private static let tableCellDisplayLimit = 1_000
 
-    private static func prepareTable(_ table: MarkdownTable, id: Int) -> PreparedTable {
+    static func prepareTable(_ table: MarkdownTable, id: Int) -> PreparedTable {
         func cell(_ raw: String) -> PreparedTable.Cell {
-            var display = raw
-                .replacingOccurrences(of: "<br/>", with: "\n")
-                .replacingOccurrences(of: "<br />", with: "\n")
-                .replacingOccurrences(of: "<br>", with: "\n")
+            var display = MarkdownTable.normalizeLineBreaks(raw)
             if display.count > tableCellDisplayLimit {
                 display = String(display.prefix(tableCellDisplayLimit)) + "…"
             }
@@ -272,7 +285,7 @@ struct MarkdownContentView: View {
             table: table,
             header: table.headers.map(cell),
             rows: table.rows.map { $0.map(cell) },
-            columnWidths: table.estimatedColumnWidths().map { CGFloat($0) }
+            columnWidths: table.estimatedColumnWidths(horizontalPadding: 28).map { CGFloat($0) }
         )
     }
 
@@ -411,24 +424,24 @@ struct MarkdownContentView: View {
 
     // MARK: - Parser
 
-    private static func parseBlocks(from text: String) -> [Block] {
+    private static func parseBlocks(from text: String, depth: Int = 0) -> [Block] {
         var blocks: [Block] = []
         var nextID = 0
-        let lines = text.components(separatedBy: "\n")
+        let lines = MarkdownTable.normalizedLines(from: text)
         var i = 0
 
         while i < lines.count {
             let line = lines[i]
 
-            if line.hasPrefix("```") {
-                let fenceLength = line.prefix(while: { $0 == "`" }).count
-                let lang = String(line.dropFirst(fenceLength)).trimmingCharacters(in: .whitespaces)
+            if let openingFence = MarkdownTable.parseCodeFence(line) {
+                let lang = openingFence.info
                 var codeLines: [String] = []
                 i += 1
                 while i < lines.count {
-                    let candidateTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
-                    if candidateTrimmed.count >= fenceLength,
-                       candidateTrimmed.allSatisfy({ $0 == "`" }) {
+                    if let closingFence = MarkdownTable.parseCodeFence(lines[i]),
+                       closingFence.marker == openingFence.marker,
+                       closingFence.length >= openingFence.length,
+                       closingFence.info.isEmpty {
                         break
                     }
                     codeLines.append(lines[i])
@@ -443,62 +456,26 @@ struct MarkdownContentView: View {
                 continue
             }
 
-            if line.hasPrefix("#") {
-                let level = line.prefix(while: { $0 == "#" }).count
-                let remainder = line.dropFirst(level)
-                let headingText = String(remainder).trimmingCharacters(in: .whitespaces)
-                if !headingText.isEmpty && level <= 6 && remainder.first?.isWhitespace == true {
-                    // A generated heading can be arbitrarily large. Turn it
-                    // into ordinary bounded blocks while parsing off-main, so
-                    // the first render never asks one Text view to lay out a
-                    // 100 KB line.
-                    for chunk in splitLongParagraph(headingText, maxLength: Self.paragraphChunkSize) {
-                        blocks.append(Block(id: nextID, kind: .heading(level: level, text: chunk)))
-                        nextID += 1
-                    }
-                    i += 1
-                    continue
-                }
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                i += 1
+                continue
             }
 
-            if line == ">" || line.hasPrefix("> ") {
+            if MarkdownTable.stripBlockquotePrefix(line) != nil {
                 var quoteLines: [String] = []
-                while i < lines.count && (lines[i] == ">" || lines[i].hasPrefix("> ")) {
-                    quoteLines.append(lines[i] == ">" ? "" : String(lines[i].dropFirst(2)))
+                while i < lines.count, let stripped = MarkdownTable.stripBlockquotePrefix(lines[i]) {
+                    quoteLines.append(stripped)
                     i += 1
                 }
                 let raw = quoteLines.joined(separator: "\n")
-                let fragments = textFragments(from: raw)
-                blocks.append(Block(id: nextID, kind: .blockquote(fragments)))
-                nextID += 1
-                continue
-            }
-
-            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-                var fragments: [ListFragment] = []
-                while i < lines.count && (lines[i].hasPrefix("- ") || lines[i].hasPrefix("* ") || lines[i].hasPrefix("+ ")) {
-                    let raw = String(lines[i].dropFirst(2))
-                    appendListFragments(raw: raw, marker: "•", to: &fragments)
-                    i += 1
+                if depth < 3, MarkdownTable.containsTable(raw) {
+                    let nested = parseBlocks(from: raw, depth: depth + 1)
+                    blocks.append(Block(id: nextID, kind: .richBlockquote(nested)))
+                } else {
+                    let fragments = textFragments(from: raw)
+                    blocks.append(Block(id: nextID, kind: .blockquote(fragments)))
                 }
-                blocks.append(Block(id: nextID, kind: .unorderedList(fragments)))
                 nextID += 1
-                continue
-            }
-
-            if parseOrderedListItem(line) != nil {
-                var fragments: [ListFragment] = []
-                while i < lines.count, let item = parseOrderedListItem(lines[i]) {
-                    appendListFragments(raw: item.body, marker: "\(item.ordinal).", to: &fragments)
-                    i += 1
-                }
-                blocks.append(Block(id: nextID, kind: .orderedList(fragments)))
-                nextID += 1
-                continue
-            }
-
-            if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                i += 1
                 continue
             }
 
@@ -509,10 +486,59 @@ struct MarkdownContentView: View {
                 continue
             }
 
+            // Parse pipe tables before list/heading checks so tables without
+            // leading pipes whose first header starts with `1. ` or `- ` are
+            // recognized as tables rather than hijacked as lists.
             if let parsedTable = MarkdownTable.parse(lines: lines, at: i) {
                 blocks.append(Block(id: nextID, kind: .table(prepareTable(parsedTable.table, id: nextID))))
                 nextID += 1
                 i = parsedTable.nextIndex
+                continue
+            }
+
+            if MarkdownTable.isThematicBreak(line) {
+                blocks.append(Block(id: nextID, kind: .thematicBreak))
+                nextID += 1
+                i += 1
+                continue
+            }
+
+            if MarkdownTable.isHeadingLine(line) {
+                let trimmedLeading = line.trimmingCharacters(in: .whitespaces)
+                let level = trimmedLeading.prefix(while: { $0 == "#" }).count
+                let headingText = String(trimmedLeading.dropFirst(level)).trimmingCharacters(in: .whitespaces)
+                // A generated heading can be arbitrarily large. Turn it
+                // into ordinary bounded blocks while parsing off-main, so
+                // the first render never asks one Text view to lay out a
+                // 100 KB line.
+                for chunk in splitLongParagraph(headingText, maxLength: Self.paragraphChunkSize) {
+                    blocks.append(Block(id: nextID, kind: .heading(level: level, text: chunk)))
+                    nextID += 1
+                }
+                i += 1
+                continue
+            }
+
+            if MarkdownTable.isUnorderedListLine(line) {
+                var fragments: [ListFragment] = []
+                while i < lines.count && MarkdownTable.isUnorderedListLine(lines[i]) {
+                    let raw = String(lines[i].dropFirst(2))
+                    appendListFragments(raw: raw, marker: "•", to: &fragments)
+                    i += 1
+                }
+                blocks.append(Block(id: nextID, kind: .unorderedList(fragments)))
+                nextID += 1
+                continue
+            }
+
+            if MarkdownTable.parseOrderedListItem(line) != nil {
+                var fragments: [ListFragment] = []
+                while i < lines.count, let item = MarkdownTable.parseOrderedListItem(lines[i]) {
+                    appendListFragments(raw: item.body, marker: "\(item.ordinal).", to: &fragments)
+                    i += 1
+                }
+                blocks.append(Block(id: nextID, kind: .orderedList(fragments)))
+                nextID += 1
                 continue
             }
 
@@ -522,14 +548,12 @@ struct MarkdownContentView: View {
                 let current = lines[i]
                 let trimmed = current.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty
-                    || current.hasPrefix("```")
-                    || isHeadingLine(current)
-                    || current == ">"
-                    || current.hasPrefix("> ")
-                    || current.hasPrefix("- ")
-                    || current.hasPrefix("* ")
-                    || current.hasPrefix("+ ")
-                    || parseOrderedListItem(current) != nil
+                    || MarkdownTable.parseCodeFence(current) != nil
+                    || MarkdownTable.isHeadingLine(current)
+                    || MarkdownTable.stripBlockquotePrefix(current) != nil
+                    || MarkdownTable.isThematicBreak(current)
+                    || MarkdownTable.isUnorderedListLine(current)
+                    || MarkdownTable.parseOrderedListItem(current) != nil
                     || parseStandaloneImageLine(current) != nil
                     || MarkdownTable.startsTable(lines: lines, at: i) {
                     break
@@ -548,15 +572,6 @@ struct MarkdownContentView: View {
         }
 
         return blocks
-    }
-
-    private static func isHeadingLine(_ line: String) -> Bool {
-        guard line.hasPrefix("#") else { return false }
-        let level = line.prefix(while: { $0 == "#" }).count
-        guard level <= 6 else { return false }
-        let remainder = line.dropFirst(level)
-        return remainder.first?.isWhitespace == true
-            && !remainder.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// Parses a standalone Markdown image line `![alt](url)` when the target is an inline
@@ -601,22 +616,6 @@ struct MarkdownContentView: View {
             return (alt, rawDest)
         }
         return nil
-    }
-
-    private static func parseOrderedListItem(_ line: String) -> (ordinal: Int, body: String)? {
-        guard let dot = line.firstIndex(of: ".") else { return nil }
-        let prefix = line[..<dot]
-        guard !prefix.isEmpty,
-              prefix.count <= 3,
-              prefix.allSatisfy({ $0.isASCII && $0.isNumber }),
-              let ordinal = Int(prefix) else {
-            return nil
-        }
-        let afterDot = line[line.index(after: dot)...]
-        guard afterDot.isEmpty || afterDot.first?.isWhitespace == true else {
-            return nil
-        }
-        return (ordinal, afterDot.trimmingCharacters(in: .whitespaces))
     }
 
     private static func textFragments(from text: String) -> [TextFragment] {
@@ -753,6 +752,19 @@ struct MarkdownContentView: View {
                 usesRetroTypography: usesRetroTypography
             )
 
+        case .richBlockquote(let nestedBlocks):
+            MarkdownRichBlockquoteView(
+                blocks: nestedBlocks,
+                cacheKey: prepared.cacheKey,
+                usesRetroTypography: usesRetroTypography
+            )
+
+        case .thematicBreak:
+            Rectangle()
+                .fill(usesRetroTypography ? RetroChatStyle.mutedInk.opacity(0.45) : Color.primary.opacity(0.14))
+                .frame(height: 1)
+                .padding(.vertical, 4)
+
         case .image(let alt, let urlString):
             if let item = Self.makeChatImageItem(
                 cacheKey: prepared.cacheKey,
@@ -779,6 +791,7 @@ struct MarkdownContentView: View {
                 table: table,
                 usesRetroTypography: usesRetroTypography
             )
+            .padding(.vertical, 4)
         }
     }
 
@@ -963,6 +976,30 @@ private struct MarkdownBlockquoteView: View {
     }
 }
 
+/// Blockquotes containing rich block structures (such as Markdown tables) render
+/// their nested blocks inside the quote bar so quoted tables stay interactive.
+private struct MarkdownRichBlockquoteView: View {
+    let blocks: [MarkdownContentView.Block]
+    let cacheKey: Int
+    let usesRetroTypography: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Rectangle()
+                .fill(usesRetroTypography ? RetroChatStyle.mutedInk : Color(.systemGray3))
+                .frame(width: 3)
+
+            MarkdownContentView(
+                prepared: MarkdownContentView.Prepared(cacheKey: cacheKey, blocks: blocks),
+                foregroundColor: usesRetroTypography ? RetroChatStyle.secondaryInk : .secondary,
+                usesRetroTypography: usesRetroTypography
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 10)
+        }
+    }
+}
+
 /// Keeps a single giant fenced block from forcing one unbounded `Text` layout.
 /// It reveals the code in stable, newline-preserving chunks and only joins them
 /// if the person explicitly chooses Copy Code.
@@ -1067,56 +1104,64 @@ struct DeferredMarkdownTextView: View {
     let text: String
     let foregroundColor: Color
     let usesRetroTypography: Bool
-    private let fallbackPreview: String
-    private let fallbackIsTruncated: Bool
 
     @State private var prepared: MarkdownContentView.Prepared?
+    @State private var preparedText: String?
     @State private var requestID = UUID()
 
     init(text: String, foregroundColor: Color, usesRetroTypography: Bool) {
         self.text = text
         self.foregroundColor = foregroundColor
         self.usesRetroTypography = usesRetroTypography
-
-        let end = text.index(
-            text.startIndex,
-            offsetBy: Self.fallbackPreviewLimit,
-            limitedBy: text.endIndex
-        ) ?? text.endIndex
-        self.fallbackPreview = String(text[..<end])
-        self.fallbackIsTruncated = end != text.endIndex
-        self._prepared = State(initialValue: MarkdownContentView.cachedOrImmediatePrepared(for: text))
     }
 
     var body: some View {
+        let activePrepared: MarkdownContentView.Prepared? =
+            (preparedText == text ? prepared : nil)
+            ?? MarkdownContentView.cachedOrImmediatePrepared(for: text)
+
         Group {
-            if let prepared {
+            if let activePrepared {
                 MarkdownContentView(
-                    prepared: prepared,
+                    prepared: activePrepared,
                     foregroundColor: foregroundColor,
                     usesRetroTypography: usesRetroTypography
                 )
-                .id(prepared.cacheKey)
+                .id(activePrepared.cacheKey)
             } else {
                 plainText
             }
         }
         .onAppear {
-            if prepared == nil {
-                requestPreparation(for: text)
-            }
+            syncPreparation(for: text)
         }
         .onChange(of: text) { _, newText in
-            if let immediate = MarkdownContentView.cachedOrImmediatePrepared(for: newText) {
-                prepared = immediate
-            } else {
-                requestPreparation(for: newText)
-            }
+            syncPreparation(for: newText)
+        }
+    }
+
+    private func syncPreparation(for targetText: String) {
+        if preparedText == targetText, prepared != nil {
+            return
+        }
+        if let immediate = MarkdownContentView.cachedOrImmediatePrepared(for: targetText) {
+            prepared = immediate
+            preparedText = targetText
+        } else {
+            requestPreparation(for: targetText)
         }
     }
 
     private var plainText: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let end = text.index(
+            text.startIndex,
+            offsetBy: Self.fallbackPreviewLimit,
+            limitedBy: text.endIndex
+        ) ?? text.endIndex
+        let fallbackPreview = String(text[..<end])
+        let fallbackIsTruncated = end != text.endIndex
+
+        return VStack(alignment: .leading, spacing: 8) {
             Text(fallbackPreview)
                 .font(usesRetroTypography ? RetroChatStyle.bodyFont : .system(size: 17))
                 .foregroundStyle(foregroundColor)
@@ -1133,10 +1178,12 @@ struct DeferredMarkdownTextView: View {
         let nextRequestID = UUID()
         requestID = nextRequestID
         prepared = nil
+        preparedText = nil
 
         MarkdownContentView.prepare(text) { candidate in
             guard requestID == nextRequestID else { return }
             prepared = candidate
+            preparedText = text
         }
     }
 }

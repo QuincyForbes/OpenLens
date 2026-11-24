@@ -17,9 +17,6 @@ struct ChatView: View {
     @Bindable var chatClient: ChatClient
     let initialSession: OCSession?
 
-    @FocusState private var isInputFocused: Bool
-    @GestureState private var isInputBarPressed = false
-
     @Environment(\.scenePhase) private var scenePhase
     @Environment(AppRouter.self) private var router: AppRouter?
     @Environment(\.connection) private var connection
@@ -38,12 +35,9 @@ struct ChatView: View {
     @State private var showMeridianUsage = false
     @State private var showRenameSessionAlert = false
     @State private var renameSessionDraft = ""
-    @State private var showTodoList = false
     @State private var showSubagentThreadsSheet = false
     @State private var showActiveAgentsPopover = false
     @State private var availableSlashActions: [WorkspaceSlashActionItem] = []
-    @State private var selectedSlashAction: WorkspaceSlashActionItem?
-    @State private var attachedSkills: [WorkspaceSkillItem] = []
     @State private var isLoadingCommands = false
     @State private var commandLoadToken = UUID()
     @State private var availableSkills: [WorkspaceSkillItem] = []
@@ -52,36 +46,10 @@ struct ChatView: View {
     @State private var skillLoadToken = UUID()
     @State private var displayedResponseState: ChatResponseState = .idle
     @State private var isComposerExpanded = false
-    @State private var pickedPhotos: [PhotosPickerItem] = []
-    @State private var attachmentSource: ComposerAttachmentSource?
-    @State private var previewedTextFile: PromptTextFileAttachment?
-    @State private var editingPastedSnippet: ComposerPastedSnippet?
+    @State private var composerFocusRequestCount: UInt = 0
     @State private var isOnScreen = false
     @State private var backgroundedAt: Date?
     @State private var isDropTargeted = false
-    @State private var highlightedPickerIndex = 0
-
-    private static let fileImporterContentTypes: [UTType] = [
-        .image,
-        .png,
-        .jpeg,
-        .gif,
-        .webP,
-        .heic,
-        .tiff,
-        .bmp,
-        .plainText,
-        .utf8PlainText,
-        .text,
-        .sourceCode,
-        .json,
-        .xml,
-        .yaml,
-        .shellScript,
-        .propertyList,
-        .commaSeparatedText,
-        .data,
-    ]
 
     private struct ResultViewingContext: Equatable {
         let sessionID: String?
@@ -111,16 +79,12 @@ struct ChatView: View {
     )
 
     var body: some View {
-        let currentContextUsage = chatClient.contextUsageSummary
         withCommandObservers(
             withStateObservers(
                 withInteractionSheets(
                     withAuxiliarySheets(
                         withLifecycleHooks(
-                            withChromeAndComposer(
-                                chatMainStack,
-                                currentContextUsage: currentContextUsage
-                            )
+                            withChromeAndComposer(chatMainStack)
                         )
                     )
                 )
@@ -154,12 +118,26 @@ struct ChatView: View {
             )
             .environment(\.chatSkillIDs, availableSkillIDs)
             .environment(\.chatSessionDirectory, chatClient.sessionDirectory)
-            .environment(\.onOpenSubagentSession, (!chatClient.isOfflinePreviewMode && router != nil) ? { childID in
-                openSessionByID(childID)
-            } : nil)
-            .environment(\.onStopSubagentSession, !chatClient.isOfflinePreviewMode ? { childID in
-                Task { await chatClient.stopSubagent(childSessionID: childID) }
-            } : nil)
+            .environment(
+                \.onOpenSubagentSession,
+                (!chatClient.isOfflinePreviewMode && router != nil) ? SubagentSessionAction(
+                    chatClientID: ObjectIdentifier(chatClient),
+                    routerID: router.map(ObjectIdentifier.init),
+                    sessionsServiceID: ObjectIdentifier(sessionsService),
+                    handler: { childID in
+                        openSessionByID(childID)
+                    }
+                ) : nil
+            )
+            .environment(
+                \.onStopSubagentSession,
+                !chatClient.isOfflinePreviewMode ? SubagentSessionAction(
+                    chatClientID: ObjectIdentifier(chatClient),
+                    handler: { childID in
+                        Task { await chatClient.stopSubagent(childSessionID: childID) }
+                    }
+                ) : nil
+            )
 
             if let attention = pendingAttention {
                 pendingAttentionBanner(attention)
@@ -174,8 +152,13 @@ struct ChatView: View {
                 .ignoresSafeArea()
         }
         .overlay(alignment: .top) {
-            responseStatusOverlay
-                .padding(.top, 8)
+            ChatResponseStatusOverlayView(
+                chatClient: chatClient,
+                displayedResponseState: displayedResponseState,
+                isRetroChat: isRetroChat,
+                onOpenThreadsSheet: { showSubagentThreadsSheet = true }
+            )
+            .padding(.top, 8)
         }
         .overlay {
             dropZoneOverlay
@@ -269,18 +252,17 @@ struct ChatView: View {
     }
 
     private func withChromeAndComposer<Content: View>(
-        _ content: Content,
-        currentContextUsage: ChatClient.ContextUsageSummary?
+        _ content: Content
     ) -> some View {
         content
             .onDrop(of: ComposerItemImporter.supportedContentTypes, isTargeted: $isDropTargeted) { providers in
                 guard !chatClient.isOfflinePreviewMode, chatClient.currentSession != nil else { return false }
-                handleImportedProviders(providers, includePlainText: true)
+                handleDroppedProviders(providers)
                 return true
             }
             .safeAreaInset(edge: .bottom) {
                 if chatClient.showsComposer {
-                    chatComposerInset(contextUsage: currentContextUsage)
+                    chatComposerInset
                         .background {
                             composerInsetBackground
                                 .ignoresSafeArea(edges: .bottom)
@@ -318,7 +300,7 @@ struct ChatView: View {
                     onShowMeridianUsage: {
                         showMeridianUsage = true
                     },
-                    onShowContext: (chatClient.showsActiveContext || currentContextUsage != nil) ? {
+                    onShowContext: (chatClient.showsActiveContext || chatClient.contextUsageSummary != nil) ? {
                         showContextStatus = true
                     } : nil,
                     onRenameSession: (!chatClient.isOfflinePreviewMode && chatClient.currentSession != nil) ? {
@@ -353,28 +335,28 @@ struct ChatView: View {
                         : (chatClient.isOfflinePreviewMode ? 0 : sessionsService.activeSessionCount(excluding: headerSession?.id)),
                     subagentCount: subagents.count,
                     runningSubagentCount: runningSubagents,
-                    activeAgentsPopover: (!chatClient.isOfflinePreviewMode || ScreenshotFixtures.opensActiveAgentsPopover) ? AnyView(
-                        ActiveAgentsPopoverView(
-                            currentSession: ScreenshotFixtures.opensActiveAgentsPopover ? nil : headerSession,
-                            isCurrentSessionGenerating: chatClient.isLoading,
-                            currentActivityLabel: chatClient.currentActivity?.currentLabel,
-                            currentTurnStartDate: chatClient.activeTurnStartDate,
-                            currentSubagents: subagents,
-                            currentShellWatchers: chatClient.activeBackgroundWatchers.filter { $0.kind == .shell },
-                            onSelectSession: { target in
-                                chatClient.prepareForOpeningSession(target)
-                                router?.selectChatSession(target)
-                            },
-                            onSelectSessionID: { targetID in
-                                openSessionByID(targetID)
-                            },
-                            onStopCurrentSession: {
-                                Task { await chatClient.stopAllCurrentSessionAgents() }
-                            }
-                        )
-                    ) : nil,
+                    showsActiveAgentsPopover: !chatClient.isOfflinePreviewMode || ScreenshotFixtures.opensActiveAgentsPopover,
                     isShowingActiveAgentsPopover: $showActiveAgentsPopover
-                )
+                ) {
+                    ActiveAgentsPopoverView(
+                        currentSession: ScreenshotFixtures.opensActiveAgentsPopover ? nil : headerSession,
+                        isCurrentSessionGenerating: chatClient.isLoading,
+                        currentActivityLabel: chatClient.currentActivity?.currentLabel,
+                        currentTurnStartDate: chatClient.activeTurnStartDate,
+                        currentSubagents: chatClient.isOfflinePreviewMode ? [] : chatClient.currentSessionSubagents(),
+                        currentShellWatchers: chatClient.activeBackgroundWatchers.filter { $0.kind == .shell },
+                        onSelectSession: { target in
+                            chatClient.prepareForOpeningSession(target)
+                            router?.selectChatSession(target)
+                        },
+                        onSelectSessionID: { targetID in
+                            openSessionByID(targetID)
+                        },
+                        onStopCurrentSession: {
+                            Task { await chatClient.stopAllCurrentSessionAgents() }
+                        }
+                    )
+                }
             }
     }
 
@@ -385,11 +367,6 @@ struct ChatView: View {
                 displayedResponseState = chatClient.responseState
                 if ScreenshotFixtures.opensActiveContext { showContextStatus = true }
                 if ScreenshotFixtures.opensActiveAgentsPopover { showActiveAgentsPopover = true }
-                #if targetEnvironment(macCatalyst)
-                if (initialSession != nil || chatClient.currentSession != nil), !chatClient.isOfflinePreviewMode {
-                    isInputFocused = true
-                }
-                #endif
             }
             .onDisappear {
                 isOnScreen = false
@@ -406,9 +383,6 @@ struct ChatView: View {
                 }
             }
             .task(id: catalogContextID) {
-                clearSelectedSlashAction()
-                attachedSkills = []
-                attachmentSource = nil
                 availableSlashActions = []
                 availableSkills = []
                 availableSkillIDs = []
@@ -632,25 +606,8 @@ struct ChatView: View {
 
     private func withStateObservers<Content: View>(_ content: Content) -> some View {
         content
-            .onChange(of: chatClient.inputText) { _, newValue in
-                handleComposerTextChange(newValue)
-            }
             .onChange(of: chatClient.responseState) { _, newState in
                 updateDisplayedResponseState(newState)
-            }
-            .onChange(of: isInputFocused) { _, focused in
-                setComposerExpanded(focused)
-            }
-            .onChange(of: chatClient.currentSession?.id) { _, _ in
-                clearSelectedSlashAction()
-                #if targetEnvironment(macCatalyst)
-                if chatClient.currentSession != nil, !chatClient.isOfflinePreviewMode {
-                    isInputFocused = true
-                }
-                #endif
-            }
-            .onChange(of: connection.selectedProjectDirectory) { _, _ in
-                clearSelectedSlashAction()
             }
     }
 
@@ -663,14 +620,6 @@ struct ChatView: View {
             .onChange(of: router?.chooseModelCommandCount) { oldValue, newValue in
                 guard oldValue != nil, newValue != nil, isOnScreen, chatClient.currentSession != nil else { return }
                 showModelPicker = true
-            }
-            .onChange(of: router?.attachFileCommandCount) { oldValue, newValue in
-                guard oldValue != nil, newValue != nil, isOnScreen, chatClient.canAttachFiles else { return }
-                attachmentSource = .files
-            }
-            .onChange(of: router?.pasteClipboardCommandCount) { oldValue, newValue in
-                guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
-                pasteFromGeneralPasteboard()
             }
             .onChange(of: router?.jumpToLatestCommandCount) { oldValue, newValue in
                 guard oldValue != nil, newValue != nil, isOnScreen, chatClient.hasDisplayedMessages else { return }
@@ -776,8 +725,202 @@ struct ChatView: View {
         isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary
     }
 
+    private func updateDisplayedResponseState(_ state: ChatResponseState) {
+        let animation: Animation = state == .idle
+            ? .easeInOut(duration: 0.24)
+            : .spring(response: 0.32, dampingFraction: 0.78)
+
+        withAnimation(animation) {
+            displayedResponseState = state
+        }
+    }
+
     @ViewBuilder
-    private var responseStatusOverlay: some View {
+    private var activityCardSheet: some View {
+        if let activity = chatClient.currentActivity ?? chatClient.lastCompletedActivity {
+            AgentActivityCard(activity: activity)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var modelPickerSheet: some View {
+        ModelPickerView(
+            models: chatClient.availableModels,
+            selectedProviderID: chatClient.selectedProviderID,
+            selectedModelID: chatClient.selectedModelID,
+            isLoading: chatClient.isLoadingProviders,
+            defaultModelSelection: chatClient.defaultModelSelection,
+            recentModelIDs: chatClient.recentModelIDs,
+            quickModelAssignments: chatClient.quickModelAssignments,
+            visualMode: visualMode,
+            onSelect: { model in handleModelPickerSelection(model) },
+            onToggleDefault: { model in handleModelPickerDefaultToggle(model) },
+            onActivateQuickAction: { action in handleQuickActionActivation(action) },
+            onAssignQuickModel: { action, model, variant in
+                handleQuickModelAssignment(action, model: model, variant: variant)
+            },
+            onChangeQuickVariant: { action, variant in
+                handleQuickVariantChange(action, variant: variant)
+            },
+            onClearQuickModel: { action in handleQuickModelClear(action) }
+        )
+        .presentationDetents([.medium])
+    }
+
+    private func handleModelPickerSelection(_ model: ChatClient.SelectableModel) {
+        chatClient.selectModel(model)
+        showModelPicker = false
+    }
+
+    private func handleModelPickerDefaultToggle(_ model: ChatClient.SelectableModel) {
+        chatClient.toggleDefaultModel(model)
+    }
+
+    private func handleQuickActionActivation(_ action: ModelQuickAction) {
+        if chatClient.selectQuickModelAction(action) {
+            showModelPicker = false
+        }
+    }
+
+    private func handleQuickModelAssignment(
+        _ action: ModelQuickAction,
+        model: ChatClient.SelectableModel,
+        variant: String?
+    ) {
+        chatClient.assignQuickModel(model, variant: variant, for: action)
+        showModelPicker = false
+    }
+
+    private func handleQuickVariantChange(_ action: ModelQuickAction, variant: String?) {
+        chatClient.updateQuickModelVariant(for: action, variantID: variant)
+        showModelPicker = false
+    }
+
+    private func handleQuickModelClear(_ action: ModelQuickAction) {
+        chatClient.clearQuickModelAssignment(for: action)
+    }
+
+    private var chatComposerInset: some View {
+        VStack(spacing: 8) {
+            if chatClient.currentSession != nil && chatClient.showsComposer {
+                ChatModelSelectionRowView(
+                    chatClient: chatClient,
+                    visualMode: visualMode,
+                    onShowModelPicker: { showModelPicker = true },
+                    onShowContextStatus: { showContextStatus = true }
+                )
+            }
+            ChatComposerInputView(
+                chatClient: chatClient,
+                visualMode: visualMode,
+                hasInitialSession: initialSession != nil,
+                catalogContextID: catalogContextID,
+                isOnScreen: isOnScreen,
+                focusRequestCount: composerFocusRequestCount,
+                availableSlashActions: availableSlashActions,
+                availableSkills: availableSkills,
+                availableSkillIDs: availableSkillIDs,
+                isLoadingCommands: isLoadingCommands,
+                isLoadingSkills: isLoadingSkills,
+                onLoadCommands: {
+                    Task { await loadCommands(force: true) }
+                },
+                onLoadSkills: {
+                    Task { await loadSkills() }
+                },
+                onSetComposerExpanded: setComposerExpanded
+            )
+        }
+        #if targetEnvironment(macCatalyst)
+        .frame(maxWidth: 920)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity)
+        #else
+        .padding(.horizontal, isComposerExpanded ? 0 : 16)
+        .padding(.bottom, isComposerExpanded ? 12 : 0)
+        .animation(.easeOut(duration: 0.4), value: isComposerExpanded)
+        #endif
+    }
+
+    private func handleDroppedProviders(_ providers: [NSItemProvider]) {
+        guard !providers.isEmpty else { return }
+        Task {
+            let items = await ComposerItemImporter.extractItems(
+                from: providers,
+                includePlainText: true
+            )
+            guard !items.isEmpty else { return }
+            await chatClient.importComposerItems(items)
+            #if targetEnvironment(macCatalyst)
+            composerFocusRequestCount &+= 1
+            #endif
+        }
+    }
+
+    private func setComposerExpanded(_ isExpanded: Bool) {
+        guard isComposerExpanded != isExpanded else { return }
+        withAnimation(.easeOut(duration: 0.4)) {
+            isComposerExpanded = isExpanded
+        }
+    }
+
+    @MainActor
+    private func loadCommands(force: Bool = false) async {
+        guard force || availableSlashActions.isEmpty else { return }
+        guard chatClient.sessionLocationState == .ready, force || !isLoadingCommands else { return }
+        let context = catalogContextID
+        let token = UUID()
+        commandLoadToken = token
+
+        isLoadingCommands = true
+        defer { if commandLoadToken == token { isLoadingCommands = false } }
+        let workspaceSlashActions = await workspaceService.loadSlashActions()
+        guard !Task.isCancelled, context == catalogContextID, commandLoadToken == token else { return }
+        let deduplicatedWorkspaceActions = workspaceSlashActions.filter {
+            $0.token.caseInsensitiveCompare(Self.undoSlashAction.token) != .orderedSame
+        }
+        let slashActions = [Self.undoSlashAction] + deduplicatedWorkspaceActions
+        availableSlashActions = slashActions
+        chatClient.updateSlashCatalog(
+            commands: slashActions.filter { $0.kind == .command }.map(\.token),
+            agents: slashActions.filter { $0.kind == .agent }.map(\.token)
+        )
+    }
+
+    /// Only v2 servers list skills here; older ones include them among the
+    /// slash commands, so the list stays empty and `@` is plain text.
+    @MainActor
+    private func loadSkills(force: Bool = false) async {
+        guard chatClient.sessionLocationState == .ready, force || !isLoadingSkills else { return }
+        let context = catalogContextID
+        let token = UUID()
+        skillLoadToken = token
+
+        isLoadingSkills = true
+        defer { if skillLoadToken == token { isLoadingSkills = false } }
+        let skills = await workspaceService.loadSkills()
+        guard !Task.isCancelled, context == catalogContextID, skillLoadToken == token else { return }
+        let skillIDs = skills.map(\.id)
+        availableSkills = skills
+        availableSkillIDs = skillIDs
+        chatClient.updateSkillCatalog(skillIDs)
+    }
+}
+
+/// Isolated observation subtree for the floating response status & live agents
+/// overlay so `currentActivity`, `activeTurnStartDate`, and watcher updates
+/// never invalidate `ChatView` or the composer while the user is typing.
+private struct ChatResponseStatusOverlayView: View {
+    let chatClient: ChatClient
+    let displayedResponseState: ChatResponseState
+    let isRetroChat: Bool
+    let onOpenThreadsSheet: () -> Void
+
+    private var secondaryTextColor: Color {
+        isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary
+    }
+
+    var body: some View {
         let subagents = chatClient.isOfflinePreviewMode ? [] : chatClient.currentSessionSubagents()
         let runningSubagents = subagents.filter(\.isRunning)
         let shellWatchers = chatClient.activeBackgroundWatchers.filter { $0.kind == .shell }
@@ -821,7 +964,7 @@ struct ChatView: View {
                     isStoppingAll: chatClient.isStoppingSubagents,
                     isRemindArmed: chatClient.isCurrentSessionReminderArmed,
                     isRetroChat: isRetroChat,
-                    onOpenThreadsSheet: { showSubagentThreadsSheet = true },
+                    onOpenThreadsSheet: onOpenThreadsSheet,
                     onStopAll: {
                         Task { await chatClient.stopAllCurrentSessionAgents() }
                     },
@@ -842,13 +985,233 @@ struct ChatView: View {
         }
     }
 
-    private func updateDisplayedResponseState(_ state: ChatResponseState) {
-        let animation: Animation = state == .idle
-            ? .easeInOut(duration: 0.24)
-            : .spring(response: 0.32, dampingFraction: 0.78)
+    private func responseStatusLabel(for state: ChatResponseState) -> String? {
+        switch state {
+        case .idle:
+            nil
+        case .generating:
+            AppText.responseGenerating
+        case .stopping:
+            AppText.responseStopping
+        case .stopped:
+            AppText.responseStopped
+        case .failed:
+            AppText.responseFailed
+        }
+    }
 
-        withAnimation(animation) {
-            displayedResponseState = state
+    private func responseStatusIcon(for state: ChatResponseState) -> String {
+        switch state {
+        case .idle:
+            "circle"
+        case .generating:
+            "sparkles"
+        case .stopping:
+            "stopwatch"
+        case .stopped:
+            "stop.circle"
+        case .failed:
+            "exclamationmark.triangle"
+        }
+    }
+
+    private func responseStatusColor(for state: ChatResponseState) -> Color {
+        switch state {
+        case .idle:
+            secondaryTextColor
+        case .generating:
+            isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent
+        case .stopping:
+            isRetroChat ? RetroChatStyle.danger : Color.orange
+        case .stopped:
+            secondaryTextColor
+        case .failed:
+            isRetroChat ? RetroChatStyle.danger : Color.red
+        }
+    }
+}
+
+/// Isolated observation subtree for the model selector, thinking effort,
+/// reminder, todo chip, and context usage ring above the composer.
+private struct ChatModelSelectionRowView: View {
+    let chatClient: ChatClient
+    let visualMode: ChatVisualMode
+    let onShowModelPicker: () -> Void
+    let onShowContextStatus: () -> Void
+
+    @State private var showTodoList = false
+
+    private enum ModelControlAlignment: AlignmentID {
+        nonisolated static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[VerticalAlignment.center]
+        }
+    }
+
+    private var isRetroChat: Bool {
+        visualMode.isRetro
+    }
+
+    private var primaryTextColor: Color {
+        isRetroChat ? RetroChatStyle.ink : Color.appPrimary
+    }
+
+    private var secondaryTextColor: Color {
+        isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary
+    }
+
+    var body: some View {
+        let contextUsage = chatClient.contextUsageSummary
+
+        HStack(alignment: VerticalAlignment(ModelControlAlignment.self), spacing: 8) {
+            ViewThatFits {
+                HStack(spacing: 6) {
+                    modelSelectorButton
+
+                    if chatClient.showsThinkingEffortPicker {
+                        thinkingEffortMenu
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    modelSelectorButton
+
+                    if chatClient.showsThinkingEffortPicker {
+                        thinkingEffortMenu
+                    }
+                }
+            }
+
+            Spacer()
+            HStack(spacing: 6) {
+                reminderChip
+
+                if !chatClient.todos.isEmpty {
+                    todoChip
+                }
+                if let contextUsage {
+                    Button {
+                        onShowContextStatus()
+                    } label: {
+                        ChatContextUsageRing(summary: contextUsage)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
+                    .accessibilityIdentifier("context-usage")
+                } else if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
+                    Button {
+                        onShowContextStatus()
+                    } label: {
+                        HStack(alignment: .center, spacing: 4) {
+                            Image(systemName: "text.bubble")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Context")
+                                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(secondaryTextColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .chatModeChipChrome(visualMode)
+                    }
+                    .buttonStyle(.plain)
+                    .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
+                    .accessibilityLabel("Inspect active context")
+                    .accessibilityIdentifier("inspect-active-context")
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+    }
+
+    private var reminderChip: some View {
+        let isArmed = chatClient.isCurrentSessionReminderArmed
+        return Button {
+            chatClient.toggleCurrentSessionReminder()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isArmed ? "bell.fill" : "bell")
+                    .font(.system(size: 11, weight: .semibold))
+                if isArmed {
+                    Text("Remind")
+                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                }
+            }
+            .foregroundStyle(isArmed ? Color.appAccent : secondaryTextColor)
+            .padding(.horizontal, isArmed ? 9 : 8)
+            .padding(.vertical, 5)
+            .chatModeChipChrome(visualMode)
+        }
+        .buttonStyle(.plain)
+        .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
+        .accessibilityLabel(isArmed ? "Reminder active for next completion" : "Notify when agent finishes")
+        .accessibilityIdentifier("chat.reminderToggle")
+    }
+
+    private var modelSelectorButton: some View {
+        Button {
+            onShowModelPicker()
+        } label: {
+            HStack(alignment: .center, spacing: 5) {
+                Circle()
+                    .fill(isRetroChat ? RetroChatStyle.magentaAccent : Color.appSecondary.opacity(0.3))
+                    .frame(width: 6, height: 6)
+                Text(chatClient.selectedModelDisplayName)
+                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(secondaryTextColor)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(secondaryTextColor.opacity(0.75))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .chatModeChipChrome(visualMode)
+        }
+        .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
+    }
+
+    private var thinkingEffortMenu: some View {
+        Menu {
+            Button {
+                chatClient.selectVariant(nil)
+            } label: {
+                if chatClient.selectedVariant == nil {
+                    Label(AppText.thinkingDefault, systemImage: "checkmark")
+                } else {
+                    Text(AppText.thinkingDefault)
+                }
+            }
+
+            ForEach(chatClient.availableReasoningVariants) { variant in
+                Button {
+                    chatClient.selectVariant(variant.id)
+                } label: {
+                    if chatClient.selectedVariant == variant.id {
+                        Label(variant.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(variant.displayName)
+                    }
+                }
+            }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Image(systemName: "brain")
+                    .font(.system(size: 11, weight: .medium))
+                Text(chatClient.selectedVariantDisplayName)
+                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(secondaryTextColor.opacity(0.75))
+            }
+            .foregroundStyle(secondaryTextColor)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .chatModeChipChrome(visualMode, usesGlassInStandardMode: false)
         }
     }
 
@@ -946,71 +1309,6 @@ struct ChatView: View {
         }
     }
 
-    @ViewBuilder
-    private var activityCardSheet: some View {
-        if let activity = chatClient.currentActivity ?? chatClient.lastCompletedActivity {
-            AgentActivityCard(activity: activity)
-                .presentationDetents([.medium, .large])
-        }
-    }
-
-    private var modelPickerSheet: some View {
-        ModelPickerView(
-            models: chatClient.availableModels,
-            selectedProviderID: chatClient.selectedProviderID,
-            selectedModelID: chatClient.selectedModelID,
-            isLoading: chatClient.isLoadingProviders,
-            defaultModelSelection: chatClient.defaultModelSelection,
-            recentModelIDs: chatClient.recentModelIDs,
-            quickModelAssignments: chatClient.quickModelAssignments,
-            visualMode: visualMode,
-            onSelect: { model in handleModelPickerSelection(model) },
-            onToggleDefault: { model in handleModelPickerDefaultToggle(model) },
-            onActivateQuickAction: { action in handleQuickActionActivation(action) },
-            onAssignQuickModel: { action, model, variant in
-                handleQuickModelAssignment(action, model: model, variant: variant)
-            },
-            onChangeQuickVariant: { action, variant in
-                handleQuickVariantChange(action, variant: variant)
-            },
-            onClearQuickModel: { action in handleQuickModelClear(action) }
-        )
-        .presentationDetents([.medium])
-    }
-
-    private func handleModelPickerSelection(_ model: ChatClient.SelectableModel) {
-        chatClient.selectModel(model)
-        showModelPicker = false
-    }
-
-    private func handleModelPickerDefaultToggle(_ model: ChatClient.SelectableModel) {
-        chatClient.toggleDefaultModel(model)
-    }
-
-    private func handleQuickActionActivation(_ action: ModelQuickAction) {
-        if chatClient.selectQuickModelAction(action) {
-            showModelPicker = false
-        }
-    }
-
-    private func handleQuickModelAssignment(
-        _ action: ModelQuickAction,
-        model: ChatClient.SelectableModel,
-        variant: String?
-    ) {
-        chatClient.assignQuickModel(model, variant: variant, for: action)
-        showModelPicker = false
-    }
-
-    private func handleQuickVariantChange(_ action: ModelQuickAction, variant: String?) {
-        chatClient.updateQuickModelVariant(for: action, variantID: variant)
-        showModelPicker = false
-    }
-
-    private func handleQuickModelClear(_ action: ModelQuickAction) {
-        chatClient.clearQuickModelAssignment(for: action)
-    }
-
     private func todoColor(for status: String) -> Color {
         switch status {
         case "completed": isRetroChat ? RetroChatStyle.blueAccent : .green
@@ -1019,287 +1317,233 @@ struct ChatView: View {
         default: secondaryTextColor.opacity(0.7)
         }
     }
+}
 
-    private func chatComposerInset(contextUsage: ChatClient.ContextUsageSummary?) -> some View {
-        VStack(spacing: 8) {
-            if chatClient.currentSession != nil && chatClient.showsComposer {
-                modelSelectionRow(contextUsage: contextUsage)
-            }
-            inputBar
-        }
-        #if targetEnvironment(macCatalyst)
-        .frame(maxWidth: 920)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity)
-        #else
-        .padding(.horizontal, isComposerExpanded ? 0 : 16)
-        .padding(.bottom, isComposerExpanded ? 12 : 0)
-        .animation(.easeOut(duration: 0.4), value: isComposerExpanded)
-        #endif
+/// Isolated observation subtree for the chat composer input bar.
+/// Owns all `@FocusState`, slash/skill chip state, and `chatClient.inputText`
+/// observation so keystrokes never invalidate `ChatView`, `ChatHeaderToolbar`,
+/// or `ChatMessagesListView`.
+private struct ChatComposerInputView: View {
+    private static let fileImporterContentTypes: [UTType] = [
+        .image,
+        .png,
+        .jpeg,
+        .gif,
+        .webP,
+        .heic,
+        .tiff,
+        .bmp,
+        .plainText,
+        .utf8PlainText,
+        .text,
+        .sourceCode,
+        .json,
+        .xml,
+        .yaml,
+        .shellScript,
+        .propertyList,
+        .commaSeparatedText,
+        .data,
+    ]
+
+    let chatClient: ChatClient
+    let visualMode: ChatVisualMode
+    let hasInitialSession: Bool
+    let catalogContextID: String
+    let isOnScreen: Bool
+    let focusRequestCount: UInt
+    let availableSlashActions: [WorkspaceSlashActionItem]
+    let availableSkills: [WorkspaceSkillItem]
+    let availableSkillIDs: [String]
+    let isLoadingCommands: Bool
+    let isLoadingSkills: Bool
+    let onLoadCommands: () -> Void
+    let onLoadSkills: () -> Void
+    let onSetComposerExpanded: (Bool) -> Void
+
+    @Environment(AppRouter.self) private var router: AppRouter?
+    @Environment(\.connection) private var connection
+
+    @FocusState private var isInputFocused: Bool
+    @State private var selectedSlashAction: WorkspaceSlashActionItem?
+    @State private var attachedSkills: [WorkspaceSkillItem] = []
+    @State private var pickedPhotos: [PhotosPickerItem] = []
+    @State private var attachmentSource: ComposerAttachmentSource?
+    @State private var previewedTextFile: PromptTextFileAttachment?
+    @State private var editingPastedSnippet: ComposerPastedSnippet?
+    @State private var highlightedPickerIndex = 0
+
+    private var isRetroChat: Bool {
+        visualMode.isRetro
     }
 
-    // MARK: - Model Selector
-
-    private enum ModelControlAlignment: AlignmentID {
-        nonisolated static func defaultValue(in context: ViewDimensions) -> CGFloat {
-            context[VerticalAlignment.center]
-        }
+    private var primaryTextColor: Color {
+        isRetroChat ? RetroChatStyle.ink : Color.appPrimary
     }
 
-    private func modelSelectionRow(contextUsage: ChatClient.ContextUsageSummary?) -> some View {
-        HStack(alignment: VerticalAlignment(ModelControlAlignment.self), spacing: 8) {
-            ViewThatFits {
-                HStack(spacing: 6) {
-                    modelSelectorButton
-
-                    if chatClient.showsThinkingEffortPicker {
-                        thinkingEffortMenu
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    modelSelectorButton
-
-                    if chatClient.showsThinkingEffortPicker {
-                        thinkingEffortMenu
-                    }
-                }
-            }
-
-            Spacer()
-            HStack(spacing: 6) {
-                reminderChip
-
-                if !chatClient.todos.isEmpty {
-                    todoChip
-                }
-                if let contextUsage {
-                    Button {
-                        showContextStatus = true
-                    } label: {
-                        ChatContextUsageRing(summary: contextUsage)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
-                    .accessibilityIdentifier("context-usage")
-                } else if chatClient.showsActiveContext || ScreenshotFixtures.showsActiveContextButton {
-                    Button {
-                        showContextStatus = true
-                    } label: {
-                        HStack(alignment: .center, spacing: 4) {
-                            Image(systemName: "text.bubble")
-                                .font(.system(size: 11, weight: .medium))
-                            Text("Context")
-                                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(secondaryTextColor)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .chatModeChipChrome(visualMode)
-                    }
-                    .buttonStyle(.plain)
-                    .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
-                    .accessibilityLabel("Inspect active context")
-                    .accessibilityIdentifier("inspect-active-context")
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 2)
+    private var secondaryTextColor: Color {
+        isRetroChat ? RetroChatStyle.secondaryInk : Color.appSecondary
     }
 
-    private var reminderChip: some View {
-        let isArmed = chatClient.isCurrentSessionReminderArmed
-        return Button {
-            chatClient.toggleCurrentSessionReminder()
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: isArmed ? "bell.fill" : "bell")
-                    .font(.system(size: 11, weight: .semibold))
-                if isArmed {
-                    Text("Remind")
-                        .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
-                        .lineLimit(1)
-                }
-            }
-            .foregroundStyle(isArmed ? Color.appAccent : secondaryTextColor)
-            .padding(.horizontal, isArmed ? 9 : 8)
-            .padding(.vertical, 5)
-            .chatModeChipChrome(visualMode)
-        }
-        .buttonStyle(.plain)
-        .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
-        .accessibilityLabel(isArmed ? "Reminder active for next completion" : "Notify when agent finishes")
-        .accessibilityIdentifier("chat.reminderToggle")
-    }
+    // MARK: - Body
 
-    private var modelSelectorButton: some View {
-        Button {
-            showModelPicker = true
-        } label: {
-            HStack(alignment: .center, spacing: 5) {
-                Circle()
-                    .fill(isRetroChat ? RetroChatStyle.magentaAccent : Color.appSecondary.opacity(0.3))
-                    .frame(width: 6, height: 6)
-                Text(chatClient.selectedModelDisplayName)
-                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(secondaryTextColor)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(secondaryTextColor.opacity(0.75))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .chatModeChipChrome(visualMode)
-        }
-        .alignmentGuide(VerticalAlignment(ModelControlAlignment.self)) { $0[VerticalAlignment.center] }
-    }
+    var body: some View {
+        let sanitizedInput = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        let hasText = hasComposerText(sanitizedInput: sanitizedInput)
+        let activeSlashQuery = slashQuery(for: sanitizedInput)
+        let showsCommands = selectedSlashAction == nil && activeSlashQuery != nil && chatClient.currentSession != nil
+        let matchingSlashActions = showsCommands ? filteredSlashActions(for: activeSlashQuery) : []
+        let activeSkillQuery = showsCommands ? nil : skillMentionQuery(for: sanitizedInput)
+        let matchingSkills = activeSkillQuery.map { filteredSkills(for: $0) } ?? []
+        let showsSkills = !showsCommands && chatClient.currentSession != nil && !matchingSkills.isEmpty
 
-    private var thinkingEffortMenu: some View {
-        Menu {
-            Button {
-                chatClient.selectVariant(nil)
-            } label: {
-                if chatClient.selectedVariant == nil {
-                    Label(AppText.thinkingDefault, systemImage: "checkmark")
-                } else {
-                    Text(AppText.thinkingDefault)
-                }
-            }
-
-            ForEach(chatClient.availableReasoningVariants) { variant in
-                Button {
-                    chatClient.selectVariant(variant.id)
-                } label: {
-                    if chatClient.selectedVariant == variant.id {
-                        Label(variant.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(variant.displayName)
-                    }
-                }
-            }
-        } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Image(systemName: "brain")
-                    .font(.system(size: 11, weight: .medium))
-                Text(chatClient.selectedVariantDisplayName)
-                    .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(secondaryTextColor.opacity(0.75))
-            }
-            .foregroundStyle(secondaryTextColor)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .chatModeChipChrome(visualMode, usesGlassInStandardMode: false)
-        }
-    }
-
-    // MARK: - Input Bar
-
-    private var inputBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if showsCommandPicker {
-                slashCommandPicker
+        withComposerObservers(
+            VStack(alignment: .leading, spacing: 8) {
+                if showsCommands {
+                    slashCommandPicker(actions: matchingSlashActions)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if showsSkills {
+                    SkillMentionPicker(
+                        skills: matchingSkills,
+                        highlightedIndex: min(highlightedPickerIndex, max(matchingSkills.count - 1, 0)),
+                        visualMode: visualMode,
+                        onSelect: applySkillMention
+                    )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if showsSkillPicker {
-                SkillMentionPicker(
-                    skills: filteredSkills,
-                    highlightedIndex: min(highlightedPickerIndex, max(filteredSkills.count - 1, 0)),
-                    visualMode: visualMode,
-                    onSelect: applySkillMention
-                )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+                }
 
-            if !chatClient.composerPastedSnippets.isEmpty
-                || !chatClient.composerAttachments.isEmpty
-                || chatClient.isPreparingComposerImage {
-                ComposerAttachmentStrip(
-                    pastedSnippets: chatClient.composerPastedSnippets,
-                    attachments: chatClient.composerAttachments,
-                    isPreparing: chatClient.isPreparingComposerImage,
-                    onRemoveSnippet: chatClient.removeComposerPastedSnippet(id:),
-                    onSelectSnippet: { editingPastedSnippet = $0 },
-                    onRemove: chatClient.removeComposerAttachment(id:),
-                    onPreview: { previewedTextFile = $0 }
-                )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+                if !chatClient.composerPastedSnippets.isEmpty
+                    || !chatClient.composerAttachments.isEmpty
+                    || chatClient.isPreparingComposerImage {
+                    ComposerAttachmentStrip(
+                        pastedSnippets: chatClient.composerPastedSnippets,
+                        attachments: chatClient.composerAttachments,
+                        isPreparing: chatClient.isPreparingComposerImage,
+                        onRemoveSnippet: chatClient.removeComposerPastedSnippet(id:),
+                        onSelectSnippet: { editingPastedSnippet = $0 },
+                        onRemove: chatClient.removeComposerAttachment(id:),
+                        onPreview: { previewedTextFile = $0 }
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
 
-            HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
-                    if chatClient.canAttachFiles {
-                        composerAttachMenu
-                    }
-
-                    ComposerTokenLayout(spacing: 6, minimumFieldWidth: 120, lineHeight: 32) {
-                        if let selectedSlashAction {
-                            selectedSlashActionChip(selectedSlashAction)
+                    HStack(alignment: .center, spacing: 8) {
+                        if chatClient.canAttachFiles {
+                            composerAttachMenu
                         }
 
-                        ForEach(attachedSkills) { skill in
-                            attachedSkillChip(skill)
-                                .transition(.scale(scale: 0.8).combined(with: .opacity))
-                        }
+                        ComposerTokenLayout(spacing: 6, minimumFieldWidth: 120, lineHeight: 32) {
+                            if let selectedSlashAction {
+                                selectedSlashActionChip(selectedSlashAction)
+                            }
 
-                        TextField(composerPlaceholder, text: composerInputBinding, axis: .vertical)
-                            .focused($isInputFocused)
-                            .onSubmit {
-                                performComposerAction()
+                            ForEach(attachedSkills) { skill in
+                                attachedSkillChip(skill)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
                             }
-                            .onKeyPress(phases: .down) { keyPress in
-                                handleComposerKeyPress(keyPress)
-                            }
-                            .onTapGesture {
-                                setComposerExpanded(true)
-                            }
-                            .background(
-                                ComposerPasteInterceptor(
-                                    isEnabled: !chatClient.isOfflinePreviewMode && chatClient.currentSession != nil,
-                                    isFocused: isInputFocused,
-                                    onPasteProviders: { providers in
-                                        handleImportedProviders(providers, includePlainText: false)
-                                    }
+
+                            TextField(composerPlaceholder, text: composerInputBinding, axis: .vertical)
+                                .focused($isInputFocused)
+                                .onSubmit {
+                                    performComposerAction()
+                                }
+                                .onKeyPress(phases: .down) { keyPress in
+                                    handleComposerKeyPress(keyPress)
+                                }
+                                .onTapGesture {
+                                    onSetComposerExpanded(true)
+                                }
+                                .background(
+                                    ComposerPasteInterceptor(
+                                        isEnabled: !chatClient.isOfflinePreviewMode && chatClient.currentSession != nil,
+                                        isFocused: isInputFocused,
+                                        onPasteProviders: { providers in
+                                            handleImportedProviders(providers, includePlainText: false)
+                                        }
+                                    )
+                                    .frame(width: 0, height: 0)
                                 )
-                                .frame(width: 0, height: 0)
-                            )
-                            .lineLimit(1 ... 5)
-                            .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
-                            .foregroundStyle(primaryTextColor)
-                            .disabled(chatClient.currentSession == nil)
-                            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-                    }
+                                .lineLimit(1 ... 5)
+                                .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
+                                .foregroundStyle(primaryTextColor)
+                                .disabled(chatClient.currentSession == nil)
+                                .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                        }
 
-                    composerActionButton
-                        .padding(4)
+                        composerActionButton(hasText: hasText)
+                            .padding(4)
+                    }
+                    .padding(.leading, chatClient.canAttachFiles ? 6 : 16)
+                    .padding(.trailing, 4)
+                    .padding(.vertical, 4)
+                    .chatComposerFieldChrome(visualMode)
                 }
-                .padding(.leading, chatClient.canAttachFiles ? 6 : 16)
-                .padding(.trailing, 4)
-                .padding(.vertical, 4)
-                .chatComposerFieldChrome(visualMode)
             }
-        }
-        .padding(.horizontal, 16)
-        .sheet(item: $editingPastedSnippet) { snippet in
-            PastedSnippetEditorSheet(
-                snippet: snippet,
-                onSave: { updated in
-                    chatClient.updateComposerPastedSnippet(id: snippet.id, text: updated)
-                },
-                onExpandIntoField: snippet.canExpandIntoTextField ? {
-                    chatClient.expandComposerPastedSnippetIntoInput(id: snippet.id)
-                } : nil,
-                onRemove: {
-                    chatClient.removeComposerPastedSnippet(id: snippet.id)
+            .padding(.horizontal, 16)
+        )
+    }
+
+    private func withComposerObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onAppear {
+                #if targetEnvironment(macCatalyst)
+                if (hasInitialSession || chatClient.currentSession != nil), !chatClient.isOfflinePreviewMode {
+                    isInputFocused = true
                 }
-            )
-        }
+                #endif
+            }
+            .onChange(of: focusRequestCount) { _, _ in
+                #if targetEnvironment(macCatalyst)
+                if !chatClient.isOfflinePreviewMode {
+                    isInputFocused = true
+                }
+                #endif
+            }
+            .onChange(of: chatClient.inputText) { _, newValue in
+                handleComposerTextChange(newValue)
+            }
+            .onChange(of: isInputFocused) { _, focused in
+                onSetComposerExpanded(focused)
+            }
+            .onChange(of: chatClient.currentSession?.id) { _, _ in
+                clearSelectedSlashAction()
+                #if targetEnvironment(macCatalyst)
+                if chatClient.currentSession != nil, !chatClient.isOfflinePreviewMode {
+                    isInputFocused = true
+                }
+                #endif
+            }
+            .onChange(of: connection.selectedProjectDirectory) { _, _ in
+                clearSelectedSlashAction()
+            }
+            .onChange(of: catalogContextID) { _, _ in
+                clearSelectedSlashAction()
+                attachedSkills = []
+                attachmentSource = nil
+            }
+            .onChange(of: router?.attachFileCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, chatClient.canAttachFiles else { return }
+                attachmentSource = .files
+            }
+            .onChange(of: router?.pasteClipboardCommandCount) { oldValue, newValue in
+                guard oldValue != nil, newValue != nil, isOnScreen, !chatClient.isOfflinePreviewMode else { return }
+                pasteFromGeneralPasteboard()
+            }
+            .sheet(item: $editingPastedSnippet) { snippet in
+                PastedSnippetEditorSheet(
+                    snippet: snippet,
+                    onSave: { updated in
+                        chatClient.updateComposerPastedSnippet(id: snippet.id, text: updated)
+                    },
+                    onExpandIntoField: snippet.canExpandIntoTextField ? {
+                        chatClient.expandComposerPastedSnippetIntoInput(id: snippet.id)
+                    } : nil,
+                    onRemove: {
+                        chatClient.removeComposerPastedSnippet(id: snippet.id)
+                    }
+                )
+            }
     }
 
     private var composerAttachMenu: some View {
@@ -1382,8 +1626,9 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private var composerActionButton: some View {
-        if chatClient.isLoading && hasComposerText {
+    private func composerActionButton(hasText: Bool) -> some View {
+        let isDisabled = isComposerActionDisabled(hasText: hasText)
+        if chatClient.isLoading && hasText {
             Menu {
                 Button(AppText.queuePrompt) {
                     if commitComposerChips() {
@@ -1398,26 +1643,26 @@ struct ChatView: View {
                     }
                 }
             } label: {
-                animatedComposerActionButtonLabel
+                animatedComposerActionButtonLabel(hasText: hasText)
             }
-            .disabled(isComposerActionDisabled)
+            .disabled(isDisabled)
             .accessibilityLabel("Choose prompt delivery")
         } else {
             Button {
                 performComposerAction()
             } label: {
-                animatedComposerActionButtonLabel
+                animatedComposerActionButtonLabel(hasText: hasText)
             }
-            .disabled(isComposerActionDisabled)
+            .disabled(isDisabled)
             #if targetEnvironment(macCatalyst)
-            .help(chatClient.isLoading && !hasComposerText ? "Stop (⌘.)" : "Send (Return) · New line (⇧Return)")
+            .help(chatClient.isLoading && !hasText ? "Stop (⌘.)" : "Send (Return) · New line (⇧Return)")
             #endif
-            .accessibilityLabel(composerActionAccessibilityLabel)
+            .accessibilityLabel(composerActionAccessibilityLabel(hasText: hasText))
         }
     }
 
-    private var animatedComposerActionButtonLabel: some View {
-        composerActionButtonLabel
+    private func animatedComposerActionButtonLabel(hasText: Bool) -> some View {
+        composerActionButtonLabel(hasText: hasText)
             .animation(.spring(duration: 0.25), value: chatClient.isLoading)
             .animation(.spring(duration: 0.25), value: chatClient.isQueueingPrompt)
     }
@@ -1547,7 +1792,7 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private var composerActionButtonLabel: some View {
+    private func composerActionButtonLabel(hasText: Bool) -> some View {
         if chatClient.isQueueingPrompt {
             ZStack {
                 Circle()
@@ -1560,7 +1805,7 @@ struct ChatView: View {
             .frame(width: 32, height: 32)
             .contentShape(Circle())
             .transition(.scale(scale: 0.7).combined(with: .opacity))
-        } else if chatClient.isLoading && !hasComposerText {
+        } else if chatClient.isLoading && !hasText {
             ZStack {
                 Circle()
                     .fill(isRetroChat ? RetroChatStyle.danger : Color.red)
@@ -1592,19 +1837,19 @@ struct ChatView: View {
         }
     }
 
-    private var isComposerActionDisabled: Bool {
+    private func isComposerActionDisabled(hasText: Bool) -> Bool {
         if chatClient.isQueueingPrompt {
             return true
         }
 
-        if hasComposerText {
-            return chatClient.isLoading ? !canQueuePrompt : !canSend
+        if hasText {
+            return chatClient.isLoading ? !canQueuePrompt(hasText: true) : !canSend(hasText: true)
         }
 
         return chatClient.isLoading ? chatClient.isStoppingResponse : true
     }
 
-    private var composerActionAccessibilityLabel: String {
+    private func composerActionAccessibilityLabel(hasText: Bool) -> String {
         if chatClient.isQueueingPrompt {
             return AppText.queuePromptSubmitting
         }
@@ -1614,7 +1859,7 @@ struct ChatView: View {
         }
 
         if chatClient.isLoading {
-            return hasComposerText ? AppText.queuePrompt : "Stop"
+            return hasText ? AppText.queuePrompt : "Stop"
         }
 
         return "Send"
@@ -1671,8 +1916,21 @@ struct ChatView: View {
     }
 
     private func handleComposerKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
-        if showsCommandPicker {
-            let actions = filteredSlashActions
+        // Fast path: normal character typing never needs slash/skill picker
+        // filtering or composer action checks.
+        switch keyPress.key {
+        case .downArrow, .upArrow, .tab, .return, .escape:
+            break
+        default:
+            return .ignored
+        }
+
+        let sanitized = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
+        let activeSlashQuery = slashQuery(for: sanitized)
+        let showsCommands = selectedSlashAction == nil && activeSlashQuery != nil && chatClient.currentSession != nil
+
+        if showsCommands {
+            let actions = filteredSlashActions(for: activeSlashQuery)
             if !actions.isEmpty {
                 switch keyPress.key {
                 case .downArrow:
@@ -1696,8 +1954,9 @@ struct ChatView: View {
                     break
                 }
             }
-        } else if showsSkillPicker {
-            let skills = filteredSkills
+        } else if let activeSkillQuery = skillMentionQuery(for: sanitized),
+                  chatClient.currentSession != nil {
+            let skills = filteredSkills(for: activeSkillQuery)
             if !skills.isEmpty {
                 switch keyPress.key {
                 case .downArrow:
@@ -1729,8 +1988,10 @@ struct ChatView: View {
         }
 
         if keyPress.key == .return {
+            let hasText = hasComposerText(sanitizedInput: sanitized)
+            let isDisabled = isComposerActionDisabled(hasText: hasText)
             if keyPress.modifiers.contains(.command) {
-                if !isComposerActionDisabled, hasComposerText {
+                if !isDisabled, hasText {
                     performComposerAction(keepFocusOnDesktop: true)
                 }
                 return .handled
@@ -1739,7 +2000,7 @@ struct ChatView: View {
             if keyPress.modifiers.contains(.shift) || keyPress.modifiers.contains(.option) {
                 return .ignored
             }
-            if !isComposerActionDisabled, hasComposerText {
+            if !isDisabled, hasText {
                 performComposerAction(keepFocusOnDesktop: true)
             }
             return .handled
@@ -1819,64 +2080,11 @@ struct ChatView: View {
     }
 
     private func collapseComposerFocus() {
-        withAnimation(.easeOut(duration: 0.4)) {
-            isComposerExpanded = false
-            isInputFocused = false
-        }
+        isInputFocused = false
+        onSetComposerExpanded(false)
     }
 
-    private func setComposerExpanded(_ isExpanded: Bool) {
-        withAnimation(.easeOut(duration: 0.4)) {
-            isComposerExpanded = isExpanded
-        }
-    }
-
-    private func responseStatusLabel(for state: ChatResponseState) -> String? {
-        switch state {
-        case .idle:
-            nil
-        case .generating:
-            AppText.responseGenerating
-        case .stopping:
-            AppText.responseStopping
-        case .stopped:
-            AppText.responseStopped
-        case .failed:
-            AppText.responseFailed
-        }
-    }
-
-    private func responseStatusIcon(for state: ChatResponseState) -> String {
-        switch state {
-        case .idle:
-            "circle"
-        case .generating:
-            "sparkles"
-        case .stopping:
-            "stopwatch"
-        case .stopped:
-            "stop.circle"
-        case .failed:
-            "exclamationmark.triangle"
-        }
-    }
-
-    private func responseStatusColor(for state: ChatResponseState) -> Color {
-        switch state {
-        case .idle:
-            secondaryTextColor
-        case .generating:
-            isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent
-        case .stopping:
-            isRetroChat ? RetroChatStyle.danger : Color.orange
-        case .stopped:
-            secondaryTextColor
-        case .failed:
-            isRetroChat ? RetroChatStyle.danger : Color.red
-        }
-    }
-
-    private var slashCommandPicker: some View {
+    private func slashCommandPicker(actions: [WorkspaceSlashActionItem]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if isLoadingCommands {
                 HStack(spacing: 10) {
@@ -1895,7 +2103,7 @@ struct ChatView: View {
                     .foregroundStyle(secondaryTextColor)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 16)
-            } else if filteredSlashActions.isEmpty {
+            } else if actions.isEmpty {
                 Text("No matching slash commands.")
                     .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 14))
                     .foregroundStyle(secondaryTextColor)
@@ -1904,8 +2112,8 @@ struct ChatView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        let currentHighlight = min(highlightedPickerIndex, max(filteredSlashActions.count - 1, 0))
-                        ForEach(Array(filteredSlashActions.enumerated()), id: \.element.id) { index, action in
+                        let currentHighlight = min(highlightedPickerIndex, max(actions.count - 1, 0))
+                        ForEach(Array(actions.enumerated()), id: \.element.id) { index, action in
                             let isHighlighted = index == currentHighlight
                             Button {
                                 applySlashAction(action)
@@ -1952,7 +2160,7 @@ struct ChatView: View {
                             }
                             .buttonStyle(.plain)
 
-                            if index < filteredSlashActions.count - 1 {
+                            if index < actions.count - 1 {
                                 Divider()
                                     .overlay(isRetroChat ? RetroChatStyle.ink.opacity(0.6) : Color.clear)
                                     .padding(.leading, 50)
@@ -1966,8 +2174,8 @@ struct ChatView: View {
         .chatPopoverChrome(visualMode)
     }
 
-    private var canSend: Bool {
-        hasComposerText &&
+    private func canSend(hasText: Bool) -> Bool {
+        hasText &&
             !chatClient.isLoading &&
             !chatClient.isQueueingPrompt &&
             chatClient.currentSession != nil &&
@@ -1975,8 +2183,8 @@ struct ChatView: View {
             chatClient.canCompose
     }
 
-    private var canQueuePrompt: Bool {
-        hasComposerText &&
+    private func canQueuePrompt(hasText: Bool) -> Bool {
+        hasText &&
             chatClient.isLoading &&
             !chatClient.isStoppingResponse &&
             !chatClient.isQueueingPrompt &&
@@ -1986,15 +2194,17 @@ struct ChatView: View {
     }
 
     private var hasComposerText: Bool {
+        hasComposerText(sanitizedInput: ComposerPasteExtractor.sanitizedInput(chatClient.inputText))
+    }
+
+    private func hasComposerText(sanitizedInput: String) -> Bool {
         if !chatClient.composerPastedSnippets.isEmpty
             || !chatClient.composerAttachments.isEmpty
             || selectedSlashAction != nil
             || !attachedSkills.isEmpty {
             return true
         }
-        return BoundedTextInspection.hasNonWhitespace(
-            ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
-        )
+        return BoundedTextInspection.hasNonWhitespace(sanitizedInput)
     }
 
     private var composerSendText: String {
@@ -2008,12 +2218,11 @@ struct ChatView: View {
         )
     }
 
-    private var slashQuery: String? {
+    private func slashQuery(for sanitizedInput: String) -> String? {
         guard selectedSlashAction == nil else { return nil }
-        let text = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
-        guard text.utf8.count <= 256, text.hasPrefix("/") else { return nil }
+        guard sanitizedInput.utf8.count <= 256, sanitizedInput.hasPrefix("/") else { return nil }
 
-        let raw = String(text.dropFirst())
+        let raw = String(sanitizedInput.dropFirst())
         if raw.contains(where: { $0.isWhitespace || $0.isNewline }) {
             return nil
         }
@@ -2021,7 +2230,7 @@ struct ChatView: View {
         return raw
     }
 
-    private var filteredSlashActions: [WorkspaceSlashActionItem] {
+    private func filteredSlashActions(for slashQuery: String?) -> [WorkspaceSlashActionItem] {
         guard let slashQuery else { return [] }
         let query = slashQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return availableSlashActions }
@@ -2033,18 +2242,13 @@ struct ChatView: View {
         }
     }
 
-    private var showsCommandPicker: Bool {
-        selectedSlashAction == nil && slashQuery != nil && chatClient.currentSession != nil
+    private func skillMentionQuery(for sanitizedInput: String) -> String? {
+        guard sanitizedInput.utf8.count <= 2_048,
+              sanitizedInput.utf8.contains(UInt8(ascii: "@")) else { return nil }
+        return SkillMention.activeQuery(in: sanitizedInput)
     }
 
-    private var skillMentionQuery: String? {
-        let text = ComposerPasteExtractor.sanitizedInput(chatClient.inputText)
-        guard text.utf8.count <= 2_048 else { return nil }
-        return SkillMention.activeQuery(in: text)
-    }
-
-    private var filteredSkills: [WorkspaceSkillItem] {
-        guard let skillMentionQuery else { return [] }
+    private func filteredSkills(for skillMentionQuery: String) -> [WorkspaceSkillItem] {
         let unattachedSkills = availableSkills.filter { skill in
             !attachedSkills.contains { $0.id == skill.id }
         }
@@ -2054,54 +2258,6 @@ struct ChatView: View {
             skill.id.localizedCaseInsensitiveContains(skillMentionQuery) ||
                 skill.name.localizedCaseInsensitiveContains(skillMentionQuery)
         }
-    }
-
-    /// Hidden when nothing matches, so an `@` that is not a skill reads as
-    /// plain text instead of an empty picker.
-    private var showsSkillPicker: Bool {
-        chatClient.currentSession != nil && !filteredSkills.isEmpty
-    }
-
-    @MainActor
-    private func loadCommands(force: Bool = false) async {
-        guard force || availableSlashActions.isEmpty else { return }
-        guard chatClient.sessionLocationState == .ready, force || !isLoadingCommands else { return }
-        let context = catalogContextID
-        let token = UUID()
-        commandLoadToken = token
-
-        isLoadingCommands = true
-        defer { if commandLoadToken == token { isLoadingCommands = false } }
-        let workspaceSlashActions = await workspaceService.loadSlashActions()
-        guard !Task.isCancelled, context == catalogContextID, commandLoadToken == token else { return }
-        let deduplicatedWorkspaceActions = workspaceSlashActions.filter {
-            $0.token.caseInsensitiveCompare(Self.undoSlashAction.token) != .orderedSame
-        }
-        let slashActions = [Self.undoSlashAction] + deduplicatedWorkspaceActions
-        availableSlashActions = slashActions
-        chatClient.updateSlashCatalog(
-            commands: slashActions.filter { $0.kind == .command }.map(\.token),
-            agents: slashActions.filter { $0.kind == .agent }.map(\.token)
-        )
-    }
-
-    /// Only v2 servers list skills here; older ones include them among the
-    /// slash commands, so the list stays empty and `@` is plain text.
-    @MainActor
-    private func loadSkills(force: Bool = false) async {
-        guard chatClient.sessionLocationState == .ready, force || !isLoadingSkills else { return }
-        let context = catalogContextID
-        let token = UUID()
-        skillLoadToken = token
-
-        isLoadingSkills = true
-        defer { if skillLoadToken == token { isLoadingSkills = false } }
-        let skills = await workspaceService.loadSkills()
-        guard !Task.isCancelled, context == catalogContextID, skillLoadToken == token else { return }
-        let skillIDs = skills.map(\.id)
-        availableSkills = skills
-        availableSkillIDs = skillIDs
-        chatClient.updateSkillCatalog(skillIDs)
     }
 
     private func applySkillMention(_ skill: WorkspaceSkillItem) {
@@ -2117,7 +2273,9 @@ struct ChatView: View {
     }
 
     private func handleComposerTextChange(_ rawNewValue: String) {
-        highlightedPickerIndex = 0
+        if highlightedPickerIndex != 0 {
+            highlightedPickerIndex = 0
+        }
         let newValue = ComposerPasteExtractor.sanitizedInput(rawNewValue)
         if shouldClearSelectedSlashAction(forComposerText: newValue) {
             clearSelectedSlashAction()
@@ -2125,13 +2283,12 @@ struct ChatView: View {
 
         guard newValue.utf8.count <= 2_048 else { return }
 
-        if SkillMention.activeQuery(in: newValue) == "", availableSkills.isEmpty, !isLoadingSkills {
-            Task {
-                await loadSkills()
+        if newValue.utf8.contains(UInt8(ascii: "@")) {
+            if availableSkills.isEmpty, !isLoadingSkills, SkillMention.activeQuery(in: newValue) == "" {
+                onLoadSkills()
             }
+            convertFinishedSkillMentionsToChips(in: newValue)
         }
-
-        convertFinishedSkillMentionsToChips(in: newValue)
 
         guard selectedSlashAction == nil,
               newValue.hasPrefix("/"),
@@ -2142,16 +2299,14 @@ struct ChatView: View {
             return
         }
 
-        Task {
-            await loadCommands(force: true)
-        }
+        onLoadCommands()
     }
 
     /// Covers mentions typed out in full or put back by the chat client, such
     /// as a prompt restored after a failed queue.
     private func convertFinishedSkillMentionsToChips(in text: String) {
-        guard text.utf8.count <= 2_048 else { return }
-        let extracted = SkillMention.extractingCompletedMentions(from: text, skillIDs: availableSkills.map(\.id))
+        guard !availableSkillIDs.isEmpty, text.utf8.count <= 2_048 else { return }
+        let extracted = SkillMention.extractingCompletedMentions(from: text, skillIDs: availableSkillIDs)
         guard !extracted.skillIDs.isEmpty else { return }
 
         attachSkills(extracted.skillIDs.compactMap { id in availableSkills.first { $0.id == id } })
@@ -2768,21 +2923,75 @@ private extension Array where Element == String {
 /// takes the rest of the final line, or a line of its own when less than
 /// `minimumFieldWidth` is left.
 private struct ComposerTokenLayout: Layout {
+    struct Cache {
+        var width: CGFloat?
+        var frames: [CGRect] = []
+    }
+
     var spacing: CGFloat
     var minimumFieldWidth: CGFloat
     /// The field's single-line height, so chips centre on its first line.
     var lineHeight: CGFloat
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let frames = frames(for: subviews, width: proposal.width)
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache()
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache.width = nil
+        cache.frames.removeAll(keepingCapacity: true)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+
+        // Fast path when no slash/skill chips are attached: avoid array
+        // allocations and redundant TextKit re-measurement on every keystroke.
+        if subviews.count == 1, let field = subviews.first {
+            let finiteWidth = proposal.width.flatMap { $0.isFinite ? $0 : nil }
+            let fieldSize = field.sizeThatFits(ProposedViewSize(width: finiteWidth, height: nil))
+            return CGSize(
+                width: proposal.width ?? fieldSize.width,
+                height: fieldSize.height
+            )
+        }
+
+        let computed = frames(for: subviews, width: proposal.width)
+        cache.width = proposal.width
+        cache.frames = computed
+        var maxX: CGFloat = 0
+        var maxY: CGFloat = 0
+        for frame in computed {
+            if frame.maxX > maxX { maxX = frame.maxX }
+            if frame.maxY > maxY { maxY = frame.maxY }
+        }
         return CGSize(
-            width: proposal.width ?? frames.map(\.maxX).max() ?? 0,
-            height: frames.map(\.maxY).max() ?? 0
+            width: proposal.width ?? maxX,
+            height: maxY
         )
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for (subview, frame) in zip(subviews, frames(for: subviews, width: bounds.width)) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        guard !subviews.isEmpty else { return }
+
+        if subviews.count == 1, let field = subviews.first {
+            field.place(
+                at: bounds.origin,
+                proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+            )
+            return
+        }
+
+        let computed: [CGRect]
+        if cache.width == bounds.width, cache.frames.count == subviews.count {
+            computed = cache.frames
+        } else {
+            computed = frames(for: subviews, width: bounds.width)
+            cache.width = bounds.width
+            cache.frames = computed
+        }
+
+        for (subview, frame) in zip(subviews, computed) {
             subview.place(
                 at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
                 proposal: ProposedViewSize(frame.size)
@@ -2794,6 +3003,7 @@ private struct ComposerTokenLayout: Layout {
         guard let field = subviews.last else { return [] }
         let availableWidth = width ?? .infinity
         var frames: [CGRect] = []
+        frames.reserveCapacity(subviews.count)
         var x: CGFloat = 0
         var rowY: CGFloat = 0
         var rowHeight: CGFloat = 0
@@ -4026,11 +4236,13 @@ private struct QueuedPromptBubbleView: View {
 
         switch presentation {
         case .full(let shortText):
-            SkillMentionText(text: shortText, chipStyle: chipStyle)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel([kindTitle, shortText].compactMap { $0 }.joined(separator: ". "))
-                .font(textFont)
-                .foregroundStyle(textColor)
+            TableAwareTextView(text: shortText, usesRetroTypography: isRetroChat) { prose in
+                SkillMentionText(text: prose, chipStyle: chipStyle)
+                    .font(textFont)
+                    .foregroundStyle(textColor)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([kindTitle, shortText].compactMap { $0 }.joined(separator: ". "))
 
         case let .collapsible(preview, metrics, _):
             VStack(alignment: .leading, spacing: 8) {

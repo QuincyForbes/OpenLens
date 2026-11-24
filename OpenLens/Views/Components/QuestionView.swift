@@ -141,10 +141,20 @@ struct QuestionView: View {
                         .accessibilityAddTraits(.isHeader)
                 }
 
-                Text(question.question)
-                    .font(.system(size: 16))
-                    .fixedSize(horizontal: false, vertical: true)
+                if MarkdownTable.containsTable(question.question) {
+                    DeferredMarkdownTextView(
+                        text: question.question,
+                        foregroundColor: .primary,
+                        usesRetroTypography: false
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel(question.question)
+                } else {
+                    Text(question.question)
+                        .font(.system(size: 16))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(question.question)
+                }
 
                 if question.multiple {
                     Label(AppText.multipleSelection, systemImage: "checkmark.circle")

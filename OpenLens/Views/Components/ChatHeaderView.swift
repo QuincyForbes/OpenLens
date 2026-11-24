@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Navigation bar toolbar content for the chat view.
-struct ChatHeaderToolbar: ToolbarContent {
+struct ChatHeaderToolbar<ActiveAgentsPopover: View>: ToolbarContent {
     let projectName: String?
     let branch: String?
     let connectionState: ConnectionManager.State
@@ -25,8 +25,9 @@ struct ChatHeaderToolbar: ToolbarContent {
     var otherActiveSessionCount: Int = 0
     var subagentCount: Int = 0
     var runningSubagentCount: Int = 0
-    var activeAgentsPopover: AnyView? = nil
+    let showsActiveAgentsPopover: Bool
     @Binding var isShowingActiveAgentsPopover: Bool
+    private let activeAgentsPopover: () -> ActiveAgentsPopover
 
     init(
         projectName: String?,
@@ -52,8 +53,9 @@ struct ChatHeaderToolbar: ToolbarContent {
         otherActiveSessionCount: Int = 0,
         subagentCount: Int = 0,
         runningSubagentCount: Int = 0,
-        activeAgentsPopover: AnyView? = nil,
-        isShowingActiveAgentsPopover: Binding<Bool> = .constant(false)
+        showsActiveAgentsPopover: Bool = false,
+        isShowingActiveAgentsPopover: Binding<Bool> = .constant(false),
+        @ViewBuilder activeAgentsPopover: @escaping () -> ActiveAgentsPopover
     ) {
         self.projectName = projectName
         self.branch = branch
@@ -78,8 +80,9 @@ struct ChatHeaderToolbar: ToolbarContent {
         self.otherActiveSessionCount = otherActiveSessionCount
         self.subagentCount = subagentCount
         self.runningSubagentCount = runningSubagentCount
-        self.activeAgentsPopover = activeAgentsPopover
+        self.showsActiveAgentsPopover = showsActiveAgentsPopover
         self._isShowingActiveAgentsPopover = isShowingActiveAgentsPopover
+        self.activeAgentsPopover = activeAgentsPopover
     }
 
     private var statusColor: Color {
@@ -196,8 +199,8 @@ struct ChatHeaderToolbar: ToolbarContent {
                         .accessibilityLabel("View live agent activity, \(badgeText)")
                         .accessibilityIdentifier("chat.activeAgentsPill")
                         .popover(isPresented: $isShowingActiveAgentsPopover, arrowEdge: .top) {
-                            if let activeAgentsPopover {
-                                activeAgentsPopover
+                            if showsActiveAgentsPopover {
+                                activeAgentsPopover()
                             }
                         }
                     }

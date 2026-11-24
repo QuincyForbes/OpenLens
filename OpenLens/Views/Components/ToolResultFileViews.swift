@@ -156,6 +156,15 @@ struct ToolResultFilePreview: View {
     @Environment(\.dismiss) private var dismiss
     @State private var loadState: LoadState = .loading
 
+    private var isMarkdownFile: Bool {
+        let lowerMIME = file.mime.lowercased()
+        let lowerTitle = file.title.lowercased()
+        return lowerMIME.hasPrefix("text/markdown")
+            || lowerMIME.hasPrefix("text/x-markdown")
+            || lowerTitle.hasSuffix(".md")
+            || lowerTitle.hasSuffix(".markdown")
+    }
+
     var body: some View {
         if file.kind == .image {
             ChatImageViewer(selection: ChatImageGallerySelection(single: ChatImageItem.fromToolResultFile(file)))
@@ -201,12 +210,25 @@ struct ToolResultFilePreview: View {
                 )
             )
         case let .loaded(.text(text)):
-            ScrollView([.vertical, .horizontal]) {
-                Text(AttachmentPreviewText.truncated(text))
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
+            let truncated = AttachmentPreviewText.truncated(text)
+            if isMarkdownFile {
+                ScrollView(.vertical) {
+                    DeferredMarkdownTextView(
+                        text: truncated,
+                        foregroundColor: .primary,
+                        usesRetroTypography: false
+                    )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
+                }
+            } else {
+                ScrollView([.vertical, .horizontal]) {
+                    Text(truncated)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
             }
         case let .loaded(.pdf(data)):
             ToolResultPDFView(data: data)

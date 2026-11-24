@@ -1,8 +1,45 @@
 import SwiftUI
 
+/// Equatable wrapper for subagent session callbacks injected through SwiftUI's
+/// environment. SwiftUI cannot compare raw closures, so passing plain closures
+/// into `.environment(...)` invalidates every visible message bubble whenever
+/// `ChatView.body` re-evaluates.
+struct SubagentSessionAction: Equatable {
+    private struct Token: Equatable {
+        let chatClientID: ObjectIdentifier
+        let routerID: ObjectIdentifier?
+        let sessionsServiceID: ObjectIdentifier?
+    }
+
+    private let token: Token
+    private let handler: (String) -> Void
+
+    init(
+        chatClientID: ObjectIdentifier,
+        routerID: ObjectIdentifier? = nil,
+        sessionsServiceID: ObjectIdentifier? = nil,
+        handler: @escaping (String) -> Void
+    ) {
+        self.token = Token(
+            chatClientID: chatClientID,
+            routerID: routerID,
+            sessionsServiceID: sessionsServiceID
+        )
+        self.handler = handler
+    }
+
+    static func == (lhs: SubagentSessionAction, rhs: SubagentSessionAction) -> Bool {
+        lhs.token == rhs.token
+    }
+
+    func callAsFunction(_ sessionID: String) {
+        handler(sessionID)
+    }
+}
+
 extension EnvironmentValues {
-    @Entry var onOpenSubagentSession: ((String) -> Void)? = nil
-    @Entry var onStopSubagentSession: ((String) -> Void)? = nil
+    @Entry var onOpenSubagentSession: SubagentSessionAction? = nil
+    @Entry var onStopSubagentSession: SubagentSessionAction? = nil
 }
 
 nonisolated enum ElapsedDurationFormatter {

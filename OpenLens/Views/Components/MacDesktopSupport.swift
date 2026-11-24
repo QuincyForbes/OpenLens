@@ -144,8 +144,17 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.isEnabled = isEnabled
         context.coordinator.onPasteProviders = onPasteProviders
-        DispatchQueue.main.async {
-            context.coordinator.installIfNeeded(near: uiView)
+        // Fast path: once attached to a live text input in a window, never
+        // schedule async view-hierarchy traversals on subsequent updates.
+        guard !context.coordinator.isAttached else { return }
+        guard context.coordinator.shouldAttemptInstall(isFocused: isFocused, window: uiView.window) else {
+            return
+        }
+        context.coordinator.recordInstallAttempt(isFocused: isFocused, window: uiView.window)
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { [weak uiView] in
+            guard let uiView else { return }
+            coordinator.installIfNeeded(near: uiView)
         }
     }
 
@@ -175,28 +184,56 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextPasteDelegate {
+        private static let maxDescendantBudget = 64
+
         var isEnabled: Bool
         var onPasteProviders: ([NSItemProvider]) -> Void
 
         private weak var attachedTextView: UITextView?
         private weak var attachedTextField: UITextField?
+        private weak var lastAttemptedWindow: UIWindow?
+        private var lastAttemptedFocus: Bool?
 
         init(isEnabled: Bool, onPasteProviders: @escaping ([NSItemProvider]) -> Void) {
             self.isEnabled = isEnabled
             self.onPasteProviders = onPasteProviders
         }
 
-        func installIfNeeded(near anchorView: UIView) {
+        var isAttached: Bool {
             if let tv = attachedTextView, tv.window != nil, tv.pasteDelegate === self {
-                return
+                return true
             }
             if let tf = attachedTextField, tf.window != nil, tf.pasteDelegate === self {
+                return true
+            }
+            return false
+        }
+
+        func shouldAttemptInstall(isFocused: Bool, window: UIWindow?) -> Bool {
+            guard let window else { return false }
+            return lastAttemptedWindow !== window || lastAttemptedFocus != isFocused
+        }
+
+        func recordInstallAttempt(isFocused: Bool, window: UIWindow?) {
+            lastAttemptedWindow = window
+            lastAttemptedFocus = isFocused
+        }
+
+        func installIfNeeded(near anchorView: UIView) {
+            if isAttached {
                 return
             }
+            lastAttemptedWindow = anchorView.window
             var ancestor: UIView? = anchorView.superview
             var depth = 0
             while let container = ancestor, depth < 5 {
-                if let textView = Self.findDescendant(ofType: UITextView.self, in: container) {
+                var budget = Self.maxDescendantBudget
+                if let textView = Self.findDescendant(
+                    ofType: UITextView.self,
+                    in: container,
+                    isRoot: true,
+                    budget: &budget
+                ) {
                     if attachedTextView !== textView {
                         uninstall()
                         textView.pasteConfiguration = UIPasteConfiguration(
@@ -207,7 +244,13 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
                     }
                     return
                 }
-                if let textField = Self.findDescendant(ofType: UITextField.self, in: container) {
+                budget = Self.maxDescendantBudget
+                if let textField = Self.findDescendant(
+                    ofType: UITextField.self,
+                    in: container,
+                    isRoot: true,
+                    budget: &budget
+                ) {
                     if attachedTextField !== textField {
                         uninstall()
                         textField.pasteConfiguration = UIPasteConfiguration(
@@ -232,6 +275,8 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
             }
             attachedTextView = nil
             attachedTextField = nil
+            lastAttemptedWindow = nil
+            lastAttemptedFocus = nil
         }
 
         func textPasteConfigurationSupporting(
@@ -248,12 +293,24 @@ struct ComposerPasteInterceptor: UIViewRepresentable {
             onPasteProviders([provider])
         }
 
-        private static func findDescendant<T: UIView>(ofType type: T.Type, in root: UIView) -> T? {
+        private static func findDescendant<T: UIView>(
+            ofType type: T.Type,
+            in root: UIView,
+            isRoot: Bool,
+            budget: inout Int
+        ) -> T? {
+            guard budget > 0 else { return nil }
+            budget -= 1
             if let match = root as? T {
                 return match
             }
+            // Never descend into unrelated scroll views (such as the chat
+            // transcript ScrollView) when walking up from the composer field.
+            if !isRoot, root is UIScrollView {
+                return nil
+            }
             for subview in root.subviews {
-                if let match = findDescendant(ofType: type, in: subview) {
+                if let match = findDescendant(ofType: type, in: subview, isRoot: false, budget: &budget) {
                     return match
                 }
             }

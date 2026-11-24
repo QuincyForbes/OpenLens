@@ -33,7 +33,8 @@ nonisolated enum SkillMention {
     /// or nil when the text does not end in a mention. An `@` on its own
     /// returns an empty query.
     static func activeQuery(in text: String) -> String? {
-        guard let at = text.lastIndex(of: "@"),
+        guard text.utf8.contains(UInt8(ascii: "@")),
+              let at = text.lastIndex(of: "@"),
               at == text.startIndex || text[text.index(before: at)].isWhitespace else { return nil }
         let query = text[text.index(after: at)...]
         guard !query.contains(where: \.isWhitespace) else { return nil }
@@ -56,7 +57,7 @@ nonisolated enum SkillMention {
         from text: String,
         skillIDs: some Sequence<String>
     ) -> (text: String, skillIDs: [String]) {
-        guard text.contains("@") else { return (text, []) }
+        guard text.utf8.contains(UInt8(ascii: "@")) else { return (text, []) }
         let catalog = catalog(of: skillIDs)
         guard !catalog.isEmpty else { return (text, []) }
 
@@ -106,7 +107,7 @@ nonisolated enum SkillMention {
         in text: String,
         skillIDs: some Sequence<String>
     ) -> [(id: String, range: Range<String.Index>)] {
-        guard text.contains("@") else { return [] }
+        guard text.utf8.contains(UInt8(ascii: "@")) else { return [] }
         let catalog = catalog(of: skillIDs)
         guard !catalog.isEmpty else { return [] }
 

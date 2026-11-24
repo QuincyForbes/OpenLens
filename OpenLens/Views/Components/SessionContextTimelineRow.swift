@@ -32,9 +32,9 @@ struct SessionContextTimelineRow: View {
                     // scrolling, so copying goes through a menu and a sheet.
                     VStack(alignment: .leading, spacing: 8) {
                         if rendersDetailsAsMarkdown {
-                            // Subagent reports are Markdown (headings, lists,
-                            // tables, code). Details are already bounded and
-                            // the renderer reveals long content incrementally.
+                            // Markdown-bearing context entries (subagent reports,
+                            // compaction summaries, activated skills, system updates)
+                            // render headings, lists, tables, and code incrementally.
                             DeferredMarkdownTextView(
                                 text: entry.details,
                                 foregroundColor: ink,
@@ -42,10 +42,12 @@ struct SessionContextTimelineRow: View {
                             )
                             .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            LinkedPlainText(text: previewInfo.text, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
-                                .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
-                                .foregroundStyle(ink)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            TableAwareTextView(text: previewInfo.text, usesRetroTypography: isRetroChat, spacing: 8) { prose in
+                                LinkedPlainText(text: prose, tint: isRetroChat ? RetroChatStyle.blueAccent : Color.appAccent)
+                                    .font(isRetroChat ? RetroChatStyle.bodyFont : .callout)
+                                    .foregroundStyle(ink)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
 
                         HStack(spacing: 14) {
@@ -157,10 +159,16 @@ struct SessionContextTimelineRow: View {
 
     private var isRetroChat: Bool { chatEasterEgg.visualMode.isRetro }
 
-    /// Subagent results carry the agent's Markdown report; other entries
-    /// (shell output, compaction summaries) stay verbatim plain text.
+    /// Markdown-bearing context entries (subagent reports, session updates,
+    /// compaction summaries, activated skills, and system updates) render as
+    /// Markdown; shell output and short metadata entries stay verbatim.
     private var rendersDetailsAsMarkdown: Bool {
-        entry.kind == .synthetic && entry.subagentResult != nil
+        switch entry.kind {
+        case .synthetic, .compaction, .skill, .system:
+            return true
+        case .model, .agent, .location, .shell, .idle:
+            return false
+        }
     }
     private var ink: Color { isRetroChat ? RetroChatStyle.ink : .primary }
     private var secondaryInk: Color { isRetroChat ? RetroChatStyle.secondaryInk : .primary.opacity(0.65) }

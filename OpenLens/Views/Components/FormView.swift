@@ -101,9 +101,11 @@ struct FormView: View {
                 Text(field.displayTitle)
                     .font(.headline)
                 if let description = field.description?.nilIfBlank {
-                    Text(description)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    TableAwareTextView(text: description, usesRetroTypography: false, spacing: 8) { prose in
+                        Text(prose)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 

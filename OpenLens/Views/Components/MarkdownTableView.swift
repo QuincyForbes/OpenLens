@@ -4,6 +4,73 @@ import UniformTypeIdentifiers
 
 // MARK: - Inline Table Block
 
+enum MarkdownTablePresentationStyle: Equatable {
+    case standard
+    case embeddedOnAccent
+}
+
+/// Renders text with embedded Markdown tables cleanly in contexts that do not
+/// run a full Markdown document pass (user bubbles, streaming text, tool output,
+/// reasoning, queued prompts). When no pipe table is present, it takes a zero-
+/// allocation fast path directly to `prose(text)`.
+struct TableAwareTextView<ProseContent: View>: View {
+    let text: String
+    let usesRetroTypography: Bool
+    var tableStyle: MarkdownTablePresentationStyle = .standard
+    var spacing: CGFloat = 10
+    @ViewBuilder let prose: (String) -> ProseContent
+
+    var body: some View {
+        if MarkdownTable.containsTable(text) {
+            let segments = MarkdownTable.splitTextAndTables(text)
+            VStack(alignment: .leading, spacing: spacing) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { offset, segment in
+                    switch segment {
+                    case .text(let chunk):
+                        prose(chunk)
+                    case .table(let table):
+                        MarkdownTableBlockView(
+                            table: MarkdownContentView.prepareTable(table, id: offset),
+                            usesRetroTypography: usesRetroTypography,
+                            presentationStyle: tableStyle
+                        )
+                    case .blockquote(let nested):
+                        HStack(alignment: .top, spacing: 0) {
+                            Rectangle()
+                                .fill(usesRetroTypography ? RetroChatStyle.mutedInk : Color(.systemGray3))
+                                .frame(width: 3)
+
+                            VStack(alignment: .leading, spacing: spacing) {
+                                ForEach(Array(nested.enumerated()), id: \.offset) { nestedOffset, child in
+                                    switch child {
+                                    case .text(let chunk):
+                                        prose(chunk)
+                                    case .table(let table):
+                                        MarkdownTableBlockView(
+                                            table: MarkdownContentView.prepareTable(
+                                                table,
+                                                id: offset * 1_000 + nestedOffset + 1
+                                            ),
+                                            usesRetroTypography: usesRetroTypography,
+                                            presentationStyle: tableStyle
+                                        )
+                                    case .blockquote:
+                                        EmptyView()
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 10)
+                        }
+                    }
+                }
+            }
+        } else {
+            prose(text)
+        }
+    }
+}
+
 /// A Markdown table inside a chat bubble: a scrollable striped grid with a
 /// header bar for opening the zoomable viewer, copying, and downloading.
 struct MarkdownTableBlockView: View {
@@ -12,14 +79,73 @@ struct MarkdownTableBlockView: View {
 
     let table: MarkdownContentView.PreparedTable
     let usesRetroTypography: Bool
+    var presentationStyle: MarkdownTablePresentationStyle = .standard
 
     @State private var visibleRowCount: Int?
     @State private var isViewerPresented = false
     @State private var export: MarkdownTableExport?
     @State private var confirmation: String?
+    @State private var containerWidth: CGFloat = 0
 
     private var shownRowCount: Int {
         min(visibleRowCount ?? Self.initialRowLimit, table.rows.count)
+    }
+
+    private var cornerRadius: CGFloat {
+        usesRetroTypography ? 6 : 10
+    }
+
+    private var cardBackground: Color {
+        if usesRetroTypography {
+            return RetroChatStyle.paper
+        }
+        switch presentationStyle {
+        case .standard:
+            return Color(.secondarySystemBackground)
+        case .embeddedOnAccent:
+            return Color(.systemBackground)
+        }
+    }
+
+    private var headerBarBackground: Color {
+        if usesRetroTypography {
+            return RetroChatStyle.paperWarm
+        }
+        return Color.primary.opacity(0.04)
+    }
+
+    private var borderColor: Color {
+        if usesRetroTypography {
+            return RetroChatStyle.ink.opacity(0.75)
+        }
+        switch presentationStyle {
+        case .standard:
+            return Color.primary.opacity(0.18)
+        case .embeddedOnAccent:
+            return Color.primary.opacity(0.22)
+        }
+    }
+
+    private var chromeDividerColor: Color {
+        if usesRetroTypography {
+            return RetroChatStyle.ink.opacity(0.45)
+        }
+        return Color.primary.opacity(0.16)
+    }
+
+    private var primaryTextColor: Color {
+        usesRetroTypography ? RetroChatStyle.ink : Color.primary
+    }
+
+    private var secondaryTextColor: Color {
+        usesRetroTypography ? RetroChatStyle.secondaryInk : Color.secondary
+    }
+
+    private var actionPillFill: Color {
+        if usesRetroTypography {
+            return RetroChatStyle.paper.opacity(0.9)
+        }
+        return Color(.systemGray5).opacity(0.85)
     }
 
     var body: some View {
@@ -27,40 +153,52 @@ struct MarkdownTableBlockView: View {
             headerBar
 
             Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 0.5)
+                .fill(chromeDividerColor)
+                .frame(height: 1)
 
             ScrollView(.horizontal, showsIndicators: true) {
                 MarkdownTableGrid(
                     table: table,
                     rowLimit: shownRowCount,
                     zoom: 1,
-                    usesRetroTypography: usesRetroTypography
+                    usesRetroTypography: usesRetroTypography,
+                    minimumTotalWidth: containerWidth
                 )
-            }
-            .onTapGesture(count: 2) {
-                isViewerPresented = true
             }
 
             if shownRowCount < table.rows.count {
+                Rectangle()
+                    .fill(chromeDividerColor)
+                    .frame(height: 1)
+
                 Button {
                     visibleRowCount = min(shownRowCount + Self.expandStep, table.rows.count)
                 } label: {
                     Text(AppText.tableShowMoreRows(table.rows.count - shownRowCount))
                         .font(usesRetroTypography ? RetroChatStyle.smallFont : .system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(secondaryTextColor)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
+        .foregroundStyle(primaryTextColor)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { newWidth in
+            if abs(containerWidth - newWidth) > 0.5 {
+                containerWidth = newWidth
+            }
+        }
+        .background(cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(borderColor, lineWidth: usesRetroTypography ? 1.5 : 1)
         }
         .adaptiveTableViewerPresentation(isPresented: $isViewerPresented, table: table)
         .markdownTableExporter($export)
@@ -80,7 +218,7 @@ struct MarkdownTableBlockView: View {
                         .font(usesRetroTypography ? RetroChatStyle.smallFont : .system(size: 11, weight: .semibold, design: .rounded))
                         .lineLimit(1)
                 }
-                .foregroundStyle(confirmation == nil ? Color.secondary : Color.green)
+                .foregroundStyle(confirmation == nil ? secondaryTextColor : Color.green)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -96,9 +234,9 @@ struct MarkdownTableBlockView: View {
             } label: {
                 Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(secondaryTextColor)
                     .frame(width: 26, height: 22)
-                    .background(Color(.systemGray5).opacity(0.8), in: Capsule())
+                    .background(actionPillFill, in: Capsule())
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
@@ -109,16 +247,17 @@ struct MarkdownTableBlockView: View {
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(secondaryTextColor)
                     .frame(width: 26, height: 22)
-                    .background(Color(.systemGray5).opacity(0.8), in: Capsule())
+                    .background(actionPillFill, in: Capsule())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(AppText.tableOpen)
             .help(AppText.tableOpen)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
+        .background(headerBarBackground)
     }
 
     private func showConfirmation(_ message: String) {
@@ -140,38 +279,82 @@ struct MarkdownTableGrid: View {
     let zoom: CGFloat
     let usesRetroTypography: Bool
     var lazyRows = false
+    var minimumTotalWidth: CGFloat = 0
 
-    private var horizontalPadding: CGFloat { 10 * zoom }
-    private var verticalPadding: CGFloat { 7 * zoom }
-    private var widths: [CGFloat] { table.columnWidths.map { $0 * zoom } }
+    private var horizontalPadding: CGFloat { 12 * zoom }
+    private var verticalPadding: CGFloat { 9 * zoom }
+
+    private var visibleRowCount: Int {
+        min(rowLimit, table.rows.count)
+    }
+
+    private var resolvedWidths: [CGFloat] {
+        let baseWidths = table.columnWidths.map { $0 * zoom }
+        guard !baseWidths.isEmpty else { return [] }
+        let totalBase = baseWidths.reduce(0, +)
+        guard minimumTotalWidth > totalBase, totalBase > 0 else {
+            return baseWidths
+        }
+        let scale = minimumTotalWidth / totalBase
+        var scaled = baseWidths.map { ($0 * scale).rounded(.down) }
+        let remainder = minimumTotalWidth - scaled.reduce(0, +)
+        scaled[scaled.count - 1] += remainder
+        return scaled
+    }
+
+    private var headerDividerColor: Color {
+        usesRetroTypography ? RetroChatStyle.ink.opacity(0.65) : Color.primary.opacity(0.24)
+    }
+
+    private var columnDividerColor: Color {
+        usesRetroTypography ? RetroChatStyle.ink.opacity(0.35) : Color.primary.opacity(0.15)
+    }
+
+    private var rowDividerColor: Color {
+        usesRetroTypography ? RetroChatStyle.ink.opacity(0.28) : Color.primary.opacity(0.12)
+    }
 
     var body: some View {
-        let widths = widths
+        let widths = resolvedWidths
+        let totalWidth = widths.reduce(0, +)
         VStack(alignment: .leading, spacing: 0) {
-            row(table.header, index: -1, widths: widths)
+            row(table.header, index: -1, widths: widths, showsBottomDivider: false)
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.18))
-                .frame(width: widths.reduce(0, +), height: 1)
+            if visibleRowCount > 0 {
+                Rectangle()
+                    .fill(headerDividerColor)
+                    .frame(width: totalWidth, height: 1.5)
 
-            if lazyRows {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                if lazyRows {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        bodyRows(widths: widths)
+                    }
+                } else {
                     bodyRows(widths: widths)
                 }
-            } else {
-                bodyRows(widths: widths)
             }
         }
     }
 
     @ViewBuilder
     private func bodyRows(widths: [CGFloat]) -> some View {
-        ForEach(0..<min(rowLimit, table.rows.count), id: \.self) { index in
-            row(table.rows[index], index: index, widths: widths)
+        let count = visibleRowCount
+        ForEach(0..<count, id: \.self) { index in
+            row(
+                table.rows[index],
+                index: index,
+                widths: widths,
+                showsBottomDivider: index < count - 1
+            )
         }
     }
 
-    private func row(_ cells: [MarkdownContentView.PreparedTable.Cell], index: Int, widths: [CGFloat]) -> some View {
+    private func row(
+        _ cells: [MarkdownContentView.PreparedTable.Cell],
+        index: Int,
+        widths: [CGFloat],
+        showsBottomDivider: Bool
+    ) -> some View {
         let isHeader = index < 0
         return HStack(alignment: .top, spacing: 0) {
             ForEach(0..<widths.count, id: \.self) { column in
@@ -188,10 +371,10 @@ struct MarkdownTableGrid: View {
         }
         .background(rowFill(index))
         .overlay(alignment: .bottom) {
-            if !isHeader {
+            if showsBottomDivider {
                 Rectangle()
-                    .fill(Color.primary.opacity(0.06))
-                    .frame(height: 0.5)
+                    .fill(rowDividerColor)
+                    .frame(height: 1)
             }
         }
     }
@@ -208,6 +391,7 @@ struct MarkdownTableGrid: View {
         .font(cellFont(isHeader: isHeader))
         .foregroundStyle(usesRetroTypography ? RetroChatStyle.ink : Color.primary)
         .tint(usesRetroTypography ? RetroChatStyle.blueAccent : Color.appAccent)
+        .macInlineTextSelection()
     }
 
     private func cellFont(isHeader: Bool) -> Font {
@@ -225,8 +409,8 @@ struct MarkdownTableGrid: View {
                     .overlay(alignment: .trailing) {
                         if column < widths.count - 1 {
                             Rectangle()
-                                .fill(Color.primary.opacity(0.06))
-                                .frame(width: 0.5)
+                                .fill(columnDividerColor)
+                                .frame(width: 1)
                         }
                     }
             }
@@ -234,8 +418,12 @@ struct MarkdownTableGrid: View {
     }
 
     private func rowFill(_ index: Int) -> Color {
-        if index < 0 { return Color.primary.opacity(0.06) }
-        return index.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.025)
+        if usesRetroTypography {
+            if index < 0 { return RetroChatStyle.playerFill.opacity(0.35) }
+            return index.isMultiple(of: 2) ? RetroChatStyle.paper : RetroChatStyle.paperWarm.opacity(0.55)
+        }
+        if index < 0 { return Color.primary.opacity(0.08) }
+        return index.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.035)
     }
 
     private func frameAlignment(_ column: Int) -> Alignment {
@@ -346,10 +534,10 @@ struct MarkdownTableViewer: View {
                         lazyRows: true
                     )
                     .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color.primary.opacity(0.1), lineWidth: 0.75)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.primary.opacity(0.18), lineWidth: 1)
                     }
                     .textSelection(.enabled)
                 }

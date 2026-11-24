@@ -102,6 +102,75 @@ struct MarkdownContentViewTests {
     }
 
     @MainActor
+    @Test func tableInsideBlockquoteIsPreparedAsRichBlockquote() async {
+        let prepared = await prepareMarkdown("""
+        > Summary:
+        > | Key | Value |
+        > | --- | ---: |
+        > | CPU | 42% |
+        """)
+        #expect(prepared.blocks.count == 1)
+        guard case let .richBlockquote(nested) = prepared.blocks.first?.kind else {
+            Issue.record("Expected a richBlockquote containing a table")
+            return
+        }
+        #expect(nested.count == 2)
+        guard case let .table(table) = nested[1].kind else {
+            Issue.record("Expected a nested table inside blockquote")
+            return
+        }
+        #expect(table.table.headers == ["Key", "Value"])
+        #expect(table.table.alignments == [.leading, .trailing])
+        #expect(table.table.rows == [["CPU", "42%"]])
+    }
+
+    @MainActor
+    @Test func backToBackTablesAndCRLFAndThematicBreakSeparateCleanly() async {
+        let markdown = "| A | B |\r\n| --- | --- |\r\n| 1 | 2 |\r\n| C | D |\r\n| --- | --- |\r\n| 3 | 4 |\r\n---\r\n## Next | Section"
+        let prepared = await prepareMarkdown(markdown)
+        #expect(prepared.blocks.count == 4)
+        if case let .table(first) = prepared.blocks[0].kind {
+            #expect(first.table.headers == ["A", "B"])
+            #expect(first.table.rows == [["1", "2"]])
+        } else {
+            Issue.record("Expected first table")
+        }
+        if case let .table(second) = prepared.blocks[1].kind {
+            #expect(second.table.headers == ["C", "D"])
+            #expect(second.table.rows == [["3", "4"]])
+        } else {
+            Issue.record("Expected second table")
+        }
+        if case .thematicBreak = prepared.blocks[2].kind {
+            // ok
+        } else {
+            Issue.record("Expected thematic break")
+        }
+        if case let .heading(level, text) = prepared.blocks[3].kind {
+            #expect(level == 2)
+            #expect(text == "Next | Section")
+        } else {
+            Issue.record("Expected trailing heading")
+        }
+    }
+
+    @MainActor
+    @Test func pipeTableStartingWithListMarkerWithoutOuterPipesParsesAsTable() async {
+        let prepared = await prepareMarkdown("""
+        1. Step | Status
+        --- | ---
+        Build | Pass
+        """)
+        #expect(prepared.blocks.count == 1)
+        guard case let .table(table) = prepared.blocks.first?.kind else {
+            Issue.record("Expected table instead of ordered list")
+            return
+        }
+        #expect(table.table.headers == ["1. Step", "Status"])
+        #expect(table.table.rows == [["Build", "Pass"]])
+    }
+
+    @MainActor
     private func prepareMarkdown(_ text: String) async -> MarkdownContentView.Prepared {
         await withCheckedContinuation { continuation in
             MarkdownContentView.prepare(text) { prepared in
